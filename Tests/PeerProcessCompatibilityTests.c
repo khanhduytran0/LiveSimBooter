@@ -27,8 +27,16 @@ int LSBTestSandboxOriginal(pid_t pid, const char *operation, int type, ...);
 
 static int *testErrnoLocation(void) { ++policyErrnoReads; return __error(); }
 
+static bool inspectionHandled;
+static unsigned inspectionCalls;
 bool LSBInspectionPIDPath(int pid, void *buffer, uint32_t size, int *result) {
-    (void)pid; (void)buffer; (void)size; (void)result; return false;
+    if (!inspectionHandled) return false;
+    ++inspectionCalls;
+    const char path[] = "/private/Group/RuntimeRoot/Applications/CocoaTop.app/CocoaTop";
+    assert(pid == 404 && size >= sizeof(path));
+    memcpy(buffer, path, sizeof(path));
+    *result = sizeof(path) - 1;
+    return true;
 }
 
 const int SANDBOX_CHECK_NO_REPORT = 0x100000;
@@ -370,6 +378,13 @@ static void testLaunchdIdentityAndTermination(void) {
 
 static void testPaths(void) {
     char output[256];
+    inspectionHandled = true;
+    unsigned nativeBefore = nativePathCalls, queriesBefore = queries;
+    errno = EDOM;
+    assert(peerPIDPath(0x999, 404, output, sizeof(output)) == (int)strlen(output));
+    assert(!strcmp(output, "/private/Group/RuntimeRoot/Applications/CocoaTop.app/CocoaTop") && inspectionCalls == 1 && errno == EDOM);
+    assert(nativePathCalls == nativeBefore && queries == queriesBefore); // Authorized inspector paths bypass RBS scope without widening it.
+    inspectionHandled = false;
     assert(peerPIDPath(0x999, 202, output, sizeof(output)) == 9 && !strcmp(output, "/host/app"));
     unsigned before = queries;
     assert(peerPIDPath(0x1000, 101, output, sizeof(output)) == 9 && queries == before);

@@ -4,6 +4,7 @@
 #include <sys/sysctl.h>
 #include <sys/resource.h>
 #include <mach/mach.h>
+#include <unistd.h>
 static int testSysctl(int *, u_int, void *, size_t *, void *, size_t);
 static int testRusage(int, int, rusage_info_t *);
 static kern_return_t testTaskForPID(mach_port_name_t, int, mach_port_name_t *);
@@ -87,6 +88,17 @@ static void testValidation(void) {
 
 int main(void) {
     testValidation(); listCalls = 0;
+    char temporary[] = "/tmp/LSBInspection.XXXXXX", canonical[PATH_MAX], physicalDF[PATH_MAX];
+    assert(mkdtemp(temporary) && realpath(temporary, canonical));
+    assert(configureInspectionRoot(NULL) == ENOENT && !inspectionRuntimeRoot[0]);
+    assert(configureInspectionRoot("relative") == EINVAL && !inspectionRuntimeRoot[0]);
+    assert(configureInspectionRoot("/") == EINVAL && !inspectionRuntimeRoot[0]);
+    assert(configureInspectionRoot("/dev/null") == ENOTDIR && !inspectionRuntimeRoot[0]);
+    assert(configureInspectionRoot("/nonexistent-LSB-runtime") == ENOENT && !inspectionRuntimeRoot[0]);
+    inspectionRootError = configureInspectionRoot(temporary);
+    assert(!inspectionRootError && !strcmp(inspectionRuntimeRoot, canonical)); // Resolve the /tmp alias once, after guest TLS is available.
+    assert(snprintf(physicalDF, sizeof(physicalDF), "%s/bin/df", canonical) > 0);
+    int physicalLength = (int)strlen(physicalDF);
     int maximum[] = {CTL_KERN, KERN_MAXPROC}, all[] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
     int value = 0; size_t length = sizeof(value);
     nativeError = EBUSY;
@@ -100,7 +112,9 @@ int main(void) {
     assert(inspectionSysctl(maximum, 2, &value, &length, NULL, 0) == -1 && errno == EPERM && nativeCalls == 1);
     assert(inspectionSysctl(all, 4, NULL, &length, NULL, 0) == -1 && errno == EPERM && nativeCalls == 1);
     int pathResult; char path[128];
+    errno = ERANGE;
     assert(!LSBInspectionPIDPath(21, path, sizeof(path), &pathResult));
+    assert(errno == ERANGE && !LSBInspectionPIDPath(21, (void *)1, 1, (int *)1));
     listError = 0; errno = EDOM;
     assert(!inspectionSysctl(maximum, 2, &value, &length, NULL, 0) && value == LSB_PROCESS_LIST_CAPACITY && errno == EDOM);
     length = 0;
@@ -124,10 +138,27 @@ int main(void) {
     value = 0x12345678; length = 1;
     assert(inspectionSysctl(maximum, 2, &value, &length, NULL, 0) == -1 && errno == ENOMEM && !length && value == 0x12345678);
     assert(inspectionSysctl(all, 4, info, (size_t *)1, NULL, 0) == -1 && errno == EFAULT);
-    assert(LSBInspectionPIDPath(22, path, sizeof(path), &pathResult) && pathResult == 7 && !strcmp(path, "/bin/df"));
+    errno = EDOM;
+    assert(LSBInspectionPIDPath(22, path, sizeof(path), &pathResult) && pathResult == physicalLength && !strcmp(path, physicalDF) && errno == EDOM);
+    assert(!strcmp(processSnapshot->records[1].executablePath, "/bin/df")); // API projection must not mutate the authenticated identity snapshot.
+    memset(path, 0xa5, sizeof(path));
+    assert(LSBInspectionPIDPath(22, path, (uint32_t)physicalLength, &pathResult) && !pathResult && errno == ENOSPC);
+    for (size_t i = 0; i < sizeof(path); ++i) assert((unsigned char)path[i] == 0xa5);
+    assert(LSBInspectionPIDPath(22, path, (uint32_t)physicalLength + 1, &pathResult) && pathResult == physicalLength && !strcmp(path, physicalDF));
+    assert((unsigned char)path[physicalLength + 1] == 0xa5);
     assert(LSBInspectionPIDPath(22, path, 3, &pathResult) && !pathResult && errno == ENOSPC);
     assert(LSBInspectionPIDPath(999, path, sizeof(path), &pathResult) && !pathResult && errno == ESRCH);
     assert(LSBInspectionPIDPath(22, (void *)1, sizeof(path), &pathResult) && !pathResult && errno == EFAULT);
+    assert(LSBInspectionPIDPath(22, NULL, sizeof(path), &pathResult) && !pathResult && errno == EFAULT);
+    inspectionRootError = configureInspectionRoot(NULL);
+    assert(LSBInspectionPIDPath(22, path, sizeof(path), &pathResult) && !pathResult && errno == ENOENT);
+    inspectionRootError = 0;
+    memset(inspectionRuntimeRoot, 'a', sizeof(inspectionRuntimeRoot));
+    inspectionRuntimeRoot[0] = '/'; inspectionRuntimeRoot[sizeof(inspectionRuntimeRoot) - 1] = '\0';
+    memset(path, 0xa5, sizeof(path));
+    assert(LSBInspectionPIDPath(22, path, sizeof(path), &pathResult) && !pathResult && errno == ENAMETOOLONG && (unsigned char)path[0] == 0xa5);
+    inspectionRootError = configureInspectionRoot(temporary);
+    assert(!inspectionRootError);
     unsigned calls = listCalls;
     int self[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, 21};
     nativeError = 0;
@@ -167,7 +198,7 @@ int main(void) {
     assert(inspectionSysctl(arguments, 3, info, &length, NULL, 0) == -1 && errno == ENOTSUP && nativeCalls == forwarded);
     assert(inspectionRusage(31, 2, NULL) == -1 && errno == ENOTSUP && rusageCalls == 3);
     assert(inspectionTaskForPID(mach_task_self(), 31, &task) == KERN_NOT_SUPPORTED && !task && taskCalls == 2);
-    assert(LSBInspectionPIDPath(31, path, sizeof(path), &pathResult) && pathResult == 7 && !strcmp(path, "/bin/df"));
+    assert(LSBInspectionPIDPath(31, path, sizeof(path), &pathResult) && pathResult == physicalLength && !strcmp(path, physicalDF));
     assert(!inspectionRusage(21, 2, NULL) && rusageCalls == 4 && lastRusagePID == 31);
     assert(!inspectionTaskForPID(mach_task_self(), 21, &task) && taskCalls == 3 && lastTaskPID == 31);
     nativeError = EACCES;
@@ -183,6 +214,7 @@ int main(void) {
     self[3] = 21; nativeError = 0;
     assert(!inspectionSysctl(self, 4, info, &length, NULL, 0) && lastMIB[3] == 31 && debuggerCalls == 3);
     free(processSnapshot);
+    assert(!rmdir(temporary));
     puts("ProcessInspectionTests: bounded guest list, logical identities, real self translation, native forwarding and output faults passed");
     return 0;
 }

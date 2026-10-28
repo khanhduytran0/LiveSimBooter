@@ -5,12 +5,15 @@
 #endif
 #include "../ProcessSupport/SpawnTransport.h"
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/proc.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/sysctl.h>
 
 extern int proc_pid_rusage(int pid, int flavor, rusage_info_t *buffer);
@@ -28,6 +31,22 @@ _Static_assert(sizeof(InspectionBSDInfo) == LSB_PEER_SHORT_INFO_BYTES, "short BS
 static _Atomic(bool) inspectionReady, hasProcessSnapshot;
 static pthread_mutex_t snapshotLock = PTHREAD_MUTEX_INITIALIZER;
 static LSBProcessList *processSnapshot;
+static char inspectionRuntimeRoot[PATH_MAX];
+static int inspectionRootError = ENOENT;
+
+static int configureInspectionRoot(const char *root) {
+    inspectionRuntimeRoot[0] = '\0';
+    if (!root || !*root) return ENOENT;
+    if (root[0] != '/') return EINVAL;
+    char canonical[PATH_MAX];
+    if (!realpath(root, canonical)) return errno;
+    if (!canonical[1]) return EINVAL;
+    struct stat metadata;
+    if (stat(canonical, &metadata)) return errno;
+    if (!S_ISDIR(metadata.st_mode)) return ENOTDIR;
+    strcpy(inspectionRuntimeRoot, canonical);
+    return 0;
+}
 
 static bool readBytes(const void *input, void *output, size_t size) {
     mach_vm_size_t copied = 0;
@@ -185,12 +204,15 @@ bool LSBInspectionPIDPath(int pid, void *buffer, uint32_t size, int *result) {
     *result = 0;
     pthread_mutex_lock(&snapshotLock);
     for (uint32_t i = 0; i < processSnapshot->count; ++i) if (processSnapshot->records[i].guestPID == pid) {
-        const char *path = processSnapshot->records[i].executablePath;
-        size_t length = strlen(path);
+        // Keep broker identity virtual. Like macOS Simulator, proc_pidpath exposes the physical executable for bundle/resource lookup.
+        char path[PATH_MAX];
+        int length = snprintf(path, sizeof(path), "%s%s", inspectionRuntimeRoot, processSnapshot->records[i].executablePath);
         if (!buffer) error = EFAULT;
-        else if (length >= size) error = ENOSPC;
-        else if (!writeBytes(buffer, path, length + 1)) error = EFAULT;
-        else { *result = (int)length; error = 0; }
+        else if (inspectionRootError) error = inspectionRootError;
+        else if (length < 0 || (size_t)length >= sizeof(path)) error = ENAMETOOLONG;
+        else if ((uint32_t)length >= size) error = ENOSPC;
+        else if (!writeBytes(buffer, path, (size_t)length + 1)) error = EFAULT;
+        else { *result = length; error = 0; }
         break;
     }
     pthread_mutex_unlock(&snapshotLock);
@@ -200,6 +222,9 @@ bool LSBInspectionPIDPath(int pid, void *buffer, uint32_t size, int *result) {
 
 #ifndef LSB_PROCESS_INSPECTION_TESTING
 __attribute__((constructor)) static void initializeInspection(void) {
+    int saved = errno;
+    inspectionRootError = configureInspectionRoot(getenv("DYLD_ROOT_PATH"));
+    errno = saved;
     atomic_store_explicit(&inspectionReady, true, memory_order_release);
 }
 __attribute__((used, section("__DATA,__interpose"))) static const struct { const void *replacement, *original; } inspectionInterpose[] = {

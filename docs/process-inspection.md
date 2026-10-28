@@ -14,7 +14,7 @@ roles are denied. The original `__TEXT,__ents_der` is captured before guest exec
 | --- | --- |
 | `sysctl(KERN_MAXPROC)` | Authenticated capacity, 256; not a live process count. |
 | `sysctl(KERN_PROC_ALL)` | Fresh membership snapshot of committed simulator jobs, with logical PIDs/parents and guest executable paths. |
-| `proc_pidpath` after a successful snapshot | Path from the last authorized snapshot; unknown PIDs return `ESRCH`. |
+| `proc_pidpath` after a successful snapshot | Physical executable path under the canonical `RuntimeRoot`; unknown PIDs return `ESRCH`. |
 | `KERN_PROC_PID` / `KERN_PROCARGS2` for self | Translate logical self to the real native PID and preserve the kernel's decision. |
 | Peer `KERN_PROC_PID`, `KERN_PROCARGS2`, `proc_pidinfo`, `proc_pid_rusage`, `task_for_pid` after a snapshot | Unsupported known peers are denied; unknown PIDs are rejected instead of reaching a possibly reused native PID. |
 
@@ -22,15 +22,25 @@ List copyout returns complete `kinfo_proc` records. A short buffer receives `ENO
 size-only queries return the required size. Before initialization, unmatched operations retain their original behavior.
 The implementation is in `Guest/ProcessInspection.c`, the existing process wrappers, `ProcessSupport/SpawnTransport.c`, and `Host/Broker.m`.
 
+The broker retains virtual paths for identity and role checks. Only `proc_pidpath` converts them to physical paths, using the runtime root
+captured during guest initialization. CocoaTop reads the adjacent `Info.plist` and icon files directly; a virtual `/Applications/...` path
+can be missing on the native filesystem or refer to a different native app. This matches the existing physical-path behavior used by
+RunningBoard. An unavailable root or a path/buffer overflow remains an error, without falling back to a native process with the same PID.
+
 Membership and logical parentage are current at each broker request, but the BSD status/flags/credentials come from the immutable native
 CHECKIN snapshot. They are not live CPU, memory, FD, thread, or debugger-state measurements. Zero-filled unsupported `kinfo_proc` fields
 must not be interpreted as measured zero usage. Peer task inspection and detail tabs remain incomplete. Real self-debugger queries still
 use the kernel; the list's initial `P_TRACED` value cannot establish whether a debugger attached later.
 
+In particular, peer `task_for_pid` returns `KERN_NOT_SUPPORTED` and a null port. The broker's task-name rights establish identity; they
+are not task-control rights. CocoaTop returns early from `updateMachInfo` when that request fails, so its CPU, memory, thread and role
+fields are incomplete. Its separate FD and rusage requests are also unsupported. The existing druid debugger-state request does not
+implement general task inspection. Fixing executable paths restores file-based bundle/icon lookup, not these statistics or detail tabs.
+
 ## CocoaTop input
 
-The current staged app uses the user's CocoaTop fork at `b28d80cae46e604b49af86c1c3ae132b01f576e7`. Its working tree was clean when
-snapshotted and was not modified. The complete 13-entry fork `task.xml` is embedded as XML and iOS 15+ DER metadata, including Boolean
+The initial staged app used the user's CocoaTop fork at `b28d80cae46e604b49af86c1c3ae132b01f576e7`. Its working tree was clean when
+snapshotted; the later scene-compatible alert fix is described below. The complete 13-entry fork `task.xml` is embedded as XML and iOS 15+ DER metadata, including Boolean
 `proc_info-allow=true` and `com.apple.private.security.no-container`. The production Mach-O reader and CoreEntitlements decoder verify
 full dictionary equality. The processed source Info.plist retains guest bundle ID `ru.domo.cocoatop64`; 28 fork resource files, including
 its launch storyboard, are preserved. Native signing uses the host identity/identifier without these guest privilege entitlements.
@@ -47,7 +57,7 @@ adjustments; the UI and process-inspection implementations remain the fork's cod
 
 The command-line probes below used the original 2.2.3 release's complete 12-entry entitlement dictionary; its XML matched source `task.xml`
 at `c2b36cc38ffb2969bbd9487308f8a925552d742e`. Their authorization results are separate from the fork's app UI; both are verified below.
-The fork UUID is `53EEA2A2-23BD-3162-AD07-66F2CCED51F9`.
+The initial fork build UUID is `53EEA2A2-23BD-3162-AD07-66F2CCED51F9`.
 
 Sources, metadata, resources, binaries and recipes remain ignored under `tmp/cocoatop`; they are not setup prerequisites or committed
 third-party binaries. `tmp/cocoatop/fork-b28d80c/README.md` and its provenance files record the immutable source snapshot, processed
@@ -113,3 +123,36 @@ from the baseline above; mappings were not remeasured. Evidence is in ignored
 The full local suite passes, including real authenticated Mach replies, the shared exception/control server, the
 constructor-before-workqueue ordering, current traced flags, timeout/retirement cases and malformed request rejection.
 `LSB_TRACE_PEER_DEBUGGER_STATE=1` in the native launch environment enables query diagnostics; normal startup leaves them off.
+
+## Physical executable paths: 2026-10-28
+
+The inspection path correction was deployed to the same iPhone16,2 / native 23B50 with guest 23A343. Host PID 1906 and guest
+launchd PID 1910 booted without LLDB. The native host was unchanged (`A02E398B-B7E2-33F6-B6C7-984A78B2E59C`); the new shim UUID
+was `0F093912-974A-3FF9-B05D-75CC5DCF4D40`. The cache remained at the baseline base/UUID above; mappings were not remeasured.
+Only the shim was staged and replaced after stopping the session, with a device rollback copy and no post-copy checksums.
+
+The authorized probe (PID 1975) returned 31 physical paths, including `RuntimeRoot/Applications/Contacts.app/Contacts` and
+`RuntimeRoot/Applications/CocoaTop.app/CocoaTop`. Its peer task/rusage requests still returned `KERN_NOT_SUPPORTED`/`ENOTSUP`.
+The unentitled probe (PID 1976) still received `EPERM`; both probes exited 0. CocoaTop logical/native PID 1968/1969 then visibly
+displayed the Contacts, CocoaTop and PosterBoard icons. The screenshot also still shows unsupported CPU/state/role fields;
+this change does not provide task inspection or fix apps whose icon lookup requires an asset-catalog-only path.
+
+The focused path/interposition checks, full `sh Tests/run.sh`, guest shim build and `git diff --check` passed. Ignored evidence is
+`tmp/process-path-icons/results/console.log`, `before.png`, `after.png` and `tests.log`; these are not setup prerequisites.
+
+## CocoaTop scene-compatible alerts
+
+Selecting an app-information row in the fork's detail screen caused `SIGABRT`. The native report for PID 1987 identified
+`NSObjectNotAvailableException`: `UIAlertView` is unavailable in a scene-based app. The exception backtrace led to
+`SockViewController`'s `tableView:didSelectRowAtIndexPath:`. This was an alert presentation failure, independent of the unsupported
+task-inspection APIs and the corrected executable paths.
+
+The source fork now uses `UIAlertController` for this row, the signal-delivery error dialog and Settings' Reset confirmation.
+Titles, messages and the reset action are preserved; the obsolete alert delegate is removed. Its deployment targets already support
+`UIAlertController`, so no legacy fallback is needed. These edits live in the separate CocoaTop repository, not a guest UIKit hook.
+
+The rebuilt app UUID is `B6E89D33-EAF6-315B-8581-9B0EDB8EC317`. All 13 original entitlement entries passed the production metadata
+decoder after signing. It replaced only the guest app executable after stopping the session, with rollback retained and no copy checksum.
+On the same iPhone/guest/cache baseline, the user confirmed that tapping the information row now shows a working dialog and dismisses
+without crashing. The signal-error and Reset paths compile but were not separately exercised. No debugger was attached.
+Ignored source snapshot, build/signing provenance, deployment receipt and console evidence are under `tmp/cocoatop/scene-alerts`.

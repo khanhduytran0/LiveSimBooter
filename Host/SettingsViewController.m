@@ -29,7 +29,7 @@
     _applyItem.accessibilityHint = @"Apply the selected device and restart the simulator.";
     _progress = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     _progress.isAccessibilityElement = YES;
-    _progress.accessibilityLabel = @"Applying simulator device";
+    _progress.accessibilityLabel = @"Applying simulator configuration";
     _progressItem = [[UIBarButtonItem alloc] initWithCustomView:_progress];
     __weak LSBDeviceTypePickerViewController *weakSelf = self;
     _observer = [NSNotificationCenter.defaultCenter addObserverForName:LSBGuestDeviceSettingsDidChangeNotification object:_settings
@@ -206,7 +206,7 @@
     [_device refresh];
     if (!_device.pending) [_display refresh];
 }
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { (void)tableView; return 3; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { (void)tableView; return 5; }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
     if (section == 2) {
@@ -217,10 +217,13 @@
 }
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     (void)tableView;
-    return section == 0 ? @"Background execution" : section == 1 ? @"Simulator display" : @"Simulator device";
+    return section == 0 ? @"Background execution" : section == 1 ? @"Simulator display" : section == 2 ? @"Simulator device" :
+        section == 3 ? @"Experimental haptics" : @"Experimental audio";
 }
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     (void)tableView;
+    if (section == 4) return _device.audioOutputForced ? @"Enabled by the host launch environment." : _device.audioOutputStatusText;
+    if (section == 3) return _device.hapticsForced ? @"Enabled by the host launch environment." : _device.hapticsStatusText;
     if (section == 1) return _display.statusText;
     if (section == 2) {
         LSBGuestDeviceType *type = LSBGuestDeviceTypeForIdentifier(_device.currentIdentifier);
@@ -239,6 +242,29 @@
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.textLabel.numberOfLines = 0;
+    if (indexPath.section == 3 || indexPath.section == 4) {
+        BOOL audioOutput = indexPath.section == 4;
+        cell.textLabel.text = audioOutput ? @"Audio output" : @"Haptic passthrough";
+        UISwitch *toggle = [UISwitch new];
+        toggle.on = audioOutput ? _device.audioOutputEnabled : _device.hapticsEnabled;
+        toggle.enabled = _device.canApply && !(audioOutput ? _device.audioOutputForced : _device.hapticsForced) && !_display.pending && !_display.outcomeUnknown;
+        toggle.accessibilityLabel = cell.textLabel.text;
+        toggle.accessibilityIdentifier = audioOutput ? @"simulator-audio-output" : @"simulator-haptic-passthrough";
+        toggle.accessibilityHint = audioOutput ? @"Restart the simulator to apply audio output." : @"Restart the simulator to apply haptic passthrough.";
+        cell.textLabel.enabled = toggle.enabled;
+        __weak LSBSettingsViewController *weakSelf = self;
+        [toggle addAction:[UIAction actionWithHandler:^(UIAction *action) {
+            LSBSettingsViewController *controller = weakSelf;
+            if (!controller) return;
+            UISwitch *sender = (UISwitch *)action.sender;
+            BOOL requested = sender.on;
+            sender.on = audioOutput ? controller->_device.audioOutputEnabled : controller->_device.hapticsEnabled;
+            if (audioOutput) [controller->_device applyAudioOutputEnabled:requested];
+            else [controller->_device applyHapticsEnabled:requested];
+        }] forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = toggle;
+        return cell;
+    }
     if (indexPath.section == 2 && indexPath.row == 1) {
         cell.textLabel.text = @"Use Full Width";
         UISwitch *toggle = [UISwitch new];

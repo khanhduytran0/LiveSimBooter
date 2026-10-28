@@ -12,8 +12,14 @@ FOUNDATION_EXPORT NSNotificationName const LSBGuestDeviceSettingsDidChangeNotifi
 @property (nonatomic, readonly) BOOL pending, canApply, outcomeUnknown;
 // Saved host-presentation preference; effective only for home-button devices and iPads. It never restarts a guest.
 @property (nonatomic, readonly) BOOL fullWidth;
+@property (nonatomic, readonly) BOOL hapticsEnabled, hapticsForced;
+@property (nonatomic, readonly, copy) NSString *hapticsStatusText;
+@property (nonatomic, readonly) BOOL audioOutputEnabled, audioOutputForced;
+@property (nonatomic, readonly, copy) NSString *audioOutputStatusText;
 - (instancetype)initWithDefaults:(NSUserDefaults *)defaults;
 - (void)refresh;
 - (void)applyDeviceIdentifier:(NSString *)identifier;
 - (void)setFullWidth:(BOOL)enabled;
+- (void)applyHapticsEnabled:(BOOL)enabled;
+- (void)applyAudioOutputEnabled:(BOOL)enabled;
 @end

@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 NSString *const LSBTerminalSessionDidCloseNotification = @"LSBTerminalSessionDidClose";
+static const NSUInteger LSBTerminalInputCapacity = 1048576;
 
 @interface LSBTerminalSession () {
     int _master, _slave, _stateFD, _consoleFD;
@@ -241,7 +242,7 @@ static int terminalSignal(void *context, pid_t group, int number) {
     if (_closed) return EIO;
     [self drainInput];
     if (_closed) return EIO;
-    if (length > 1048576 - _pendingInput.length) return ENOBUFS;
+    if (length > LSBTerminalInputCapacity - _pendingInput.length) return ENOBUFS;
     [_pendingInput appendBytes:bytes length:length];
     [self drainInput];
     if (_closed) return EIO;
@@ -281,6 +282,14 @@ static int terminalSignal(void *context, pid_t group, int number) {
 }
 - (int)sendInput:(NSData *)data {
     if (_closed) return EIO;
+    [self drainInput];
+    if (_closed) return EIO;
+    // Reserve space for the complete batch before the discipline emits any bytes, including bracketed-paste delimiters.
+    // A canonical line may also be emitted after switching to raw mode. Flushed line bytes no longer consume this budget.
+    NSUInteger lineBytes = _discipline.flushGeneration == _inputFlush ? _discipline.length : 0;
+    NSUInteger available = LSBTerminalInputCapacity - _pendingInput.length;
+    // Individual keys must still reach ISIG/line-editing handling when the queue is full (notably Ctrl-C's input flush).
+    if (data.length > 1 && (lineBytes > available || data.length > available - lineBytes)) return ENOBUFS;
     LSBFakePTYCallbacks callbacks = {(__bridge void *)self, terminalInput, terminalOutput, terminalSignal};
     return LSBFakePTYInput(_state, &_discipline, data.bytes, data.length, &callbacks);
 }

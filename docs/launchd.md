@@ -333,7 +333,8 @@ If launchd's 64 child slots are full, copied adoption records wait for space and
 updates immediately, but a specific waitpid for a deferred orphan can return ECHILD until its record is imported. The retry
 queue does not retain whole old ledgers. Unknown exit-monitor failures do not invent an exit status.
 
-`--launchd-lifecycle` runs the signed `/bin/lifecycle-probe` as an isolated job. On 2026-10-25, all three device cases reaped
+`--launchd-lifecycle` now runs the signed `/usr/local/bin/lifecycle-probe` as an isolated job. The 2026-10-25 test used
+its former `/bin/lifecycle-probe` path; all three device cases reaped
 exit 23 before delivering their process-source EXIT callbacks; metadata remained valid. Child 80212 observed parent PID
 80211 change to simulator launchd 80205, then exited 37. The broker published its status to launchd; the probe exited 0 and
 launchd answered the health lookup. Evidence is in `tmp/backboardd/console-lifecycle.log` and `lifecycle.log`.

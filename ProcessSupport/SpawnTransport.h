@@ -12,7 +12,7 @@
 #include <sys/sysctl.h>
 
 #define LSB_BROKER_PORT_ENV "LSB_BROKER_PORT"
-#define LSB_TRANSPORT_VERSION 5
+#define LSB_TRANSPORT_VERSION 6
 
 // Bootstrap-only metadata is versioned independently from the outer transport envelope.
 #define LSB_BOOTSTRAP_VERSION 3
@@ -22,7 +22,8 @@ enum LSBRequestKind {
     LSB_REQUEST_SPAWN = 1, LSB_REQUEST_CHECKIN = 2, LSB_REQUEST_READY = 3, LSB_REQUEST_KILL = 4, LSB_REQUEST_EXEC = 5,
     LSB_REQUEST_RESOLVE_AUDIT_PID = 6, LSB_REQUEST_COPY_ENTITLEMENTS = 7, LSB_REQUEST_COPY_PROCESS_IDENTITY = 8,
     LSB_REQUEST_RESOLVE_NATIVE_CHILD_PID = 9, LSB_REQUEST_REBOOT_USERSPACE = 10, LSB_REQUEST_LIST_PROCESSES = 11,
-    LSB_REQUEST_REGISTER_DEBUGGER_PORT = 12, LSB_REQUEST_COPY_DEBUGGER_INFO = 13, LSB_REQUEST_COPY_PROCESS_TASK = 14
+    LSB_REQUEST_REGISTER_DEBUGGER_PORT = 12, LSB_REQUEST_COPY_DEBUGGER_INFO = 13, LSB_REQUEST_COPY_PROCESS_TASK = 14,
+    LSB_REQUEST_OPEN_AUDIO_OUTPUT = 15, LSB_REQUEST_CLOSE_AUDIO_OUTPUT = 16
 };
 typedef struct {
     uint64_t requestID;
@@ -91,6 +92,10 @@ int LSBTransportKill(pid_t targetPID, int signalNumber);
 // Simulator launchd only: request a replacement userspace after an accepted guest reboot reaches its terminal exit.
 // Carries no payload or rights. Returns an errno value; success means broker acceptance, not completion of the replacement boot.
 int LSBTransportRebootUserspace(void);
+// One fixed-format PCM ring per authenticated guest. Success owns a mapping; close first, then munmap using returned size.
+// No XPC object survives this synchronous request. There is no recording/input capability.
+__attribute__((visibility("default"))) int LSBTransportOpenAudioOutput(void **mapping, size_t *size);
+__attribute__((visibility("default"))) int LSBTransportCloseAudioOutput(void);
 // Actual Boolean proc_info-allow required. Current committed simulator jobs only; no rights or native helper processes.
 // Success owns a malloc snapshot; failure clears both outputs. Caller must free the successful result.
 int LSBTransportListProcesses(LSBProcessList **list, size_t *size);
@@ -134,6 +139,8 @@ int LSBTransportReplyProcessList(LSBReceivedMessage *message, int error, const L
 int LSBTransportReplyDebuggerInfo(LSBReceivedMessage *message, int error, const struct kinfo_proc *info);
 // COPY_PROCESS_TASK only. Borrows the kernel-captured control right and full native identity; errors carry neither. Releases the request.
 int LSBTransportReplyProcessTask(LSBReceivedMessage *message, int error, mach_port_t task, const audit_token_t *targetAudit);
+// OPEN_AUDIO_OUTPUT only; borrows a pre-created XPC shared-memory object, carried as void* for C/ObjC ARC callers.
+int LSBTransportReplyAudioOutput(LSBReceivedMessage *message, int error, void *sharedMemory);
 // COPY_PROCESS_IDENTITY only. Borrows identity and copies its task-name right; errors carry no identity. Releases the request object.
 int LSBTransportReplyProcessIdentity(LSBReceivedMessage *message, int error, const LSBPeerProcessIdentity *identity);
 // Bootstrap additionally copies a shared status-file FD and nonblocking wake-pipe read FD; caller retains ownership.

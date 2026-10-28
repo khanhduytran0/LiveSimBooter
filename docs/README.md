@@ -21,6 +21,7 @@ Spotlight last-character crash is deferred.
 Historical sections below describe earlier cache layouts and failures; use the setup guide for current preparation commands.
 
 - [Architecture](architecture.md): current process boundaries, launch roles, runtime compatibility, and pinned implementation references.
+- [Simulator host services](simulator-host-services.md): observed Mac service inventory and the pinned SimRun audio reference.
 - [Device types](device-types.md): original device profiles, phone/iPad choices, display dimensions, and applying a session restart.
 - [Source licensing](licensing.md): MIT original code, Apple-derived APSL files, retained notices, and source availability.
 - [Runtime handoff](runtime-handoff.md): startup, local callbacks, thread storage, cache detachment, and debugger metadata.
@@ -30,7 +31,8 @@ Historical sections below describe earlier cache layouts and failures; use the s
 - [Guest launchctl](guest-control.md): restart individual jobs and reboot the simulator session through the guest bootstrap namespace.
 - [Guest SSH with Fish](sshdog.md): sshdog staging, keys, authenticated device connection, and remaining shell/PTY work.
 - [Backboardd](backboardd.md): the expanded runtime cache, service identity, and boot progress.
-- [Guest haptics](keyboard-haptics.md): opt-in native hapticd/capability experiment, the engine-start failure, and the verified keyboard-pattern correction.
+- [Audio output](audio-output.md): optional fixed-format virtual HAL, shared PCM transport, native playback and device evidence.
+- [Guest haptics](keyboard-haptics.md): optional host-owned relay, physically confirmed CoreHaptics playback, and the verified keyboard-pattern correction.
 - [Display settings](display-settings.md): native shortcuts backed by a fixed launchd-owned helper, with verified HUD and live touch toggles.
 - [Simulator preferences](cfprefsd.md): the stock cfprefsd job and isolated `BKDigitizerVisualizeTouches` preference.
 - [Services toward SpringBoard](springboard-services.md): simslim evidence, selected daemon startup, notification compatibility, and remaining limits.

@@ -6,6 +6,8 @@
 #include <sys/stat.h>
 
 static NSString *const DevicePreference = @"LSBSimulatorDeviceType";
+static NSString *const HapticsPreference = @"LSBExperimentalHapticsEnabled";
+static NSString *const AudioOutputPreference = @"LSBExperimentalAudioOutputEnabled";
 
 LSBGuestDeviceType *LSBConfiguredGuestDeviceType(void) {
     id identifier = [NSUserDefaults.standardUserDefaults objectForKey:DevicePreference];
@@ -51,18 +53,25 @@ static int copyProfile(NSString *root, NSString *relative, NSDictionary **output
     return *output ? 0 : ENOMEM;
 }
 
-int LSBCopyGuestDeviceCapabilities(NSString *root, LSBGuestDeviceType *type, NSDictionary **output) {
+static int copyGuestDeviceCapabilities(NSString *root, LSBGuestDeviceType *type, BOOL allowLegacy, NSDictionary **output) {
     if (!output) return EINVAL;
     *output = nil;
     if (!root.isAbsolutePath || !type || type != LSBGuestDeviceTypeForIdentifier(type.identifier)) return EINVAL;
     NSString *relative = [NSString stringWithFormat:@"Library/Developer/CoreSimulator/DeviceTypes/%@/capabilities.plist", type.identifier];
     NSDictionary *profile = nil;
     int error = copyProfile(root, relative, &profile);
-    if (error == ENOENT && type == LSBDefaultGuestDeviceType())
+    if (error == ENOENT && allowLegacy && type == LSBDefaultGuestDeviceType())
         error = copyProfile(root, @"Library/Developer/CoreSimulator/DeviceType/capabilities.plist", &profile);
     if (!error) error = LSBValidateGuestDeviceCapabilities(profile, type);
     if (!error) *output = profile;
     return error;
+}
+
+int LSBCopyGuestDeviceCapabilities(NSString *root, LSBGuestDeviceType *type, NSDictionary **output) {
+    return copyGuestDeviceCapabilities(root, type, YES, output);
+}
+int LSBCopyStagedGuestDeviceCapabilities(NSString *root, LSBGuestDeviceType *type, NSDictionary **output) {
+    return copyGuestDeviceCapabilities(root, type, NO, output);
 }
 
 int LSBInstallGuestDeviceCapabilities(NSString *root, NSDictionary *profile) {
@@ -118,13 +127,34 @@ static CFBooleanRef nativeHapticsCapability(void) {
     return cachedAnswer;
 }
 
-BOOL LSBExperimentalHapticsEnabled(void) {
+BOOL LSBHapticsForcedByEnvironment(void) {
     const char *value = getenv("LSB_EXPERIMENTAL_HAPTICS");
     return value && !strcmp(value, "1");
 }
+BOOL LSBExperimentalHapticsEnabled(void) {
+    if (LSBHapticsForcedByEnvironment()) return YES;
+    id value = [NSUserDefaults.standardUserDefaults objectForKey:HapticsPreference];
+    return value && CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() && CFBooleanGetValue((__bridge CFBooleanRef)value);
+}
+void LSBSaveConfiguredHapticsEnabled(BOOL enabled) {
+    [NSUserDefaults.standardUserDefaults setObject:enabled ? @YES : @NO forKey:HapticsPreference];
+}
 
-int LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *root, NSDictionary *profile) {
-    if (!LSBExperimentalHapticsEnabled()) return LSBInstallGuestDeviceCapabilities(root, profile);
+BOOL LSBAudioOutputForcedByEnvironment(void) {
+    const char *value = getenv("LSB_AUDIO_OUTPUT");
+    return value && !strcmp(value, "1");
+}
+BOOL LSBExperimentalAudioOutputEnabled(void) {
+    if (LSBAudioOutputForcedByEnvironment()) return YES;
+    id value = [NSUserDefaults.standardUserDefaults objectForKey:AudioOutputPreference];
+    return value && CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() && CFBooleanGetValue((__bridge CFBooleanRef)value);
+}
+void LSBSaveConfiguredAudioOutputEnabled(BOOL enabled) {
+    [NSUserDefaults.standardUserDefaults setObject:enabled ? @YES : @NO forKey:AudioOutputPreference];
+}
+
+int LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *root, NSDictionary *profile, BOOL enabled) {
+    if (!enabled) return LSBInstallGuestDeviceCapabilities(root, profile);
     NSDictionary *adapted = nil;
     int error = LSBProjectGuestHapticsCapability(profile, nativeHapticsCapability(), &adapted);
     return error ? error : LSBInstallGuestDeviceCapabilities(root, adapted);

@@ -157,11 +157,90 @@ static void replacementFailureIsAtomic(void) {
     assert(!rmdir(directory));
 }
 
+static void inputCapacityIsAtomic(void) {
+    char directory[] = "/tmp/LiveSimBooter-terminal-input.XXXXXX";
+    assert(mkdtemp(directory));
+    int error = 0;
+    LSBTerminalSession *session = [[LSBTerminalSession alloc] initWithDirectory:[NSString stringWithUTF8String:directory] error:&error];
+    assert(session && !error);
+    LSBReceivedMessage message = {0};
+    assert(![session attachToMessage:&message]);
+    int guest = message.fds[0];
+    assert(!fcntl(guest, F_SETFL, O_NONBLOCK));
+    int stateFD = open(session.statePath.fileSystemRepresentation, O_RDWR);
+    assert(stateFD >= 0);
+    LSBFakePTYState *state = mmap(NULL, LSB_FAKE_PTY_MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, stateFD, 0);
+    assert(state != MAP_FAILED);
+    close(stateFD);
+    struct termios canonical, raw;
+    assert(!LSBFakePTYGetAttributes(state, &canonical));
+    canonical.c_lflag &= ~ECHO;
+    raw = canonical;
+    cfmakeraw(&raw);
+    assert(!LSBFakePTYSetAttributes(state, &canonical));
+
+    const NSUInteger capacity = 1048576;
+    NSMutableData *filler = [NSMutableData dataWithLength:capacity];
+    memset(filler.mutableBytes, 'f', filler.length);
+    assert(![session sendInput:[@"line" dataUsingEncoding:NSUTF8StringEncoding]]);
+    assert(!LSBFakePTYSetAttributes(state, &raw));
+    // The buffered canonical line would be emitted before raw input, so it must count toward whole-batch admission.
+    assert([session sendInput:filler] == ENOBUFS);
+    char bytes[65536];
+    assert(read(guest, bytes, sizeof(bytes)) == -1 && (errno == EAGAIN || errno == EWOULDBLOCK));
+    assert(![session sendInput:[@"ok" dataUsingEncoding:NSUTF8StringEncoding]]);
+    assert(read(guest, bytes, sizeof(bytes)) == 6 && !memcmp(bytes, "lineok", 6));
+
+    assert(!LSBFakePTYSetAttributes(state, &canonical));
+    assert(![session sendInput:[@"old" dataUsingEncoding:NSUTF8StringEncoding]]);
+    assert(!LSBFakePTYFlush(state, TCIFLUSH));
+    assert(!LSBFakePTYSetAttributes(state, &raw));
+    // A flushed canonical line cannot cause a false capacity failure. Stop reading so the host queue fills behind the socket.
+    assert(![session sendInput:filler]);
+    NSMutableData *paste = [NSMutableData dataWithBytes:"\033[200~" length:6];
+    [paste appendData:[NSMutableData dataWithLength:capacity]];
+    [paste appendBytes:"\033[201~" length:6];
+    assert([session sendInput:paste] == ENOBUFS);
+    // This fits in an empty queue but not behind the blocked batch, so admission must include already-pending input too.
+    [paste setLength:capacity / 2];
+    assert([session sendInput:paste] == ENOBUFS);
+    NSUInteger accepted = filler.length;
+    NSData *oneByte = [NSData dataWithBytes:"f" length:1];
+    while (!(error = [session sendInput:oneByte])) assert(++accepted < 2 * capacity);
+    assert(error == ENOBUFS);
+    // Capacity admission must not prevent individual terminal control keys from reaching the line discipline.
+    __block int signalNumber = 0;
+    session.signalHandler = ^int(pid_t group, int number) { (void)group; signalNumber = number; return 0; };
+    raw.c_lflag |= ISIG | NOFLSH; // Preserve the queued filler so its exact delivery can still be checked below.
+    assert(!LSBFakePTYSetAttributes(state, &raw));
+    assert(![session sendInput:[NSData dataWithBytes:"\003" length:1]] && signalNumber == SIGINT);
+    __block NSUInteger received = 0;
+    pumpUntil(^BOOL {
+        char chunk[65536];
+        ssize_t count;
+        while ((count = read(guest, chunk, sizeof(chunk))) > 0) {
+            for (ssize_t index = 0; index < count; ++index) assert(chunk[index] == 'f');
+            received += (NSUInteger)count;
+            assert(received <= accepted);
+        }
+        assert(count == -1 && (errno == EAGAIN || errno == EWOULDBLOCK));
+        return received == accepted;
+    });
+    NSData *normal = [@"\033[200~next\nline\033[201~" dataUsingEncoding:NSUTF8StringEncoding];
+    assert(![session sendInput:normal]);
+    assert(read(guest, bytes, sizeof(bytes)) == (ssize_t)normal.length && !memcmp(bytes, normal.bytes, normal.length));
+    for (unsigned index = 0; index < message.plan.fdCount; ++index) close(message.fds[index]);
+    [session close];
+    munmap(state, LSB_FAKE_PTY_MAP_SIZE);
+    assert(!rmdir(directory));
+}
+
 int main(void) {
     @autoreleasepool {
         consoleMirroring();
         replacingStandardIO();
         replacementFailureIsAtomic();
+        inputCapacityIsAtomic();
         char directory[] = "/tmp/LiveSimBooter-terminal-session.XXXXXX";
         assert(mkdtemp(directory));
         int error = 0;
@@ -226,7 +305,7 @@ int main(void) {
         [session close];
         munmap(state, LSB_FAKE_PTY_MAP_SIZE);
         assert(!rmdir(directory));
-        puts("TerminalSession: inherited endpoint, fair dispatch I/O, raw input, output translation, resize/signals and EOF cleanup passed");
+        puts("TerminalSession: inherited endpoint, fair dispatch I/O, atomic input capacity, raw input, output, resize/signals and EOF cleanup passed");
     }
     return 0;
 }

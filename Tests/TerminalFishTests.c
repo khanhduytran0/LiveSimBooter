@@ -27,9 +27,9 @@ static int testSpawn(pid_t *pid, const char *path, const posix_spawn_file_action
     assert(strstr(arguments[5], "status job-control none") && strstr(arguments[5], "fish_use_posix_spawn 1") && !arguments[6]);
     assert(environment == environ && !strcmp(getenv("TERM"), "xterm-256color") && !strcmp(getenv("HOME"), expectedData));
     assert(!strcmp(getenv("CFFIXED_USER_HOME"), expectedData));
-    char pathExpected[PATH_MAX * 4 + 64], cwd[PATH_MAX];
-    assert(snprintf(pathExpected, sizeof(pathExpected), "%s/bin:%s/usr/bin:%s/usr/sbin:%s/sbin",
-                    expectedRoot, expectedRoot, expectedRoot, expectedRoot) > 0);
+    char pathExpected[PATH_MAX * 5 + 80], cwd[PATH_MAX];
+    assert(snprintf(pathExpected, sizeof(pathExpected), "%s/usr/local/bin:%s/bin:%s/usr/bin:%s/usr/sbin:%s/sbin",
+                    expectedRoot, expectedRoot, expectedRoot, expectedRoot, expectedRoot) > 0);
     assert(!strcmp(getenv("PATH"), pathExpected) && getcwd(cwd, sizeof(cwd)) && !strcmp(cwd, expectedData));
     return EACCES; // A failed replacement is reported; the helper must not fall back to an ordinary child spawn.
 }

@@ -31,13 +31,13 @@ xcrun devicectl device process launch --device 00008130-00021D122680011C --termi
 
 # Run the existing process test without the fake terminal.
 xcrun devicectl device process launch --device 00008130-00021D122680011C --terminate-existing --console \
-  -- com.kdt.LiveSimBooter /bin/spawn-probe --repeat 2 --verify-statuses
+  -- com.kdt.LiveSimBooter /usr/local/bin/spawn-probe --repeat 2 --verify-statuses
 ```
 
 The launchd helper sets `TERM=xterm-256color`, `HOME` and `CFFIXED_USER_HOME` to the owned `data` directory, changes
-into that directory, and uses the physical RuntimeRoot `bin`, `usr/bin`, `usr/sbin` and `sbin` directories in `PATH`. It checks
+into that directory, and uses the physical RuntimeRoot `usr/local/bin`, `bin`, `usr/bin`, `usr/sbin` and `sbin` directories in `PATH`. It checks
 the simulator platform, attached terminal descriptors and canonical sibling `RuntimeRoot`/`data` paths under `LSB/iOS/23A343` before SETEXEC.
-The explicit `--terminal` diagnostic retains its earlier `RuntimeRoot/home/mobile` home and `bin:usr/bin` path setup.
+The explicit `--terminal` diagnostic retains its earlier `RuntimeRoot/home/mobile` home and now prepends `usr/local/bin` to its earlier `bin:usr/bin` path setup.
 Explicit shell arguments choose their own job-control policy; the provided Fish arguments disable it. This is not a general
 `chroot` implementation. The loader leaves `DYLD_PRINT_*` diagnostics off unless supplied explicitly.
 
@@ -132,8 +132,8 @@ custom-stack pthread ABI; the separate [launchd workqueue bridge](launchd.md) ha
 
 ## Native display and input
 
-`Host/TerminalView.m` provides software-keyboard input, hardware arrow/control keys, and a shortcut row with Escape, Tab,
-Ctrl-C, Ctrl-D, arrows, and Return. The row is inside the terminal view, whose bottom stays above both the safe-area bottom
+`Host/TerminalView.m` provides software-keyboard input, hardware arrow/control keys, and two horizontally paged shortcut groups:
+Escape, Tab, Ctrl-C, Ctrl-D, Return and Paste on the first page, and arrows on the second. The row is inside the terminal view, whose bottom stays above both the safe-area bottom
 and keyboard top; it no longer uses an `inputAccessoryView` that can overlap the floating tab bar. A separate lifecycle
 label changes from waiting to attached or closed without polluting the guest's output. The controller rechecks its binding
 when the tab appears, retains failure output after EOF, and disables keyboard focus without a live input handler. These
@@ -144,6 +144,30 @@ Raw output is also mirrored to a connected `devicectl --console` stream. A usabl
 the same session, but `devicectl` did not forward stdin on the tested iPhone; keyboard input and the opt-in test FIFO work independently.
 Console mirroring currently writes synchronously to stdout. A stalled attached console can therefore stall the host's main
 queue even though socket I/O is bounded; ordinary on-screen use without an attached console is unaffected.
+
+Paste uses a normal button and the standard responder `paste:` action, including Command-V. The button stays enabled while
+Fish is connected and requests clipboard text on demand; unavailable or failed text loads are silently ignored. The active terminal
+enables UIKit's default editing interactions; the user confirmed the native three-finger floating toolbar appears and pastes
+on iPhone 15. Clipboard contents are requested only after a paste action. Delayed item-provider loads are discarded if the
+Fish input session changed or the tab is no longer visible. The parser tracks `CSI ?2004 h/l` and encloses pasted text in
+bracketed-paste markers when Fish requests that mode, preserving multiline text until the user submits it. Ordinary keyboard
+input retains its existing path. Focused screen tests cover split mode changes, combined cursor/paste modes, Unicode and reset.
+Whole multi-byte input batches are rejected before transmission if they cannot fit the bounded pending-input queue, so a
+large paste cannot lose its closing marker to queue exhaustion. Individual keys still reach the line discipline when the
+queue is full, including Ctrl-C. Blocked-socket tests verify rejection without a partial paste, recovery, and control-key delivery.
+
+Keyboard input now uses a non-drawing `UITextField` proxy, which gives UIKit a real `UITextInput` implementation while the
+separate read-only text view remains responsible for terminal output. This also supports keyboard tools that select only
+`UITextInput` delegates instead of routing standard responder actions. The inspected UnderDock Paste action uses that
+private delegate accessor; the host does not hook it. The proxy forwards input and paste to the same Fish session, retains
+marked text locally until commit, clears it when hidden/closed, and follows the terminal caret for keyboard-driven scrolling.
+The tap-to-focus recognizer excludes the shortcut scroller so it cannot cancel its Paste control or horizontal paging.
+On iPhone 15, the user confirmed all three paste paths work: the shortcut button, UnderDock, and the native three-finger toolbar.
+The final button replaces UIKit's automatically disabled Paste control; it does not pre-read or continuously monitor the clipboard.
+This test used native host PID 5007 on iPhone16,2 / iOS 26.1 (`23B50`) and the unchanged 23A343 simulator cache at
+`0x110000000`, UUID `73ED978A-FD25-3166-A57A-34E21BB7E5B8`, without LLDB. The final normal-button build was separately
+development-signed, installed after stopping the owned session, and relaunched as host PID 5128. Local real-UIKit tests
+cover replacement/marked-text delivery, key routing and paste; they do not establish device gesture or focus behavior.
 
 The renderer is a basic ANSI screen. It is not a complete VT/xterm implementation: colors and unsupported modes have no
 visual effect, Unicode cell widths are incomplete, and full-screen terminal applications need separate work.

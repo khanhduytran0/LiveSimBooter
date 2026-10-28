@@ -17,14 +17,14 @@ static int prepareEnvironment(void) {
     const char *terminal = getenv(LSB_FAKE_PTY_ENV);
     if (dyld_get_active_platform() != 7 || !configuredRoot || configuredRoot[0] != '/' || !configuredData || configuredData[0] != '/' ||
         !terminal || terminal[0] != '/' || !isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO) || !isatty(STDERR_FILENO)) return ENOTTY;
-    char root[PATH_MAX], data[PATH_MAX], expectedData[PATH_MAX], path[PATH_MAX * 4 + 64];
+    char root[PATH_MAX], data[PATH_MAX], expectedData[PATH_MAX], path[PATH_MAX * 5 + 80];
     if (!realpath(configuredRoot, root) || !realpath(configuredData, data)) return errno;
     const char *leaf = strrchr(root, '/');
     if (!leaf || strcmp(leaf, "/" LSB_RUNTIME_DIRECTORY)) return EINVAL;
     int length = snprintf(expectedData, sizeof(expectedData), "%.*s/" LSB_DATA_DIRECTORY, (int)(leaf - root), root);
     if (length < 0 || (size_t)length >= sizeof(expectedData)) return ENAMETOOLONG;
     if (strcmp(data, expectedData)) return EINVAL;
-    length = snprintf(path, sizeof(path), "%s/bin:%s/usr/bin:%s/usr/sbin:%s/sbin", root, root, root, root);
+    length = snprintf(path, sizeof(path), "%s/usr/local/bin:%s/bin:%s/usr/bin:%s/usr/sbin:%s/sbin", root, root, root, root, root);
     if (length < 0 || (size_t)length >= sizeof(path)) return ENAMETOOLONG;
     if (setenv("TERM", "xterm-256color", 1) || setenv("HOME", data, 1) || setenv("CFFIXED_USER_HOME", data, 1) || setenv("PATH", path, 1))
         return errno;

@@ -6,6 +6,7 @@
 #include "ExecutablePath.h"
 #include "ProcessDisplayName.h"
 #include "NativeRuntimePolicy.h"
+#include "InsertedLibraries.h"
 #include "../NativeMetal/Backend.h"
 #include <errno.h>
 #include <dlfcn.h>
@@ -158,7 +159,7 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     policyEnvironment[launch.plan.envc] = NULL;
     LSBNativeRuntimePolicy nativePolicy = {0};
     if (!error) error = LSBResolveNativeRuntimePolicy(launch.nativeProductionStatus, policyEnvironment, &nativePolicy);
-    char executablePath[PATH_MAX], dyldPath[PATH_MAX], insertLibrary[PATH_MAX + 32], brokerEnvironment[64], detail[1024] = {0};
+    char executablePath[PATH_MAX], dyldPath[PATH_MAX], insertLibrary[LSB_INSERT_LIBRARIES_BYTES], brokerEnvironment[64], detail[1024] = {0};
     char capabilitiesEnvironment[PATH_MAX + sizeof("SIMULATOR_CAPABILITIES=")];
     char statusEnvironment[64], wakeEnvironment[64];
     char guestPIDEnvironment[48], parentPIDEnvironment[48];
@@ -167,8 +168,7 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     if (!error) error = resolveExecutable(executablePath);
     int length = snprintf(dyldPath, sizeof(dyldPath), "%s/usr/lib/dyld_sim", launch.runtimeRoot);
     if (!error && (length < 0 || (size_t)length >= sizeof(dyldPath))) error = ENAMETOOLONG;
-    length = snprintf(insertLibrary, sizeof(insertLibrary), "DYLD_INSERT_LIBRARIES=%s/usr/lib/libLiveSimSpawn.dylib", launch.runtimeRoot);
-    if (!error && (length < 0 || (size_t)length >= sizeof(insertLibrary))) error = ENAMETOOLONG;
+    if (!error) error = LSBBuildGuestInsertedLibraries(launch.runtimeRoot, policyEnvironment, insertLibrary, sizeof(insertLibrary));
     length = snprintf(capabilitiesEnvironment, sizeof(capabilitiesEnvironment),
                       "SIMULATOR_CAPABILITIES=%s/Library/Developer/CoreSimulator/DeviceType/capabilities.plist", launch.runtimeRoot);
     if (!error && (length < 0 || (size_t)length >= sizeof(capabilitiesEnvironment))) error = ENAMETOOLONG;

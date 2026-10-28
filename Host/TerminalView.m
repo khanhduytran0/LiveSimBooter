@@ -8,12 +8,14 @@
 @interface LSBTerminalScreen : NSObject
 @property (nonatomic) NSUInteger rows, columns, row, column, cursorOffset;
 @property (nonatomic) BOOL cursorVisible;
+@property (nonatomic) BOOL bracketedPasteEnabled;
 @property (nonatomic, copy) void (^reply)(NSData *data);
 @property (nonatomic) BOOL presentationEnabled;
 @property (nonatomic, copy) void (^presentationHandler)(void);
 - (void)resizeRows:(NSUInteger)rows columns:(NSUInteger)columns;
 - (void)consume:(NSData *)data;
 - (NSString *)text;
+- (NSString *)pasteSequenceForText:(NSString *)text;
 @end
 
 @implementation LSBTerminalScreen {
@@ -204,7 +206,10 @@
             else if ([parameters isEqualToString:@">"] || [parameters isEqualToString:@">0"]) [self sendReply:@"\033[>0;1;0c"];
             break;
         case 'h': case 'l':
-            if (private && first == 25) self.cursorVisible = command == 'h';
+            if (private) for (NSString *part in parts) {
+                if (part.integerValue == 25) self.cursorVisible = command == 'h';
+                else if (part.integerValue == 2004) self.bracketedPasteEnabled = command == 'h';
+            }
             break;
         default: break; // Colors and unsupported modes have no visual effect.
     }
@@ -252,7 +257,7 @@
             case 'c':
                 [_history removeAllObjects];
                 for (NSUInteger row = 0; row < self.rows; ++row) [self eraseLineFrom:0 to:self.columns - 1 row:row];
-                self.row = self.column = 0; _wrapPending = NO; self.cursorVisible = YES;
+                self.row = self.column = 0; _wrapPending = NO; self.cursorVisible = YES; self.bracketedPasteEnabled = NO;
                 break;
             default: break;
         }
@@ -307,13 +312,104 @@
     }
     return text;
 }
+
+- (NSString *)pasteSequenceForText:(NSString *)text {
+    if (!text.length) return @"";
+    if (self.bracketedPasteEnabled) return [NSString stringWithFormat:@"\033[200~%@\033[201~", text];
+    return [text stringByReplacingOccurrencesOfString:@"\n" withString:@"\r"];
+}
 @end
 
 #ifndef LSB_TERMINAL_SCREEN_TESTING
+@interface LSBTerminalView () <UIGestureRecognizerDelegate>
+- (void)hardwareKey:(UIKeyCommand *)command;
+@end
+
+// UIKit and keyboard extensions get a real UITextInput delegate; the terminal screen remains the sole visible editor.
+@interface LSBTerminalInputField : UITextField <UITextFieldDelegate>
+@property (nonatomic, weak) LSBTerminalView *terminal;
+@end
+
+@implementation LSBTerminalInputField {
+    unsigned _nativeEditingDepth;
+}
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.delegate = self;
+        self.borderStyle = UITextBorderStyleNone;
+        self.backgroundColor = self.textColor = self.tintColor = UIColor.clearColor;
+        self.clipsToBounds = YES;
+        self.isAccessibilityElement = NO;
+        [self addTarget:self action:@selector(commitTextFromField) forControlEvents:UIControlEventEditingChanged];
+    }
+    return self;
+}
+- (BOOL)acceptsTerminalInput { return self.terminal.inputHandler != nil && self.terminal.presentationEnabled; }
+- (BOOL)canBecomeFirstResponder { return [self acceptsTerminalInput] && [super canBecomeFirstResponder]; }
+- (BOOL)hasText { return [self.terminal hasText]; }
+- (void)drawTextInRect:(CGRect)rect { (void)rect; }
+- (void)drawPlaceholderInRect:(CGRect)rect { (void)rect; }
+- (UIEditingInteractionConfiguration)editingInteractionConfiguration { return self.terminal.editingInteractionConfiguration; }
+- (NSArray<UIKeyCommand *> *)keyCommands { return self.terminal.keyCommands; }
+- (void)hardwareKey:(UIKeyCommand *)command { if ([self acceptsTerminalInput]) [self.terminal hardwareKey:command]; }
+- (BOOL)canPerformAction:(SEL)action withSender:(id)sender {
+    if (action == @selector(paste:) || action == @selector(hardwareKey:)) return [self acceptsTerminalInput];
+    return NO; // The proxy has no independently editable command line for Cut, Copy or Select All.
+}
+- (void)insertText:(NSString *)text {
+    if (_nativeEditingDepth) { [super insertText:text]; return; }
+    if (self.markedTextRange) {
+        ++_nativeEditingDepth; [super insertText:text]; --_nativeEditingDepth;
+        [self commitTextFromField];
+    }
+    else if ([self acceptsTerminalInput]) [self.terminal insertText:text];
+}
+- (void)deleteBackward {
+    if (_nativeEditingDepth) { [super deleteBackward]; return; }
+    if (self.markedTextRange) {
+        ++_nativeEditingDepth; [super deleteBackward]; --_nativeEditingDepth;
+        [self commitTextFromField];
+    }
+    else if ([self acceptsTerminalInput]) [self.terminal deleteBackward];
+}
+- (void)replaceRange:(UITextRange *)range withText:(NSString *)text {
+    ++_nativeEditingDepth; [super replaceRange:range withText:text]; --_nativeEditingDepth;
+    [self commitTextFromField];
+}
+- (void)setMarkedText:(NSString *)markedText selectedRange:(NSRange)selectedRange {
+    ++_nativeEditingDepth; [super setMarkedText:markedText selectedRange:selectedRange]; --_nativeEditingDepth;
+}
+- (void)commitTextFromField {
+    // UIKit can commit through text replacement instead of UIKeyInput. Keep its marked text local until it is committed.
+    if (_nativeEditingDepth || self.markedTextRange) return;
+    NSString *text = [self.text copy];
+    if (!text.length) return;
+    self.text = @"";
+    if ([self acceptsTerminalInput]) [self.terminal insertText:text];
+}
+- (void)unmarkText {
+    ++_nativeEditingDepth; [super unmarkText]; --_nativeEditingDepth;
+    [self commitTextFromField];
+}
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    (void)textField;
+    if ([self acceptsTerminalInput]) [self.terminal insertText:@"\n"];
+    return NO;
+}
+- (void)paste:(id)sender { if ([self acceptsTerminalInput]) [self.terminal paste:sender]; }
+- (BOOL)canPasteItemProviders:(NSArray<NSItemProvider *> *)providers {
+    return [self acceptsTerminalInput] && [self.terminal canPasteItemProviders:providers];
+}
+- (void)pasteItemProviders:(NSArray<NSItemProvider *> *)providers {
+    if ([self acceptsTerminalInput]) [self.terminal pasteItemProviders:providers];
+}
+@end
+
 @implementation LSBTerminalView {
     UITextView *_display;
+    LSBTerminalInputField *_inputField;
     UILabel *_status;
-    UIView *_controls;
+    UIScrollView *_controls;
     LSBTerminalScreen *_screen;
     UIFont *_font;
     CGFloat _cellWidth, _cellHeight;
@@ -323,6 +419,7 @@
     if ((self = [super initWithFrame:frame])) {
         self.backgroundColor = UIColor.blackColor;
         self.accessibilityLabel = @"Simulator terminal";
+        self.pasteConfiguration = [[UIPasteConfiguration alloc] initWithTypeIdentifiersForAcceptingClass:NSString.class];
         _font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
         _cellWidth = [@"M" sizeWithAttributes:@{NSFontAttributeName: _font}].width;
         _cellHeight = _font.lineHeight;
@@ -335,7 +432,7 @@
         _display.font = _font;
         _display.editable = NO;
         _display.selectable = NO;
-        // UIKit tracks the active terminal keyboard with the scroll gesture; the output stays read-only and input stays on this view.
+        // The real keyboard responder lives inside this scroll view, preserving interactive keyboard dismissal.
         _display.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
         _display.alwaysBounceVertical = YES;
         _display.textContainerInset = UIEdgeInsetsMake(8, 8, 8, 8);
@@ -343,13 +440,27 @@
         _display.textContainer.lineBreakMode = NSLineBreakByClipping;
         _display.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [self addSubview:_display];
+        _inputField = [[LSBTerminalInputField alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
+        _inputField.terminal = self;
+        _inputField.pasteConfiguration = self.pasteConfiguration;
+        _inputField.keyboardType = self.keyboardType;
+        _inputField.keyboardAppearance = self.keyboardAppearance;
+        _inputField.autocorrectionType = self.autocorrectionType;
+        _inputField.autocapitalizationType = self.autocapitalizationType;
+        _inputField.spellCheckingType = self.spellCheckingType;
+        _inputField.smartQuotesType = self.smartQuotesType;
+        _inputField.smartDashesType = self.smartDashesType;
+        _inputField.smartInsertDeleteType = self.smartInsertDeleteType;
+        [_display addSubview:_inputField];
         _status = [UILabel new];
         _status.textColor = UIColor.lightGrayColor;
         _status.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
         _status.adjustsFontForContentSizeCategory = YES;
         _status.numberOfLines = 2;
         [self addSubview:_status];
-        [self addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(focusTerminal:)]];
+        UITapGestureRecognizer *focus = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(focusTerminal:)];
+        focus.delegate = self;
+        [self addGestureRecognizer:focus];
         [self buildControls];
         _screen.presentationHandler = ^{ [weakSelf render]; };
     }
@@ -358,28 +469,59 @@
 
 - (void)buildControls {
     // Keep shortcuts inside the terminal's safe-area/keyboard constraints. A system inputAccessoryView can sit under a floating tab bar.
-    UIView *controls = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 400, 44)];
+    UIScrollView *controls = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 0, 400, 44)];
     controls.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1];
     controls.userInteractionEnabled = NO;
     controls.alpha = 0.5;
-    UIStackView *stack = [[UIStackView alloc] initWithFrame:controls.bounds];
-    stack.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    stack.distribution = UIStackViewDistributionFillEqually;
-    NSArray *labels = @[@"Esc", @"Tab", @"^C", @"^D", @"←", @"↓", @"↑", @"→", @"↵"];
-    for (NSUInteger index = 0; index < labels.count; ++index) {
-        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-        [button setTitle:labels[index] forState:UIControlStateNormal];
-        button.titleLabel.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightMedium];
-        button.tag = (NSInteger)index;
-        [button addTarget:self action:@selector(controlPressed:) forControlEvents:UIControlEventTouchUpInside];
-        [stack addArrangedSubview:button];
+    controls.pagingEnabled = YES;
+    controls.directionalLockEnabled = YES;
+    controls.showsVerticalScrollIndicator = NO;
+    controls.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    controls.accessibilityLabel = @"Terminal shortcuts";
+    NSArray *labels = @[@"Esc", @"Tab", @"^C", @"^D", @"←", @"↓", @"↑", @"→", @"↵", @"Paste"];
+    UIStackView *previous = nil;
+    for (NSArray<NSNumber *> *indices in @[@[@0, @1, @2, @3, @8, @9], @[@4, @5, @6, @7]]) {
+        UIStackView *page = [UIStackView new];
+        page.translatesAutoresizingMaskIntoConstraints = NO;
+        page.distribution = UIStackViewDistributionFillEqually;
+        for (NSNumber *index in indices) {
+            UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+            [button setTitle:labels[index.unsignedIntegerValue] forState:UIControlStateNormal];
+            button.titleLabel.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightMedium];
+            button.tag = index.integerValue;
+            // Try Paste on demand even before UIKit has discovered clipboard text, including a remote clipboard.
+            [button addTarget:self action:index.unsignedIntegerValue == 9 ? @selector(paste:) : @selector(controlPressed:)
+                forControlEvents:UIControlEventTouchUpInside];
+            [page addArrangedSubview:button];
+        }
+        [controls addSubview:page];
+        [NSLayoutConstraint activateConstraints:@[
+            [page.leadingAnchor constraintEqualToAnchor:previous ? previous.trailingAnchor : controls.contentLayoutGuide.leadingAnchor],
+            [page.topAnchor constraintEqualToAnchor:controls.contentLayoutGuide.topAnchor],
+            [page.bottomAnchor constraintEqualToAnchor:controls.contentLayoutGuide.bottomAnchor],
+            [page.widthAnchor constraintEqualToAnchor:controls.frameLayoutGuide.widthAnchor],
+            [page.heightAnchor constraintEqualToAnchor:controls.frameLayoutGuide.heightAnchor]
+        ]];
+        previous = page;
     }
-    [controls addSubview:stack];
+    [previous.trailingAnchor constraintEqualToAnchor:controls.contentLayoutGuide.trailingAnchor].active = YES;
     [self addSubview:controls];
     _controls = controls;
 }
 
-- (BOOL)canBecomeFirstResponder { return self.inputHandler != nil; }
+- (BOOL)canBecomeFirstResponder { return self.inputHandler != nil && self.presentationEnabled; }
+- (BOOL)becomeFirstResponder {
+    if (![self canBecomeFirstResponder]) return NO;
+    [self layoutIfNeeded];
+    [self render]; // Place the real responder at the current terminal caret before UIKit tries to reveal it.
+    return [_inputField becomeFirstResponder];
+}
+- (BOOL)resignFirstResponder { return [_inputField resignFirstResponder]; }
+- (BOOL)isFirstResponder { return _inputField.isFirstResponder; }
+- (UIEditingInteractionConfiguration)editingInteractionConfiguration {
+    // Use UIKit's productivity gestures with this responder's standard Paste action; the output view stays read-only.
+    return self.inputHandler ? UIEditingInteractionConfigurationDefault : UIEditingInteractionConfigurationNone;
+}
 - (BOOL)hasText { return YES; }
 - (UIKeyboardType)keyboardType { return UIKeyboardTypeASCIICapable; }
 - (UIKeyboardAppearance)keyboardAppearance { return UIKeyboardAppearanceDark; }
@@ -390,6 +532,11 @@
 - (UITextSmartDashesType)smartDashesType { return UITextSmartDashesTypeNo; }
 - (UITextSmartInsertDeleteType)smartInsertDeleteType { return UITextSmartInsertDeleteTypeNo; }
 - (void)focusTerminal:(UITapGestureRecognizer *)gesture { (void)gesture; [self becomeFirstResponder]; }
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gesture shouldReceiveTouch:(UITouch *)touch {
+    (void)gesture;
+    // Ancestor tap recognizers cancel descendant touches by default. Leave Paste, shortcut buttons and their paging scroll alone.
+    return ![touch.view isDescendantOfView:_controls];
+}
 
 - (void)sendString:(NSString *)text {
     if (self.inputHandler) self.inputHandler([text dataUsingEncoding:NSUTF8StringEncoding]);
@@ -398,6 +545,42 @@
 - (void)insertText:(NSString *)text { [self sendString:[text stringByReplacingOccurrencesOfString:@"\n" withString:@"\r"]]; }
 - (void)deleteBackward { [self sendString:@"\177"]; }
 
+- (BOOL)canPerformAction:(SEL)action withSender:(id)sender {
+    if (action == @selector(paste:)) return self.inputHandler != nil;
+    return [super canPerformAction:action withSender:sender];
+}
+
+- (BOOL)canPasteItemProviders:(NSArray<NSItemProvider *> *)providers {
+    if (!self.inputHandler) return NO;
+    for (NSItemProvider *provider in providers) if ([provider canLoadObjectOfClass:NSString.class]) return YES;
+    return NO;
+}
+
+- (void)paste:(id)sender {
+    (void)sender;
+    // The standard Paste action is an explicit user gesture; no clipboard content is read while rendering or updating controls.
+    if (self.inputHandler) [self pasteItemProviders:UIPasteboard.generalPasteboard.itemProviders];
+}
+
+- (void)pasteItemProviders:(NSArray<NSItemProvider *> *)providers {
+    void (^handler)(NSData *) = self.inputHandler;
+    if (!handler) return;
+    __weak LSBTerminalView *weakSelf = self;
+    for (NSItemProvider *provider in providers) {
+        if (![provider canLoadObjectOfClass:NSString.class]) continue;
+        [provider loadObjectOfClass:NSString.class completionHandler:^(id<NSItemProviderReading> object, NSError *error) {
+            NSString *text = !error && [object isKindOfClass:NSString.class] ? [(NSString *)object copy] : nil;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                LSBTerminalView *terminal = weakSelf;
+                // A delayed clipboard load must not enter a different Fish session or a tab that was dismissed meanwhile.
+                if (text.length && terminal.inputHandler == handler && terminal.presentationEnabled)
+                    [terminal sendString:[terminal->_screen pasteSequenceForText:text]];
+            });
+        }];
+        break; // The text representation of the first supported clipboard item is the terminal paste.
+    }
+}
+
 - (void)controlPressed:(UIButton *)button {
     NSArray *sequences = @[@"\033", @"\t", @"\003", @"\004", @"\033[D", @"\033[B", @"\033[A", @"\033[C", @"\r"];
     if ((NSUInteger)button.tag < sequences.count) [self sendString:sequences[(NSUInteger)button.tag]];
@@ -405,6 +588,7 @@
 
 - (NSArray<UIKeyCommand *> *)keyCommands {
     NSMutableArray *commands = [NSMutableArray new];
+    [commands addObject:[UIKeyCommand keyCommandWithInput:@"v" modifierFlags:UIKeyModifierCommand action:@selector(paste:)]];
     for (NSString *input in @[UIKeyInputUpArrow, UIKeyInputDownArrow, UIKeyInputLeftArrow, UIKeyInputRightArrow, @"\033", @"\t"]) {
         UIKeyCommand *command = [UIKeyCommand keyCommandWithInput:input modifierFlags:0 action:@selector(hardwareKey:)];
         command.wantsPriorityOverSystemBehavior = YES;
@@ -451,6 +635,7 @@
             offset:MIN(self->_screen.cursorOffset, styled.length)];
         if (cursor) {
             CGRect caret = [self->_display caretRectForPosition:cursor];
+            self->_inputField.frame = CGRectMake(caret.origin.x, caret.origin.y, 1, 1);
             if (!CGRectContainsRect(self->_display.bounds, caret)) [self->_display scrollRectToVisible:caret animated:NO];
         }
     }];
@@ -466,13 +651,16 @@
 }
 
 - (BOOL)isPresentationEnabled { return _screen.presentationEnabled; }
-- (void)setPresentationEnabled:(BOOL)enabled { _screen.presentationEnabled = enabled; }
+- (void)setPresentationEnabled:(BOOL)enabled {
+    _screen.presentationEnabled = enabled;
+    if (!enabled) { [self resignFirstResponder]; _inputField.text = @""; }
+}
 
 - (void)setInputHandler:(void (^)(NSData *data))inputHandler {
     _inputHandler = [inputHandler copy];
     _controls.userInteractionEnabled = _inputHandler != nil;
     _controls.alpha = _inputHandler ? 1 : 0.5;
-    if (!_inputHandler) [self resignFirstResponder];
+    if (!_inputHandler) { [self resignFirstResponder]; _inputField.text = @""; }
 }
 
 - (void)setStatusText:(NSString *)statusText {
@@ -495,7 +683,13 @@
     statusHeight = MIN(statusHeight, self.bounds.size.height);
     _status.frame = CGRectMake(8, 8, MAX(0, self.bounds.size.width - 16), MAX(0, statusHeight - 16));
     CGFloat controlsHeight = MIN(44, MAX(0, self.bounds.size.height - statusHeight));
+    CGFloat oldWidth = _controls.bounds.size.width;
+    NSInteger page = oldWidth > 0 ? (NSInteger)llround(_controls.contentOffset.x / oldWidth) : 0;
     _controls.frame = CGRectMake(0, self.bounds.size.height - controlsHeight, self.bounds.size.width, controlsHeight);
+    if (oldWidth != _controls.bounds.size.width) {
+        [_controls layoutIfNeeded];
+        _controls.contentOffset = CGPointMake(MAX(0, MIN(page, 1)) * _controls.bounds.size.width, 0);
+    }
     _display.frame = CGRectMake(0, statusHeight, self.bounds.size.width, MAX(0, self.bounds.size.height - statusHeight - controlsHeight));
     NSUInteger columns = MAX(1, (NSInteger)((self.bounds.size.width - 16) / _cellWidth));
     NSUInteger rows = MAX(1, (NSInteger)((_display.bounds.size.height - 16) / _cellHeight));

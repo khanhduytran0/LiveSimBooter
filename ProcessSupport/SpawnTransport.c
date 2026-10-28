@@ -3,6 +3,7 @@
 #include "SingleThreadGuard.h"
 #include "ChildStatus.h"
 #include "GuestEntitlements.h"
+#include "AudioOutput.h"
 #if !defined(LSB_GUEST_RUNTIME) && !defined(LSB_TRANSPORT_TESTING)
 #include "StoreAppGroups.h"
 #endif
@@ -18,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #if defined(LSB_TRANSPORT_TRACE)
 #include <stdio.h>
@@ -676,6 +678,58 @@ int LSBTransportCopyDebuggerInfo(pid_t nativePID, struct kinfo_proc *info) {
     return error;
 }
 
+int LSBTransportOpenAudioOutput(void **mapping, size_t *size) {
+    if (mapping) *mapping = NULL;
+    if (size) *size = 0;
+    if (!mapping || !size) return EINVAL;
+    xpc_object_t request = createRequest(LSB_REQUEST_OPEN_AUDIO_OUTPUT, 0, 0), reply = NULL;
+    if (!request) return ENOMEM;
+    int error = callBroker(request, &reply);
+    xpc_release(request);
+    void *region = NULL;
+    size_t length = 0;
+    bool remoteOpened = false;
+    if (!error) {
+        int remoteError = 0;
+        pid_t pid = 0;
+        uint64_t requestID = 0;
+        error = decodeReplyHeader(reply, &remoteError, &pid, &requestID);
+        remoteOpened = !error && !remoteError && !requestID && !pid;
+        xpc_object_t memory = error ? NULL : xpc_dictionary_get_value(reply, "audio-ring");
+        if (!error && (requestID || pid || xpc_dictionary_get_count(reply) != (remoteError ? 4u : 5u) ||
+            (remoteError ? memory != NULL : !memory || xpc_get_type(memory) != XPC_TYPE_SHMEM))) error = EPROTO;
+        if (!error) error = remoteError;
+        if (!error) {
+            length = xpc_shmem_map(memory, &region);
+            if (!region || length != LSBAudioMapBytes) error = EPROTO;
+        }
+    }
+    if (reply) xpc_release(reply);
+    if (error) {
+        if (region && length) munmap(region, length);
+        if (remoteOpened) LSBTransportCloseAudioOutput();
+    }
+    else { *mapping = region; *size = length; }
+    return error;
+}
+
+int LSBTransportCloseAudioOutput(void) {
+    xpc_object_t request = createRequest(LSB_REQUEST_CLOSE_AUDIO_OUTPUT, 0, 0), reply = NULL;
+    if (!request) return ENOMEM;
+    int error = callBroker(request, &reply);
+    xpc_release(request);
+    if (!error) {
+        int remoteError = 0;
+        pid_t pid = 0;
+        uint64_t requestID = 0;
+        error = decodeReplyHeader(reply, &remoteError, &pid, &requestID);
+        if (!error && (requestID || pid || xpc_dictionary_get_count(reply) != 4)) error = EPROTO;
+        if (!error) error = remoteError;
+    }
+    if (reply) xpc_release(reply);
+    return error;
+}
+
 int LSBTransportCopyProcessTask(pid_t guestPID, mach_port_t *task) {
     if (task) *task = MACH_PORT_NULL;
     if (!task || guestPID <= 0) return EINVAL;
@@ -1012,6 +1066,23 @@ int LSBTransportReplyProcessTask(LSBReceivedMessage *message, int error, mach_po
     return sendError ? sendError : encodingError;
 }
 
+int LSBTransportReplyAudioOutput(LSBReceivedMessage *message, int error, void *sharedMemory) {
+    if (!message || !message->object || error < 0 || message->kind != LSB_REQUEST_OPEN_AUDIO_OUTPUT || message->requestID) return EINVAL;
+    xpc_object_t memory = sharedMemory;
+    int encodingError = error ? (memory ? EINVAL : 0) : (!memory || xpc_get_type(memory) != XPC_TYPE_SHMEM ? EINVAL : 0);
+    if (encodingError) error = encodingError;
+    xpc_object_t reply = xpc_dictionary_create_reply(message->object);
+    if (!reply) { xpc_release(message->object); message->object = NULL; return EPIPE; }
+    xpc_dictionary_set_uint64(reply, "version", LSB_TRANSPORT_VERSION);
+    xpc_dictionary_set_uint64(reply, "request-id", 0);
+    xpc_dictionary_set_int64(reply, "error", error);
+    xpc_dictionary_set_int64(reply, "pid", 0);
+    if (!error) xpc_dictionary_set_value(reply, "audio-ring", memory);
+    int sendError = xpc_pipe_routine_reply(reply);
+    xpc_release(reply); xpc_release(message->object); message->object = NULL;
+    return sendError ? sendError : encodingError;
+}
+
 int LSBTransportReplyProcessIdentity(LSBReceivedMessage *message, int error, const LSBPeerProcessIdentity *identity) {
     if (!message || !message->object || error < 0 || message->kind != LSB_REQUEST_COPY_PROCESS_IDENTITY || message->requestID) return EINVAL;
     int encodingError = 0;
@@ -1087,7 +1158,7 @@ int LSBTransportReceive(mach_port_t port, LSBReceivedMessage *message) {
     uint64_t version = 0, kind = 0;
     int64_t childError = 0;
     if (!unsignedValue(request, "version", &version) || version != LSB_TRANSPORT_VERSION ||
-        !unsignedValue(request, "kind", &kind) || kind < LSB_REQUEST_SPAWN || kind > LSB_REQUEST_COPY_PROCESS_TASK ||
+        !unsignedValue(request, "kind", &kind) || kind < LSB_REQUEST_SPAWN || kind > LSB_REQUEST_CLOSE_AUDIO_OUTPUT ||
         !unsignedValue(request, "request-id", &message->requestID) || !signedValue(request, "error", &childError) ||
         childError < 0 || childError > INT_MAX) error = EPROTO;
     if (!error) {
@@ -1097,7 +1168,8 @@ int LSBTransportReceive(mach_port_t port, LSBReceivedMessage *message) {
             xpc_dictionary_get_value(request, "native-production-status") || xpc_dictionary_get_value(request, "task-capture-port") ||
             xpc_dictionary_get_value(request, "task-capture-nonce") || xpc_dictionary_get_value(request, "process-task")) error = EPROTO;
         // This control request must carry only its four-field envelope, including no capabilities under unknown keys.
-        if ((kind == LSB_REQUEST_REBOOT_USERSPACE || kind == LSB_REQUEST_LIST_PROCESSES) && xpc_dictionary_get_count(request) != 4) error = EPROTO;
+        if ((kind == LSB_REQUEST_REBOOT_USERSPACE || kind == LSB_REQUEST_LIST_PROCESSES || kind == LSB_REQUEST_OPEN_AUDIO_OUTPUT ||
+             kind == LSB_REQUEST_CLOSE_AUDIO_OUTPUT) && xpc_dictionary_get_count(request) != 4) error = EPROTO;
     }
     if (!error) {
         if (kind == LSB_REQUEST_READY) {

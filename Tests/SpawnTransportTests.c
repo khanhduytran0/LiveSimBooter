@@ -1444,7 +1444,7 @@ static int host(const char *executable) {
 }
 
 int main(int argc, char **argv) {
-    _Static_assert(LSB_TRANSPORT_VERSION == 5 && LSB_BOOTSTRAP_VERSION == 3, "task queries and native capture offers require current transport/bootstrap versions");
+    _Static_assert(LSB_TRANSPORT_VERSION == 6 && LSB_BOOTSTRAP_VERSION == 3, "audio output and native capture require current transport/bootstrap versions");
     // Bound a failed regression test without adding a signal handler to the production transport.
     alarm(20);
     return argc == 2 && !strcmp(argv[1], "--client") ? client() : host(argv[0]);

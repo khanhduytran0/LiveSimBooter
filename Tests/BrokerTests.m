@@ -17,7 +17,15 @@
 #import "../Host/DeviceConfiguration.h"
 static LSBGuestDeviceType *testConfiguredDeviceType(void);
 static void testSaveDeviceType(LSBGuestDeviceType *);
-static int testInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *, NSDictionary *);
+static int testInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *, NSDictionary *, BOOL);
+static BOOL testConfiguredHaptics(void);
+static void testSaveHaptics(BOOL);
+static BOOL testConfiguredAudio(void);
+static void testSaveAudio(BOOL);
+#define LSBExperimentalAudioOutputEnabled testConfiguredAudio
+#define LSBSaveConfiguredAudioOutputEnabled testSaveAudio
+#define LSBExperimentalHapticsEnabled testConfiguredHaptics
+#define LSBSaveConfiguredHapticsEnabled testSaveHaptics
 #define LSBConfiguredGuestDeviceType testConfiguredDeviceType
 #define LSBSaveConfiguredGuestDeviceType testSaveDeviceType
 #define LSBInstallGuestDeviceCapabilitiesWithNativeHaptics testInstallGuestDeviceCapabilitiesWithNativeHaptics
@@ -49,6 +57,10 @@ static int testTaskCaptureReceive(const LSBTaskPortCaptureOffer *, const audit_t
 #undef LSBLaunchdUnregisterEndpointWithTimeout
 #undef LSBCopyXMLFromDEREntitlementsWithDictionary
 #undef LSBReadMachOCodeDirectoryHash
+#undef LSBExperimentalAudioOutputEnabled
+#undef LSBSaveConfiguredAudioOutputEnabled
+#undef LSBExperimentalHapticsEnabled
+#undef LSBSaveConfiguredHapticsEnabled
 #undef LSBConfiguredGuestDeviceType
 #undef LSBSaveConfiguredGuestDeviceType
 #undef LSBInstallGuestDeviceCapabilitiesWithNativeHaptics
@@ -58,7 +70,12 @@ uint32_t LSBHostNativeProductionStatus(void) { return testNativeProductionStatus
 
 // Isolate preference publication from the developer's real NSUserDefaults domain; filesystem validation/install stays real.
 static NSString *savedDeviceIdentifier;
-static unsigned devicePreferenceWrites;
+static unsigned devicePreferenceWrites, hapticsPreferenceWrites, audioPreferenceWrites;
+static BOOL savedHaptics, testNativeHaptics, savedAudio;
+static BOOL testConfiguredAudio(void) { return LSBAudioOutputForcedByEnvironment() || savedAudio; }
+static void testSaveAudio(BOOL enabled) { savedAudio = enabled; ++audioPreferenceWrites; }
+static BOOL testConfiguredHaptics(void) { return LSBHapticsForcedByEnvironment() || savedHaptics; }
+static void testSaveHaptics(BOOL enabled) { savedHaptics = enabled; ++hapticsPreferenceWrites; }
 static LSBGuestDeviceType *testConfiguredDeviceType(void) {
     return LSBGuestDeviceTypeForIdentifier(savedDeviceIdentifier) ?: LSBDefaultGuestDeviceType();
 }
@@ -67,10 +84,10 @@ static void testSaveDeviceType(LSBGuestDeviceType *type) {
     savedDeviceIdentifier = [type.identifier copy];
     ++devicePreferenceWrites;
 }
-static int testInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *root, NSDictionary *profile) {
-    if (!LSBExperimentalHapticsEnabled()) return LSBInstallGuestDeviceCapabilities(root, profile);
+static int testInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *root, NSDictionary *profile, BOOL enabled) {
+    if (!enabled) return LSBInstallGuestDeviceCapabilities(root, profile);
     NSDictionary *adapted = nil;
-    int error = LSBProjectGuestHapticsCapability(profile, kCFBooleanFalse, &adapted);
+    int error = LSBProjectGuestHapticsCapability(profile, testNativeHaptics ? kCFBooleanTrue : kCFBooleanFalse, &adapted);
     return error ? error : LSBInstallGuestDeviceCapabilities(root, adapted);
 }
 
@@ -116,9 +133,11 @@ static void (^endpointHook)(unsigned index);
 static unsigned nativeConfigdLookupCalls;
 static kern_return_t nativeConfigdLookupError;
 static mach_port_t nativeConfigdEndpoint;
-static unsigned nativeHapticsLookupCalls;
-static kern_return_t nativeHapticsLookupError;
-static mach_port_t nativeHapticsEndpoint;
+static unsigned hapticCreates, hapticCloses, audioCreates, audioInvalidates;
+static int hapticCreateError, audioCreateError, audioReplySendError;
+static BOOL hapticMissingEndpoint, hapticCopyFailure;
+static BOOL (^hapticAuthorization)(const audit_token_t *);
+static void *audioSharedMemoryReply;
 static unsigned unregisterCalls;
 static int unregisterError;
 static uint32_t unregisterTimeout;
@@ -227,15 +246,6 @@ static int testCopyXMLFromDEREntitlementsWithDictionary(const void *der, size_t 
 static kern_return_t testBootstrapLookup(mach_port_t bootstrap, const char *name, mach_port_t *port) {
     assert(!NSThread.isMainThread && bootstrap == bootstrap_port);
     assert(port);
-    if (!strcmp(name, "com.apple.audio.hapticd")) {
-        ++nativeHapticsLookupCalls;
-        *port = MACH_PORT_NULL;
-        if (nativeHapticsLookupError) return nativeHapticsLookupError;
-        if (MACH_PORT_VALID(nativeHapticsEndpoint))
-            assert(!mach_port_mod_refs(mach_task_self(), nativeHapticsEndpoint, MACH_PORT_RIGHT_SEND, 1));
-        *port = nativeHapticsEndpoint;
-        return KERN_SUCCESS;
-    }
     assert(!strcmp(name, "com.apple.SystemConfiguration.configd"));
     ++nativeConfigdLookupCalls;
     *port = MACH_PORT_NULL;
@@ -309,6 +319,59 @@ int LSBTestUnregisterEndpoint(mach_port_t service, const audit_token_t *audit, c
 - (pid_t)connectedClientPID { return 0; }
 - (mach_port_t)registrationPort { return 333; }
 - (void)close { ++self.closes; }
+@end
+
+// These tests isolate broker ownership and authorization; the native service tests exercise their real implementations.
+@interface LSBAudioOutput ()
+@property BOOL testValid;
+@end
+@implementation LSBAudioOutput
+- (instancetype)initWithError:(int *)error {
+    assert(NSThread.isMainThread);
+    ++audioCreates;
+    *error = audioCreateError;
+    if (*error) return nil;
+    if ((self = [super init])) self.testValid = YES;
+    return self;
+}
+- (void *)sharedMemory { assert(self.testValid); return (__bridge void *)self; }
+- (void)invalidate { if (_testValid) { ++audioInvalidates; _testValid = NO; } }
+- (void)dealloc { [self invalidate]; }
+@end
+
+@interface LSBHapticServer ()
+@property BOOL testValid, testHasSend;
+@property mach_port_t testPort;
+@end
+@implementation LSBHapticServer
+- (instancetype)initWithAuthorization:(BOOL (^)(const audit_token_t *))authorization error:(int *)error {
+    assert(NSThread.isMainThread && authorization);
+    ++hapticCreates;
+    *error = hapticCreateError;
+    if (*error) return nil;
+    if ((self = [super init])) {
+        self.testValid = YES;
+        hapticAuthorization = [authorization copy];
+        assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &_testPort));
+        if (!hapticCopyFailure) {
+            assert(!mach_port_insert_right(mach_task_self(), _testPort, _testPort, MACH_MSG_TYPE_MAKE_SEND));
+            _testHasSend = YES;
+        }
+    }
+    return self;
+}
+- (mach_port_t)registrationPort { return self.testValid && !hapticMissingEndpoint ? _testPort : MACH_PORT_NULL; }
+- (void)close {
+    if (_testValid) {
+        ++hapticCloses; _testValid = NO;
+        if (_testHasSend) assert(!mach_port_deallocate(mach_task_self(), _testPort));
+        _testHasSend = NO;
+    }
+}
+- (void)dealloc {
+    [self close];
+    if (MACH_PORT_VALID(_testPort)) assert(!mach_port_mod_refs(mach_task_self(), _testPort, MACH_PORT_RIGHT_RECEIVE, -1));
+}
 @end
 
 int LSBRunningBoardValidateIdentity(const audit_token_t *audit) {
@@ -387,7 +450,8 @@ int LSBTransportReply(LSBReceivedMessage *message, int error, pid_t pid, uint64_
                       const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS]) {
     assert(message && message->object && replyCount < sizeof(replies) / sizeof(replies[0]));
     int sendError = message->kind == LSB_REQUEST_READY ? readySendError : message->kind == LSB_REQUEST_REBOOT_USERSPACE ? rebootSendError :
-        message->kind == LSB_REQUEST_COPY_PROCESS_TASK ? taskReplySendError : 0;
+        message->kind == LSB_REQUEST_COPY_PROCESS_TASK ? taskReplySendError :
+        message->kind == LSB_REQUEST_OPEN_AUDIO_OUTPUT ? audioReplySendError : 0;
     if (plan) {
         assert(root && !strcmp(root, runtimeRoot.fileSystemRepresentation) && fds);
         for (unsigned i = 0; i < plan->fdCount; ++i) assert(fcntl(fds[i], F_GETFD) >= 0);
@@ -398,6 +462,11 @@ int LSBTransportReply(LSBReceivedMessage *message, int error, pid_t pid, uint64_
     message->object = NULL;
     if (message->kind == LSB_REQUEST_READY && readyReplyHook) readyReplyHook();
     return sendError;
+}
+int LSBTransportReplyAudioOutput(LSBReceivedMessage *message, int error, void *sharedMemory) {
+    assert(message->kind == LSB_REQUEST_OPEN_AUDIO_OUTPUT && (error ? !sharedMemory : sharedMemory != NULL));
+    audioSharedMemoryReply = error || audioReplySendError ? NULL : sharedMemory;
+    return LSBTransportReply(message, error, 0, 0, NULL, NULL, NULL);
 }
 int LSBTransportReplyEntitlements(LSBReceivedMessage *message, int error, const void *bytes, size_t size) {
     assert(message->kind == LSB_REQUEST_COPY_ENTITLEMENTS);
@@ -508,6 +577,10 @@ static void resetBroker(void) {
     sessionDraining = rebootDrainFailed = NO;
     rebootArguments = rebootEnvironment = nil;
     sessionDeviceType = pendingDeviceType = nil;
+    sessionHapticsEnabled = pendingHapticsEnabled = pendingHapticsPreference = sessionAudioEnabled = NO;
+    pendingAudioEnabled = pendingAudioPreference = savedAudio = NO;
+    savedHaptics = testNativeHaptics = NO;
+    hapticsPreferenceWrites = audioPreferenceWrites = 0;
     pendingDeviceCapabilities = nil;
     deviceChangeCompletion = nil;
     savedDeviceIdentifier = nil;
@@ -532,6 +605,8 @@ static void resetBroker(void) {
         [job.indigo close];
         [job.framebuffer close];
         [job.iosurface close];
+        [job.haptics close]; job.haptics = nil;
+        [job.audioOutput invalidate]; job.audioOutput = nil;
         if (job.request) disposeMessage(job.request);
         job.request = NULL;
     }
@@ -576,10 +651,13 @@ static void resetBroker(void) {
     nativeConfigdLookupCalls = 0;
     nativeConfigdLookupError = KERN_SUCCESS;
     nativeConfigdEndpoint = MACH_PORT_NULL;
-    nativeHapticsLookupCalls = 0;
     unsetenv("LSB_EXPERIMENTAL_HAPTICS");
-    nativeHapticsLookupError = KERN_FAILURE;
-    nativeHapticsEndpoint = MACH_PORT_NULL;
+    unsetenv("LSB_AUDIO_OUTPUT");
+    hapticCreates = hapticCloses = audioCreates = audioInvalidates = 0;
+    hapticCreateError = audioCreateError = audioReplySendError = 0;
+    hapticMissingEndpoint = hapticCopyFailure = NO;
+    hapticAuthorization = nil;
+    audioSharedMemoryReply = NULL;
     unregisterCalls = unregisterTimeout = 0;
     unregisterError = 0;
     memset(unregisteredEndpoint, 0, sizeof(unregisteredEndpoint));
@@ -816,6 +894,8 @@ static void testInitialGuestArguments(void) {
                 assert(!fstat(initial->fds[i], &other) && first.st_dev == other.st_dev && first.st_ino == other.st_ino);
             }
             assert(!strcmp(plan->strings + plan->argv[1], "-i"));
+            NSString *path = [NSString stringWithFormat:@"PATH=%@/usr/local/bin:%@/bin:%@/usr/bin", runtimeRoot, runtimeRoot, runtimeRoot];
+            assert(!strcmp(plan->strings + plan->envp[3], path.UTF8String));
             assert(!strncmp(plan->strings + plan->envp[4], LSB_FAKE_PTY_ENV "=", sizeof(LSB_FAKE_PTY_ENV)));
         }
         assert(!strcmp(plan->strings + plan->envp[0], "LSB_TEST=preserved"));
@@ -1917,10 +1997,11 @@ static void testNativeConfigdBridgeRegistration(void) {
 }
 
 static void testNativeHapticsBridgeRegistration(void) {
-    enum { Success, Headless, LookupFailure, RegistrationFailure, UnknownTimeout, MissingEndpoint, DisplayFailure, Disabled, InvalidOptIn };
+    enum { Success, Headless, CreationFailure, RegistrationFailure, UnknownTimeout, MissingEndpoint, CopyFailure, DisplayFailure, Disabled, InvalidOptIn };
     for (unsigned test = Success; test <= InvalidOptIn; ++test) {
         resetBroker();
         if (test != Disabled) assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", test == InvalidOptIn ? "true" : "1", 1));
+        sessionHapticsEnabled = testConfiguredHaptics();
         LSBJob *launchd = runTestJob(nil, 799);
         launchd.simulatorLaunchd = YES;
         if (test != Headless) {
@@ -1929,40 +2010,168 @@ static void testNativeHapticsBridgeRegistration(void) {
             launchd.iosurface = [RecordedIOSurfaceServer new];
         }
         launchd.servicesPending = YES;
-        mach_port_t service = newServiceEndpoint(), native = newServiceEndpoint();
-        nativeHapticsEndpoint = test == MissingEndpoint ? MACH_PORT_NULL : native;
-        nativeHapticsLookupError = test == LookupFailure ? KERN_PROTECTION_FAILURE : KERN_SUCCESS;
+        mach_port_t service = newServiceEndpoint();
+        if (test == CreationFailure) hapticCreateError = ENOTSUP;
+        if (test == MissingEndpoint) hapticMissingEndpoint = YES;
+        if (test == CopyFailure) hapticCopyFailure = YES;
         if (test == RegistrationFailure) endpointErrors[3] = EACCES;
         if (test == UnknownTimeout) endpointErrors[3] = ETIMEDOUT;
         if (test == DisplayFailure) endpointErrors[0] = EACCES;
+        prepareHapticServer(launchd);
+        unsigned expectedCreates = test == Headless || test == Disabled || test == InvalidOptIn ? 0 : 1;
+        assert(hapticCreates == expectedCreates);
+        mach_port_t relayPort = launchd.haptics.registrationPort;
         endpointHook = ^(unsigned index) {
-            if (index != 3) return;
+            if (index < 3) return;
+            assert(index == 3 && !strcmp(registeredEndpoints[index], "com.apple.audio.hapticd") && registeredPorts[index] == relayPort);
             mach_port_urefs_t references = 0;
-            assert(nativeHapticsLookupCalls == 1 && registeredPorts[index] == native);
-            assert(!strcmp(registeredEndpoints[index], "com.apple.audio.hapticd"));
-            assert(!mach_port_get_refs(mach_task_self(), native, MACH_PORT_RIGHT_SEND, &references) && references == 2);
+            assert(!mach_port_get_refs(mach_task_self(), relayPort, MACH_PORT_RIGHT_SEND, &references) && references == 2);
             audit_token_t expected = launchd.audit;
             assert(!memcmp(&registeredAudits[index], &expected, sizeof(expected)));
         };
         registerDisplayServices(launchd, service);
+        savedHaptics = !sessionHapticsEnabled; // Preferences after capture cannot change this session's publication.
+        unsetenv("LSB_EXPERIMENTAL_HAPTICS");
         runMainQueueUntil(^BOOL { return !launchd.servicesPending; });
         unsigned expectedCalls = test == Headless ? 0 : test == DisplayFailure ? 1 :
-                                 test == LookupFailure || test == MissingEndpoint || test == Disabled || test == InvalidOptIn ? 3 : 4;
-        unsigned expectedLookups = test == Headless || test == DisplayFailure || test == Disabled || test == InvalidOptIn ? 0 : 1;
-        assert(endpointCalls == expectedCalls && nativeHapticsLookupCalls == expectedLookups);
-        assert(launchd.servicesError == (test == DisplayFailure ? EACCES : 0)); // Haptics failures never fail baseline services.
+            test == Disabled || test == InvalidOptIn || test == CreationFailure || test == MissingEndpoint || test == CopyFailure ? 3 : 4;
+        assert(endpointCalls == expectedCalls && launchd.servicesError == (test == DisplayFailure ? EACCES : 0));
         mach_port_urefs_t references = 0;
-        assert(!mach_port_get_refs(mach_task_self(), native, MACH_PORT_RIGHT_SEND, &references) && references == 1);
         assert(!mach_port_get_refs(mach_task_self(), service, MACH_PORT_RIGHT_SEND, &references) && references == 1);
         registerDisplayServices(launchd, service);
-        assert(endpointCalls == expectedCalls && nativeHapticsLookupCalls == expectedLookups); // Never retry an unknown registration.
+        assert(endpointCalls == expectedCalls && hapticCreates == expectedCreates); // Unknown registration never retries.
         finishJob(launchd, ECANCELED);
-        assert(!mach_port_deallocate(mach_task_self(), native));
-        assert(!mach_port_mod_refs(mach_task_self(), native, MACH_PORT_RIGHT_RECEIVE, -1));
+        assert(hapticCloses == (expectedCreates && test != CreationFailure ? 1u : 0u));
         assert(!mach_port_deallocate(mach_task_self(), service));
         assert(!mach_port_mod_refs(mach_task_self(), service, MACH_PORT_RIGHT_RECEIVE, -1));
     }
-    unsetenv("LSB_EXPERIMENTAL_HAPTICS");
+}
+
+static void testHapticRegistrationKeepsOwnedRight(void) {
+    resetBroker();
+    sessionHapticsEnabled = YES;
+    LSBJob *launchd = terminalLaunchd();
+    launchd.indigo = [RecordedIndigoServer new];
+    launchd.servicesPending = YES;
+    prepareHapticServer(launchd);
+    LSBHapticServer *relay = launchd.haptics;
+    mach_port_t endpoint = relay.registrationPort, service = newServiceEndpoint();
+    dispatch_semaphore_t entered = dispatch_semaphore_create(0), release = dispatch_semaphore_create(0);
+    endpointHook = ^(unsigned index) {
+        if (!index) return;
+        assert(index == 1 && registeredPorts[index] == endpoint);
+        dispatch_semaphore_signal(entered);
+        assert(!dispatch_semaphore_wait(release, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)));
+    };
+    registerDisplayServices(launchd, service);
+    assert(!dispatch_semaphore_wait(entered, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)));
+    mach_port_urefs_t references = 0;
+    assert(!mach_port_get_refs(mach_task_self(), endpoint, MACH_PORT_RIGHT_SEND, &references) && references == 2);
+    finishJob(launchd, ECANCELED);
+    assert(hapticCloses == 1 && !relay.registrationPort);
+    assert(!mach_port_get_refs(mach_task_self(), endpoint, MACH_PORT_RIGHT_SEND, &references) && references == 1);
+    dispatch_semaphore_signal(release);
+    runMainQueueUntil(^BOOL { return !hasRight(endpoint, MACH_PORT_TYPE_SEND); });
+    // The relay's receive right remains until its final object is released, making send-reference ownership observable.
+    assert(hasRight(endpoint, MACH_PORT_TYPE_RECEIVE));
+    assert(!mach_port_deallocate(mach_task_self(), service));
+    assert(!mach_port_mod_refs(mach_task_self(), service, MACH_PORT_RIGHT_RECEIVE, -1));
+    resetBroker();
+}
+
+static BOOL authorizeHapticAudit(audit_token_t audit) {
+    assert(hapticAuthorization);
+    __block BOOL done = NO, allowed = NO;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        allowed = hapticAuthorization(&audit);
+        dispatch_async(dispatch_get_main_queue(), ^{ done = YES; });
+    });
+    runMainQueueUntil(^BOOL { return done; });
+    return allowed;
+}
+
+static void testHapticRelayAuthentication(void) {
+    resetBroker();
+    sessionHapticsEnabled = YES;
+    LSBJob *launchd = terminalLaunchd(), *client = managedJob(launchd, 6601);
+    client.peerIdentityError = 0;
+    launchd.indigo = [RecordedIndigoServer new];
+    prepareHapticServer(launchd);
+    assert(hapticCreates == 1 && launchd.haptics);
+    assert(authorizeHapticAudit(client.audit));
+    for (unsigned word = 0; word < 8; ++word) {
+        audit_token_t invalid = client.audit;
+        ++invalid.val[word];
+        assert(!authorizeHapticAudit(invalid));
+    }
+    for (unsigned test = 0; test < 8; ++test) {
+        client.executionRole = test == 0 ? LSB_EXECUTION_NATIVE_METAL_SERVICE : LSB_EXECUTION_SIMULATOR;
+        client.phase = test == 1 ? JobDispatched : JobRunning;
+        client.retiredForExec = test == 2;
+        client.finishing = test == 3;
+        client.peerIdentityError = test == 4 ? ESRCH : 0;
+        sessionDraining = test == 5;
+        sessionHapticsEnabled = test != 6;
+        if (test == 7) ++rebootGeneration;
+        assert(!authorizeHapticAudit(client.audit));
+    }
+    client.finishing = client.retiredForExec = sessionDraining = NO;
+    sessionHapticsEnabled = YES;
+    --rebootGeneration;
+    assert(authorizeHapticAudit(client.audit));
+    finishJob(launchd, ECANCELED);
+    assert(hapticCloses == 1 && !authorizeHapticAudit(client.audit));
+    resetBroker();
+}
+
+static void testAudioOutputAuthenticationAndOwnership(void) {
+    for (unsigned kind = LSB_REQUEST_OPEN_AUDIO_OUTPUT; kind <= LSB_REQUEST_CLOSE_AUDIO_OUTPUT; ++kind) {
+        for (unsigned test = 0; test < 16; ++test) {
+            resetBroker();
+            sessionAudioEnabled = test != 8;
+            LSBJob *client = managedJob(nil, 6601);
+            client.peerIdentityError = test == 13 ? ESRCH : 0;
+            client.executionRole = test == 9 ? LSB_EXECUTION_NATIVE_METAL_SERVICE : LSB_EXECUTION_SIMULATOR;
+            client.phase = test == 10 ? JobDispatched : JobRunning;
+            client.retiredForExec = test == 11;
+            client.finishing = test == 12;
+            sessionDraining = test == 14;
+            LSBReceivedMessage *request = messageFor(kind, client.pid, client.pidVersion, 0);
+            request->audit = client.audit;
+            if (test < 8) ++request->audit.val[test];
+            if (test == 15) [jobs removeObject:client];
+            handleMessage(request);
+            int expectedError = test == 8 ? EPERM : test == 14 ? ECANCELED : EACCES;
+            assert(replies[replyCount - 1].error == expectedError && !audioCreates && !client.audioOutput);
+        }
+    }
+    for (unsigned test = 0; test < 4; ++test) {
+        resetBroker();
+        sessionAudioEnabled = YES;
+        LSBJob *client = managedJob(nil, 6601);
+        client.peerIdentityError = 0;
+        if (test == 1) audioCreateError = ENOMEM;
+        if (test == 2) audioReplySendError = EPIPE;
+        handleMessage(messageFor(LSB_REQUEST_OPEN_AUDIO_OUTPUT, client.pid, client.pidVersion, 0));
+        assert(audioCreates == 1 && replies[replyCount - 1].error == audioCreateError);
+        if (test == 1 || test == 2) {
+            assert(!client.audioOutput && !audioSharedMemoryReply && audioInvalidates == (test == 2 ? 1u : 0u));
+            continue;
+        }
+        assert(client.audioOutput && audioSharedMemoryReply == client.audioOutput.sharedMemory && !audioInvalidates);
+        LSBAudioOutput *first = client.audioOutput;
+        handleMessage(messageFor(LSB_REQUEST_OPEN_AUDIO_OUTPUT, client.pid, client.pidVersion, 0));
+        assert(replies[replyCount - 1].error == EBUSY && audioCreates == 1 && client.audioOutput == first && !audioInvalidates);
+        if (test == 3) finishJob(client, ECANCELED);
+        else {
+            for (unsigned repeat = 0; repeat < 2; ++repeat) {
+                handleMessage(messageFor(LSB_REQUEST_CLOSE_AUDIO_OUTPUT, client.pid, client.pidVersion, 0));
+                assert(!replies[replyCount - 1].error && audioInvalidates == 1 && !client.audioOutput);
+            }
+        }
+        assert(audioInvalidates == 1 && !client.audioOutput);
+    }
+    resetBroker();
 }
 
 static void testDirectConfigdWaitsForSelectedBridge(void) {
@@ -4428,6 +4637,230 @@ static NSDictionary *activeDeviceProfile(void) {
     return [NSDictionary dictionaryWithContentsOfURL:[NSURL fileURLWithPath:activeDeviceProfilePath()] error:NULL];
 }
 
+static unsigned hapticsEnvironmentCount(const LSBSpawnPlan *plan) {
+    unsigned count = 0;
+    for (unsigned i = 0; i < plan->envc; ++i) if (!strcmp(plan->strings + plan->envp[i], "LSB_EXPERIMENTAL_HAPTICS=1")) ++count;
+    return count;
+}
+
+static void testSessionEnvironmentIsHostSelected(void) {
+    for (unsigned flags = 0; flags < 4; ++flags) {
+        resetBroker();
+        sessionHapticsEnabled = flags & 1;
+        sessionAudioEnabled = !!(flags & 2);
+        savedHaptics = !sessionHapticsEnabled;
+        // A later native environment change, like a guest-supplied flag, cannot change the already committed snapshot.
+        assert(!setenv("LSB_AUDIO_OUTPUT", sessionAudioEnabled ? "0" : "1", 1));
+        int descriptor;
+        unsigned object;
+        LSBReceivedMessage *request = spawnRequest(&descriptor, &object);
+        for (const char **entry = (const char *[]){"LSB_EXPERIMENTAL_HAPTICS=0", "KEEP=1", "LSB_EXPERIMENTAL_HAPTICS=1",
+                "LSB_EXPERIMENTAL_HAPTICS=1", "LSB_EXPERIMENTAL_HAPTICS_SUFFIX=1", "LSB_AUDIO_OUTPUT=0", "LSB_AUDIO_OUTPUT=1",
+                "LSB_AUDIO_OUTPUT=1", "LSB_AUDIO_OUTPUT_SUFFIX=1", NULL}; *entry; ++entry)
+            assert(!LSBPlanAddString(&request->plan, *entry, &request->plan.envp[request->plan.envc++]));
+        LSBJob *job = enqueueJob(request, nil, LSB_EXECUTION_SIMULATOR);
+        unsigned count = 3 + sessionHapticsEnabled + sessionAudioEnabled;
+        assert(job && request->plan.envc == count && hapticsEnvironmentCount(&request->plan) == sessionHapticsEnabled);
+        assert(!strcmp(request->plan.strings + request->plan.envp[0], "KEEP=1"));
+        assert(!strcmp(request->plan.strings + request->plan.envp[1], "LSB_EXPERIMENTAL_HAPTICS_SUFFIX=1"));
+        assert(!strcmp(request->plan.strings + request->plan.envp[2], "LSB_AUDIO_OUTPUT_SUFFIX=1"));
+        unsigned audioFlags = 0;
+        for (unsigned i = 0; i < request->plan.envc; ++i) {
+            const char *entry = request->plan.strings + request->plan.envp[i];
+            if (!strncmp(entry, "LSB_AUDIO_OUTPUT=", strlen("LSB_AUDIO_OUTPUT="))) {
+                assert(!strcmp(entry, "LSB_AUDIO_OUTPUT=1"));
+                ++audioFlags;
+            }
+        }
+        assert(audioFlags == sessionAudioEnabled);
+        uint32_t bytes = request->plan.stringBytes;
+        assert(!applySessionEnvironment(&request->plan) && request->plan.stringBytes == bytes && request->plan.envc == count);
+        resetBroker();
+        assertClosed(descriptor);
+    }
+    resetBroker();
+    sessionHapticsEnabled = YES;
+    int descriptor;
+    unsigned object;
+    LSBReceivedMessage *request = spawnRequest(&descriptor, &object);
+    uint32_t offset;
+    assert(!LSBPlanAddString(&request->plan, "KEEP=1", &offset));
+    for (unsigned i = 0; i < LSB_MAX_VECTOR; ++i) request->plan.envp[request->plan.envc++] = offset;
+    assert(applySessionEnvironment(&request->plan) == E2BIG);
+    disposeMessage(request);
+    assertClosed(descriptor);
+    resetBroker();
+}
+
+static void testHapticsColdApplyRequiresStockProfile(void) {
+    resetBroker();
+    NSString *directory = makeRebootRuntime();
+    jobs = nil;
+    LSBGuestDeviceType *device = LSBDefaultGuestDeviceType();
+    NSDictionary *stock = deviceProfile(device), *projected = nil;
+    assert(!LSBProjectGuestHapticsCapability(stock, kCFBooleanTrue, &projected));
+    assert(!LSBInstallGuestDeviceCapabilities(runtimeRoot, projected));
+    __block unsigned calls = 0;
+    __block int result = -1;
+    LSBHostApplyHapticsEnabled(YES, ^(int error, BOOL restarted) { ++calls; result = error; assert(!restarted); });
+    assert(calls == 1 && result == ENOENT && !hapticsPreferenceWrites && !devicePreferenceWrites);
+    assert(!jobs && !submittedLaunches && !LSBHostCurrentHapticsEnabled() && [activeDeviceProfile() isEqual:projected]);
+    stageDeviceProfile(device, stock);
+    LSBHostApplyHapticsEnabled(YES, ^(int error, BOOL restarted) { ++calls; result = error; assert(!restarted); });
+    assert(calls == 2 && !result && hapticsPreferenceWrites == 1 && savedHaptics && LSBHostCurrentHapticsEnabled());
+    assert(!jobs && !submittedLaunches && [activeDeviceProfile() isEqual:projected]);
+    LSBHostApplyHapticsEnabled(YES, ^(int error, BOOL restarted) { ++calls; assert(!error && !restarted); });
+    assert(calls == 3 && hapticsPreferenceWrites == 1);
+    assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", "1", 1));
+    LSBHostApplyHapticsEnabled(NO, ^(int error, BOOL restarted) { ++calls; assert(error == EPERM && !restarted); });
+    assert(calls == 4 && savedHaptics && hapticsPreferenceWrites == 1);
+    unsetenv("LSB_EXPERIMENTAL_HAPTICS");
+    LSBHostApplyHapticsEnabled(NO, ^(int error, BOOL restarted) { ++calls; assert(!error && !restarted); });
+    assert(calls == 5 && !savedHaptics && hapticsPreferenceWrites == 2 && !jobs && !submittedLaunches);
+    resetBroker();
+    assert([NSFileManager.defaultManager removeItemAtPath:directory error:NULL]);
+}
+
+static void testHapticsApplyUsesImmutableSessionDecision(void) {
+    for (unsigned enable = 0; enable < 2; ++enable) {
+        resetBroker();
+        NSString *directory = makeRebootRuntime();
+        rememberRebootInputs();
+        sessionDeviceType = LSBDefaultGuestDeviceType();
+        sessionHapticsEnabled = savedHaptics = !enable;
+        sessionAudioEnabled = YES;
+        testNativeHaptics = YES;
+        NSMutableDictionary *stock = [deviceProfile(sessionDeviceType) mutableCopy];
+        NSMutableDictionary *values = [stock[@"capabilities"] mutableCopy];
+        [values removeObjectForKey:@"DeviceSupportsClosedLoopHaptics"];
+        stock[@"capabilities"] = values.copy;
+        NSString *staged = stageDeviceProfile(sessionDeviceType, stock);
+        assert(!testInstallGuestDeviceCapabilitiesWithNativeHaptics(runtimeRoot, stock, !enable));
+        NSDictionary *oldProfile = activeDeviceProfile();
+        terminalLaunchd();
+        enableIndigo = YES;
+        runningBoardError = 0;
+        __block unsigned calls = 0;
+        LSBHostApplyHapticsEnabled(enable, ^(int error, BOOL restarted) { ++calls; assert(!error && restarted); });
+        assert(sessionDraining && rebootPendingDeaths.count == 1 && !calls && !hapticsPreferenceWrites);
+        assert(LSBHostCurrentHapticsEnabled() == !enable && [activeDeviceProfile() isEqual:oldProfile]);
+        assert(!unlink(staged.fileSystemRepresentation)); // Preflight owns immutable stock; no post-drain reread.
+        savedHaptics = !enable;
+        LSBRunningBoardExitHandler exit = ((LSBRunningBoardMonitor *)rebootDeathMonitors[0]).completion;
+        exit(SIGKILL, 0);
+        assert(calls == 1 && hapticsPreferenceWrites == 1 && savedHaptics == enable && sessionHapticsEnabled == enable);
+        assert(!sessionDraining && !pendingHapticsPreference && startingJob.simulatorLaunchd && submittedLaunches == 1);
+        assert(hapticsEnvironmentCount(&startingJob.request->plan) == enable);
+        assert(sessionAudioEnabled && !audioPreferenceWrites);
+        NSDictionary *active = activeDeviceProfile();
+        if (enable) {
+            id value = active[@"capabilities"][@"DeviceSupportsClosedLoopHaptics"];
+            assert(CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() && [value boolValue]);
+        } else assert([active isEqual:stock]); // Restore absence as well as false; never restore the previously projected file.
+        savedHaptics = !enable;
+        assert(LSBHostCurrentHapticsEnabled() == enable); // External defaults edits cannot alter an active session.
+        resetBroker();
+        assert([NSFileManager.defaultManager removeItemAtPath:directory error:NULL]);
+    }
+}
+
+static void testHapticsPublicationFailureKeepsPreference(void) {
+    resetBroker();
+    NSString *directory = makeRebootRuntime();
+    rememberRebootInputs();
+    sessionDeviceType = LSBDefaultGuestDeviceType();
+    stageDeviceProfile(sessionDeviceType, deviceProfile(sessionDeviceType));
+    assert(!LSBInstallGuestDeviceCapabilities(runtimeRoot, deviceProfile(sessionDeviceType)));
+    terminalLaunchd();
+    enableIndigo = YES;
+    runningBoardError = 0;
+    __block unsigned calls = 0;
+    LSBHostApplyHapticsEnabled(YES, ^(int error, BOOL restarted) { ++calls; assert(error && restarted); });
+    assert(!calls && sessionDraining);
+    assert(!unlink(activeDeviceProfilePath().fileSystemRepresentation));
+    assert(!mkdir(activeDeviceProfilePath().fileSystemRepresentation, 0700));
+    LSBRunningBoardExitHandler exit = ((LSBRunningBoardMonitor *)rebootDeathMonitors[0]).completion;
+    exit(SIGKILL, 0);
+    assert(calls == 1 && !hapticsPreferenceWrites && !savedHaptics && !sessionHapticsEnabled && !submittedLaunches && rebootDrainFailed);
+    resetBroker();
+    assert([NSFileManager.defaultManager removeItemAtPath:directory error:NULL]);
+}
+
+static void testAudioColdApplyAndForceOverride(void) {
+    resetBroker();
+    NSString *directory = makeRebootRuntime();
+    jobs = nil;
+    savedHaptics = YES;
+    LSBGuestDeviceType *device = LSBDefaultGuestDeviceType();
+    __block unsigned calls = 0;
+    LSBHostApplyAudioOutputEnabled(YES, ^(int error, BOOL restarted) { ++calls; assert(error == ENOENT && !restarted); });
+    assert(calls == 1 && !audioPreferenceWrites && !LSBHostCurrentAudioOutputEnabled());
+    stageDeviceProfile(device, deviceProfile(device));
+    LSBHostApplyAudioOutputEnabled(YES, ^(int error, BOOL restarted) { ++calls; assert(!error && !restarted); });
+    assert(calls == 2 && audioPreferenceWrites == 1 && savedAudio && LSBHostCurrentAudioOutputEnabled());
+    assert(savedHaptics && !hapticsPreferenceWrites && !jobs && !submittedLaunches);
+    LSBHostApplyAudioOutputEnabled(YES, ^(int error, BOOL restarted) { ++calls; assert(!error && !restarted); });
+    assert(calls == 3 && audioPreferenceWrites == 1);
+    assert(!setenv("LSB_AUDIO_OUTPUT", "1", 1));
+    LSBHostApplyAudioOutputEnabled(NO, ^(int error, BOOL restarted) { ++calls; assert(error == EPERM && !restarted); });
+    assert(calls == 4 && savedAudio && audioPreferenceWrites == 1);
+    unsetenv("LSB_AUDIO_OUTPUT");
+    LSBHostApplyAudioOutputEnabled(NO, ^(int error, BOOL restarted) { ++calls; assert(!error && !restarted); });
+    assert(calls == 5 && !savedAudio && audioPreferenceWrites == 2 && savedHaptics && !hapticsPreferenceWrites);
+    resetBroker();
+    assert([NSFileManager.defaultManager removeItemAtPath:directory error:NULL]);
+}
+
+static void testAudioApplyUsesImmutableSessionDecision(void) {
+    for (unsigned scenario = 0; scenario < 3; ++scenario) {
+        resetBroker();
+        BOOL enable = scenario != 0;
+        NSString *directory = makeRebootRuntime();
+        rememberRebootInputs();
+        sessionDeviceType = LSBDefaultGuestDeviceType();
+        sessionAudioEnabled = savedAudio = !enable;
+        sessionHapticsEnabled = savedHaptics = testNativeHaptics = YES;
+        NSDictionary *stock = deviceProfile(sessionDeviceType);
+        NSString *staged = stageDeviceProfile(sessionDeviceType, stock);
+        assert(!testInstallGuestDeviceCapabilitiesWithNativeHaptics(runtimeRoot, stock, YES));
+        NSDictionary *oldProfile = activeDeviceProfile();
+        terminalLaunchd();
+        enableIndigo = YES;
+        runningBoardError = 0;
+        __block unsigned calls = 0;
+        LSBHostApplyAudioOutputEnabled(enable, ^(int error, BOOL restarted) {
+            ++calls; assert(restarted && (scenario == 2 ? error != 0 : error == 0));
+        });
+        assert(sessionDraining && rebootPendingDeaths.count == 1 && !calls && !audioPreferenceWrites);
+        assert(LSBHostCurrentAudioOutputEnabled() == !enable && [activeDeviceProfile() isEqual:oldProfile]);
+        assert(!unlink(staged.fileSystemRepresentation));
+        savedAudio = !enable;
+        savedHaptics = NO; // The pending decision preserves the committed haptics session, not later preference edits.
+        if (scenario == 2) {
+            assert(!unlink(activeDeviceProfilePath().fileSystemRepresentation));
+            assert(!mkdir(activeDeviceProfilePath().fileSystemRepresentation, 0700));
+        }
+        LSBRunningBoardExitHandler exit = ((LSBRunningBoardMonitor *)rebootDeathMonitors[0]).completion;
+        exit(SIGKILL, 0);
+        assert(calls == 1 && !hapticsPreferenceWrites && sessionHapticsEnabled && !pendingAudioPreference);
+        if (scenario == 2) {
+            assert(!audioPreferenceWrites && savedAudio == !enable && sessionAudioEnabled == !enable && rebootDrainFailed && !submittedLaunches);
+        } else {
+            assert(audioPreferenceWrites == 1 && savedAudio == enable && sessionAudioEnabled == enable);
+            assert(!sessionDraining && startingJob.simulatorLaunchd && submittedLaunches == 1);
+            assert(hapticsEnvironmentCount(&startingJob.request->plan) == 1 && [activeDeviceProfile() isEqual:oldProfile]);
+            unsigned audioFlags = 0;
+            for (unsigned index = 0; index < startingJob.request->plan.envc; ++index)
+                if (!strcmp(startingJob.request->plan.strings + startingJob.request->plan.envp[index], "LSB_AUDIO_OUTPUT=1")) ++audioFlags;
+            assert(audioFlags == enable);
+            savedAudio = !enable;
+            assert(LSBHostCurrentAudioOutputEnabled() == enable);
+        }
+        resetBroker();
+        assert([NSFileManager.defaultManager removeItemAtPath:directory error:NULL]);
+    }
+}
+
 static void testDeviceApplyPreflight(void) {
     LSBGuestDeviceType *target = LSBGuestDeviceTypeForIdentifier(@"iphone-se-2");
     for (unsigned scenario = 0; scenario < 6; ++scenario) {
@@ -4592,6 +5025,15 @@ int main(void) {
         testDisplayRegistrationSharesStartupBudget();
         testNativeConfigdBridgeRegistration();
         testNativeHapticsBridgeRegistration();
+        testHapticRegistrationKeepsOwnedRight();
+        testHapticRelayAuthentication();
+        testAudioOutputAuthenticationAndOwnership();
+        testSessionEnvironmentIsHostSelected();
+        testHapticsColdApplyRequiresStockProfile();
+        testHapticsApplyUsesImmutableSessionDecision();
+        testHapticsPublicationFailureKeepsPreference();
+        testAudioColdApplyAndForceOverride();
+        testAudioApplyUsesImmutableSessionDecision();
         testDirectConfigdWaitsForSelectedBridge();
         testNativeMetalReadyGatesLaunchd();
         testNativeMetalOwnerLifecycle();

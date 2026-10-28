@@ -96,12 +96,23 @@ for that physical file. The [device picker](device-types.md) keeps capabilities,
 Stage its seven original profiles below to enable Home-button/Home-indicator iPhones and iPads; iPhone 8/8 Plus remain experimental on this OS.
 
 Normal startup and device-picker apply publish the staged stock capability values unchanged. The active file is serialized as
-a binary plist and replaced atomically; staged originals remain untouched. The unfinished native haptic bridge
-is disabled by default: `LSB_EXPERIMENTAL_HAPTICS=1` in the **native host launch environment** enables both fixed hapticd
-endpoint publication and projection of `DeviceSupportsClosedLoopHaptics` from the actual native MobileGestalt answer.
-Only exact CFBoolean true enables that capability; unknown or malformed answers become false. Other profile fields and original
-staged profiles remain unchanged. Engine initialization has succeeded only with an additional temporary diagnostic adaptation;
-engine start still fails and physical playback is unverified. This opt-in is not a setup requirement; see [haptic validation](keyboard-haptics.md).
+a binary plist and replaced atomically; staged originals remain untouched. Experimental haptics default off. The native Settings
+choice, or exactly `LSB_EXPERIMENTAL_HAPTICS=1` in the **native host launch environment**, enables a session-owned haptic relay,
+the optional guest constructor helper, and projection of `DeviceSupportsClosedLoopHaptics` from actual native MobileGestalt.
+Only exact CFBoolean true enables that capability; unknown or malformed answers become false. The relay owns a genuine native
+host AudioSession; it does not forward a guest audio-session bypass to audiomxd. A public-engine transient was physically
+confirmed on iPhone 15; normal keyboard/UI feedback remains a separate validation step.
+Other profile fields and staged originals stay unchanged. See [haptic evidence and limits](keyboard-haptics.md).
+
+Audio output also defaults off and has its own native Settings switch. The switch restarts the simulator to apply the choice;
+exactly `LSB_AUDIO_OUTPUT=1` in the native host environment forces it on for diagnostics. It is independent of Silent
+background audio. AudioQueue, AVAudioEngine and AVAudioPlayer tone probes have physically confirmed output; see
+[audio output and its limits](audio-output.md).
+
+The optional audio-output and haptic dylibs are separate from the always-loaded C spawn shim. Stage them before enabling either
+feature in the native host; a missing enabled helper prevents guest startup. These settings are broker-owned session decisions,
+not guest environment overrides. The current transport is **ABI 6** (bootstrap ABI 3): rebuild and deploy the native host,
+LiveProcess extension, core spawn shim and optional helpers together. Do not mix an older installed host with the new overlay.
 
 ## Build and inspect the cache
 
@@ -194,6 +205,8 @@ python3 Tools/patch-ios26-cache-base.py \
 python3 Tools/patch-ios26-platform.py --source "$LSB_WORK/loader-base/dyld_sim" --output "$LSB_WORK/dyld_sim"
 python3 Tools/patch-ios26-launchd-identity.py --source "$LSB_RUNTIME_SOURCE/sbin/launchd_sim" --output "$LSB_WORK/launchd_sim"
 sh Tools/build-spawn-shim.sh "$LSB_WORK/guest/libLiveSimSpawn.dylib" "$LSB_WORK/guest/spawn-probe"
+sh Tools/build-audio-output-shim.sh "$LSB_WORK/guest/libLiveSimAudio.dylib"
+sh Tools/build-haptic-shim.sh "$LSB_WORK/guest/libLiveSimHaptics.dylib"
 sh Tools/build-terminal-fish.sh "$LSB_WORK/guest"
 sh Tools/build-display-settings.sh "$LSB_WORK/guest"
 sh Tools/build-launchctl-control.sh "$LSB_WORK/guest"
@@ -206,6 +219,15 @@ python3 Tools/patch-ios26-container-metadata.py --mach-o \
 ```
 
 These commands do not deploy or sign guest executables. `dyld_sim` retains `MH_DYLINKER`; executables retain `MH_EXECUTE`.
+Install diagnostic executables under `RuntimeRoot/usr/local/bin`, including `spawn-probe`, `lifecycle-probe`, and `exec-probe` when used.
+Keep production helpers in `usr/libexec` and runtime programs such as `df` and Fish at their existing paths. The generated simulator
+and terminal environments prepend the physical `RuntimeRoot/usr/local/bin` to `PATH`.
+
+The runtime staging command below signs all three helper dylibs with the app identity/identifier and no external entitlements.
+For an overlay of an existing runtime, sign fresh copies first with
+`codesign --force --sign "$LSB_SIGNING_IDENTITY" --identifier "$LSB_BUNDLE_ID" --timestamp=none <helper.dylib>`;
+stop all affected guests before atomically replacing the matching `RuntimeRoot/usr/lib` files, retain rollback copies, and install
+the matching native package. Disabling a feature omits its helper from insertion; merely staging the file does not enable it.
 For executables the staging tool uses [sign-sim-executable.py](../Tools/sign-sim-executable.py), which removes only
 `CS_EXECSEG_MAIN_BINARY` from the generated CodeDirectory and re-signs it. Guest signatures use the app's identifier and
 carry no application entitlements. Original simulator mock entitlement sections (`__TEXT,__ents_der` and related data)
@@ -283,7 +305,9 @@ python3 Tools/setup-ios26-runtime.py --runtime-root "$LSB_RUNTIME_SOURCE" \
   --add-binary "/usr/lib/dyld_sim=$LSB_WORK/dyld_sim" \
   --add-binary "/sbin/launchd_sim=$LSB_WORK/launchd_sim" \
   --add-binary "/usr/lib/libLiveSimSpawn.dylib=$LSB_WORK/guest/libLiveSimSpawn.dylib" \
-  --add-binary "/bin/spawn-probe=$LSB_WORK/guest/spawn-probe" \
+  --add-binary "/usr/lib/libLiveSimAudio.dylib=$LSB_WORK/guest/libLiveSimAudio.dylib" \
+  --add-binary "/usr/lib/libLiveSimHaptics.dylib=$LSB_WORK/guest/libLiveSimHaptics.dylib" \
+  --add-binary "/usr/local/bin/spawn-probe=$LSB_WORK/guest/spawn-probe" \
   --add-binary "/usr/libexec/terminal-fish=$LSB_WORK/guest/terminal-fish" \
   --add-binary "/usr/libexec/display-settings=$LSB_WORK/guest/display-settings" \
   --add-binary "/usr/libexec/launchctl-control=$LSB_WORK/guest/launchctl-control" \
@@ -527,7 +551,7 @@ launchctl operation: retrieve its original request ID as described in [guest-con
 Success is a sequence of observations, not the completion of a copy command:
 
 1. Inspect app/extension provisioning and signature metadata, cache/signing manifests, and the selected source runtime build.
-2. Observe `df` exit 0 and `/bin/spawn-probe --verify-statuses` with spawn/wait/SIGCHLD/SIGTERM results.
+2. Observe `df` exit 0 and `/usr/local/bin/spawn-probe --verify-statuses` with spawn/wait/SIGCHLD/SIGTERM results.
 3. Observe simulator launchd plus baseline daemons and successful endpoint registrations. The host bridge for selected configd_sim
    supplies only native `com.apple.SystemConfiguration.configd`; the `_sim` services remain guest-owned.
 4. Inspect the actual IOSurface image and Fish prompt. From Fish, run `df` and check `$status`. A screenshot is not proof of input delivery;

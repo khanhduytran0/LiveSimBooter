@@ -78,3 +78,13 @@ This is an ABI compatibility option for the existing Simulator runtime, not an i
 Missing symbols, private framework differences, unsupported system calls, encrypted executables, and arm64e remain separate
 constraints. A stock arm64e device image is not compatible merely because its platform is iOS. The current shell limitation
 around `fork`, `exec`, and full job control is also unaffected.
+
+## UIKitester arm64e inspection
+
+The native iOS 26.1 UIKitester bundle was inspected from an immutable copy. Both its executable and widget are arm64e,
+with `DYLD_CHAINED_PTR_ARM64E_USERLAND24` fixups. Changing only the main executable's CPU subtype to plain arm64 allowed
+the host loader's local header/layout preflight to pass; it was not signed, installed or executed on the phone.
+The main image contains 31,426 authenticated fixups. The pinned simulator dyld recognizes the pointer format but its arm64
+fixup implementation reports `architecture does not support PAC` when asked to sign one. Header relabeling therefore does
+not make this UIKitester build runnable. This conclusion comes from fixup enumeration and dyld disassembly, not a device
+crash. A matching plain-arm64 build or separate arm64e ABI support is still required.

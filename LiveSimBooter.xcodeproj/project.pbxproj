@@ -73,6 +73,7 @@
 		A9B7C410000000000000000E /* Exceptions for "Host" folder in "LiveSimBooter" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			additionalCompilerFlagsByRelativePath = {
+				AudioOutput.m = "-fobjc-arc";
 				BackgroundAudio.m = "-fobjc-arc";
 				BackgroundAudioPlayback.m = "-fobjc-arc";
 				Broker.m = "-fobjc-arc";
@@ -83,6 +84,7 @@
 				GuestDeviceSettings.m = "-fobjc-arc";
 				GuestDisplaySettings.m = "-fobjc-arc";
 				GuestEntitlementsConversion.m = "-fobjc-arc";
+				HapticServer.m = "-fobjc-arc";
 				HostApplication.m = "-fobjc-arc";
 				IOSurfaceServer.m = "-fobjc-arc";
 				IndigoHIDServer.m = "-fobjc-arc";

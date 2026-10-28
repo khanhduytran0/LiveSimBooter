@@ -381,7 +381,7 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
             @"SIMULATOR_SHARED_RESOURCES_DIRECTORY": dataPath, @"IPHONE_SHARED_RESOURCES_DIRECTORY": dataPath,
             @"SIMULATOR_LOG_ROOT": [dataPath stringByAppendingPathComponent:@"Library/Logs"],
             @"HOME": dataPath, @"CFFIXED_USER_HOME": dataPath, @"TMPDIR": [dataPath stringByAppendingString:@"/tmp/"],
-            @"PATH": [NSString stringWithFormat:@"%@/usr/bin:%@/bin:%@/usr/sbin:%@/sbin", root, root, root, root]
+            @"PATH": [NSString stringWithFormat:@"%@/usr/local/bin:%@/usr/bin:%@/bin:%@/usr/sbin:%@/sbin", root, root, root, root, root]
         } mutableCopy];
         if (services) {
             runtimeEnvironment[@"LSB_SIMULATE_NOTIFICATION_SHM"] = @"1";
@@ -441,7 +441,7 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
         if (includeJob) {
             // The trailing slash selects launchd's mobile-directory prefix rule before proxy calls chdir on the translated path.
             NSString *guestLog = [@"/private/var/mobile/Library/Logs" stringByAppendingPathComponent:logName];
-            NSString *program = backboard ? @"/usr/libexec/backboardd" : lifecycle ? @"/bin/lifecycle-probe" : @"/bin/df";
+            NSString *program = backboard ? @"/usr/libexec/backboardd" : lifecycle ? @"/usr/local/bin/lifecycle-probe" : @"/bin/df";
             NSMutableDictionary *job = [@{@"Label": label, @"ProgramArguments": @[program],
                                   @"WorkingDirectory": @"/private/var/mobile/", @"StandardOutPath": guestLog, @"StandardErrorPath": guestLog,
                                   @"RunAtLoad": @YES, @"KeepAlive": @NO} mutableCopy];

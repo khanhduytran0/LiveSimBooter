@@ -14,7 +14,7 @@ audited against that runtime's host-support libkernel. Recheck those layouts bef
    automatic startup. [The broker](../Host/Broker.m) selects the store App Group described below, locates its shared runtime,
    registers `<selected actual store group>.LiveSimBooter.spawn` with `bootstrap_check_in`, and starts its receiver. The normal
    initial guest is simulator launchd with the default graphical jobs. The ordinary Fish tab uses its launchd-owned helper and
-   [fake terminal](fake-pty.md), with job control disabled. Explicit `/bin/spawn-probe` selects the process test;
+   [fake terminal](fake-pty.md), with job control disabled. Explicit `/usr/local/bin/spawn-probe` selects the process test;
    `--terminal /bin/program ...` wraps an explicit development guest in that terminal. The actual `posix_spawn` call occurs inside the guest.
 2. [The launch adapter](../Host/ExtensionLauncher.m) uses `NSExtension` to discover `com.kdt.LiveSimBooter.LiveProcess`. It obtains
    the underlying `PKHostPlugIn` and creates a fresh instance UUID. `PKHost readyPlugIns:...ready:` asks pkd to launch that instance
@@ -398,16 +398,16 @@ phone needs profiles containing its UDID. The generic-build result does not esta
 
 The shim builder produces `tmp/multiprocess/libLiveSimSpawn.dylib` and `tmp/multiprocess/spawn-probe` for arm64 iOS Simulator.
 After signing them using the runtime's established rules, place them at `RuntimeRoot/usr/lib/libLiveSimSpawn.dylib` and
-`RuntimeRoot/bin/spawn-probe`, now under the selected group's `LSB/iOS/23A343` directory. Use an explicit first argument for the probe;
+`RuntimeRoot/usr/local/bin/spawn-probe`, now under the selected group's `LSB/iOS/23A343` directory. Use an explicit first argument for the probe;
 an ordinary cold launch waits for **Start**, then boots the graphical session.
 Launch the native host into the foreground:
 
 ```sh
 xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --console \
-  -- com.kdt.LiveSimBooter /bin/spawn-probe
+  -- com.kdt.LiveSimBooter /usr/local/bin/spawn-probe
 ```
 
-The phone must be unlocked for the launch. Pass `/bin/spawn-probe` for the process test or `/bin/df` for the earlier
+The phone must be unlocked for the launch. Pass `/usr/local/bin/spawn-probe` for the process test or `/bin/df` for the earlier
 single-program test. Keep the app window foregrounded during debugging pauses and longer runs. A debugger attachment alone
 does not establish that the native broker remains runnable, and a headless launch has no guaranteed background grace period.
 
@@ -439,7 +439,7 @@ after simulator startup before spawning, allowing LLDB to attach. Use `--debug-d
 
 ```sh
 xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --console \
-  -- com.kdt.LiveSimBooter /bin/spawn-probe --debug-delay 60 --repeat 2 --verify-statuses
+  -- com.kdt.LiveSimBooter /usr/local/bin/spawn-probe --debug-delay 60 --repeat 2 --verify-statuses
 ```
 
 `--stop-before-spawn` prints the probe PID and raises `SIGSTOP` once before the first spawn. Native stop/continue testing passed,

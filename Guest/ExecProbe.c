@@ -1,4 +1,4 @@
-// Run /bin/exec-probe (both cases), --exit-only, or --signal-only. Internal modes re-enter this same signed executable via SETEXEC.
+// Run /usr/local/bin/exec-probe (both cases), --exit-only, or --signal-only. Internal modes re-enter this same signed executable via SETEXEC.
 // Uses ordinary libc APIs: no fork and no assumptions about native PIDs. The broker's guest PID must survive replacement.
 #include <errno.h>
 #include <fcntl.h>

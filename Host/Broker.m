@@ -6,6 +6,8 @@
 #include "RunningBoardMonitor.h"
 #include "SessionControlQueue.h"
 #import "DeviceConfiguration.h"
+#import "AudioOutput.h"
+#import "HapticServer.h"
 #import "RuntimeStorage.h"
 #include "NativeProductionStatus.h"
 #include "StoreAppGroups.h"
@@ -64,6 +66,8 @@ enum { JobQueued, JobStarting, JobDispatched, JobRunning };
 @property (nonatomic, strong) LSBIndigoHIDServer *indigo;
 @property (nonatomic, strong) LSBFramebufferServer *framebuffer;
 @property (nonatomic, strong) LSBIOSurfaceServer *iosurface;
+@property (nonatomic, strong) LSBAudioOutput *audioOutput;
+@property (nonatomic, strong) LSBHapticServer *haptics;
 @property BOOL servicesPending;
 @property int servicesError;
 @property BOOL nativeConfigdSelected;
@@ -150,6 +154,8 @@ static NSMutableArray<LSBRunningBoardMonitor *> *rebootDeathMonitors;
 static NSMutableArray<dispatch_source_t> *rebootExitSources;
 static LSBGuestDeviceType *sessionDeviceType, *pendingDeviceType;
 static NSDictionary *pendingDeviceCapabilities;
+static BOOL sessionHapticsEnabled, pendingHapticsEnabled, pendingHapticsPreference;
+static BOOL sessionAudioEnabled, pendingAudioEnabled, pendingAudioPreference;
 static void (^deviceChangeCompletion)(int, BOOL);
 // Allow every launchd child to overlap its exec replacement, plus launchd and the backboardd, SpringBoard and public Metal helpers.
 enum { BrokerJobCapacity = 2 * LSB_CHILD_STATUS_CAPACITY + 4, DisplayRegistrationTimeoutSeconds = 30,
@@ -174,12 +180,15 @@ static int prepareRuntimeRoot(void);
 static int signalJob(LSBJob *child, int signalNumber);
 static int signalTerminal(pid_t foreground, int signalNumber);
 static BOOL launchdOwnsChildIdentity(LSBJob *job);
+static BOOL authenticatedSimulatorJob(LSBJob *job, const audit_token_t *expected);
 static LSBJob *enqueueNativeMetalHelper(BOOL publicAccess, const char *name, int *result);
 static void registerReplacementSpringBoardMetal(LSBJob *active, LSBJob *helper);
 static void finishJob(LSBJob *job, int error);
 
 LSBTerminalSession *LSBHostTerminal(void) { return hostTerminal; }
 LSBGuestDeviceType *LSBHostCurrentDeviceType(void) { return jobs ? sessionDeviceType ?: LSBConfiguredGuestDeviceType() : LSBConfiguredGuestDeviceType(); }
+BOOL LSBHostCurrentHapticsEnabled(void) { return jobs ? sessionHapticsEnabled : LSBExperimentalHapticsEnabled(); }
+BOOL LSBHostCurrentAudioOutputEnabled(void) { return jobs ? sessionAudioEnabled : LSBExperimentalAudioOutputEnabled(); }
 BOOL LSBHostCanApplyDeviceType(void) {
     if (sessionDraining || deviceChangeCompletion || launchLaneFailed || startingJob) return NO;
     if (!jobs) return YES;
@@ -191,30 +200,53 @@ static void finishDeviceChange(int error) {
     deviceChangeCompletion = nil;
     pendingDeviceType = nil;
     pendingDeviceCapabilities = nil;
+    pendingHapticsPreference = pendingAudioPreference = NO;
     if (completion) completion(error, YES);
 }
-void LSBHostApplyDeviceType(LSBGuestDeviceType *type, void (^completion)(int, BOOL)) {
+static void applySessionConfiguration(LSBGuestDeviceType *type, BOOL hapticsEnabled, BOOL audioEnabled, BOOL saveHaptics, BOOL saveAudio,
+                                      void (^completion)(int, BOOL)) {
     if (!NSThread.isMainThread) { if (completion) completion(EPERM, NO); return; }
     if (!type || type != LSBGuestDeviceTypeForIdentifier(type.identifier)) { if (completion) completion(EINVAL, NO); return; }
     if (!LSBHostCanApplyDeviceType()) { if (completion) completion(EBUSY, NO); return; }
-    if (type == LSBHostCurrentDeviceType()) { if (completion) completion(0, NO); return; }
+    if (type == LSBHostCurrentDeviceType() && hapticsEnabled == LSBHostCurrentHapticsEnabled() && audioEnabled == LSBHostCurrentAudioOutputEnabled()) {
+        if (completion) completion(0, NO);
+        return;
+    }
     int error = runtimeRoot ? 0 : prepareRuntimeRoot();
     NSDictionary *capabilities = nil;
-    if (!error) error = LSBCopyGuestDeviceCapabilities(runtimeRoot, type, &capabilities);
+    if (!error) error = LSBCopyStagedGuestDeviceCapabilities(runtimeRoot, type, &capabilities);
     if (error) { if (completion) completion(error, NO); return; }
     if (!jobs) {
         // The Start gate has not opened. Persist the validated choice; installation happens before the first guest.
         LSBSaveConfiguredGuestDeviceType(type);
+        if (saveHaptics) LSBSaveConfiguredHapticsEnabled(hapticsEnabled);
+        if (saveAudio) LSBSaveConfiguredAudioOutputEnabled(audioEnabled);
         if (completion) completion(0, NO);
         return;
     }
     pendingDeviceType = type;
     pendingDeviceCapabilities = capabilities;
+    pendingHapticsEnabled = hapticsEnabled;
+    pendingHapticsPreference = saveHaptics;
+    pendingAudioEnabled = audioEnabled;
+    pendingAudioPreference = saveAudio;
     deviceChangeCompletion = [completion copy];
-    fprintf(stderr, "[broker] Applying device %s through simulator session restart\n", type.identifier.UTF8String);
+    fprintf(stderr, "[broker] Applying device %s haptics=%d audio=%d through simulator session restart\n",
+            type.identifier.UTF8String, hapticsEnabled, audioEnabled);
     // Host-requested restart uses the same drain as guest reboot. Unlike launchctl's graceful shutdown, every tracked
     // guest (including launchd) is terminated here; no profile or framebuffer is replaced until death is observed.
     beginUserspaceReboot(nil);
+}
+void LSBHostApplyDeviceType(LSBGuestDeviceType *type, void (^completion)(int, BOOL)) {
+    applySessionConfiguration(type, LSBHostCurrentHapticsEnabled(), LSBHostCurrentAudioOutputEnabled(), NO, NO, completion);
+}
+void LSBHostApplyHapticsEnabled(BOOL enabled, void (^completion)(int, BOOL)) {
+    if (LSBHapticsForcedByEnvironment()) { if (completion) completion(EPERM, NO); return; }
+    applySessionConfiguration(LSBHostCurrentDeviceType(), enabled, LSBHostCurrentAudioOutputEnabled(), YES, NO, completion);
+}
+void LSBHostApplyAudioOutputEnabled(BOOL enabled, void (^completion)(int, BOOL)) {
+    if (LSBAudioOutputForcedByEnvironment()) { if (completion) completion(EPERM, NO); return; }
+    applySessionConfiguration(LSBHostCurrentDeviceType(), LSBHostCurrentHapticsEnabled(), enabled, NO, YES, completion);
 }
 int LSBHostUsesSimulatorDisplay(void) { return enableIndigo; }
 LSBIndigoHIDServer *LSBHostIndigoHIDServer(void) {
@@ -743,6 +775,8 @@ static int resolveAuditPID(const audit_token_t *audit, pid_t *result) {
 static void finishJob(LSBJob *job, int error) {
     if (!findJob(job.identifier) || job.finishing) return;
     job.finishing = YES;
+    [job.audioOutput invalidate]; job.audioOutput = nil;
+    [job.haptics close]; job.haptics = nil;
     releaseGuestProcessIdentity(job);
     ++finishingDepth;
     if (error && job.request && !LSBValidateSpawnPlan(&job.request->plan)) {
@@ -1055,6 +1089,31 @@ static void publishTerminal(LSBTerminalSession *terminal) {
     [terminal start];
 }
 
+static int applySessionEnvironmentFlag(LSBSpawnPlan *plan, const char *enabledValue, BOOL enabled) {
+    size_t prefixLength = strlen(enabledValue) - 1;
+    uint32_t count = 0, enabledOffset = 0;
+    BOOL foundEnabled = NO;
+    for (uint32_t index = 0; index < plan->envc; ++index) {
+        const char *entry = plan->strings + plan->envp[index];
+        if (!strncmp(entry, enabledValue, prefixLength)) {
+            if (!strcmp(entry, enabledValue)) { foundEnabled = YES; enabledOffset = plan->envp[index]; }
+        } else plan->envp[count++] = plan->envp[index];
+    }
+    plan->envc = count;
+    if (!enabled) return 0;
+    if (count == LSB_MAX_VECTOR) return E2BIG;
+    int error = 0;
+    if (!foundEnabled) error = LSBPlanAddString(plan, enabledValue, &enabledOffset);
+    if (!error) plan->envp[plan->envc++] = enabledOffset;
+    return error;
+}
+static int applySessionEnvironment(LSBSpawnPlan *plan) {
+    int error = LSBValidateSpawnPlan(plan);
+    if (!error) error = applySessionEnvironmentFlag(plan, "LSB_EXPERIMENTAL_HAPTICS=1", sessionHapticsEnabled);
+    if (!error) error = applySessionEnvironmentFlag(plan, "LSB_AUDIO_OUTPUT=1", sessionAudioEnabled);
+    return error;
+}
+
 static LSBJob *enqueueJob(LSBReceivedMessage *message, LSBJob *parent, uint32_t executionRole) {
     if (executionRole > LSB_EXECUTION_NATIVE_METAL_SERVICE) { replyError(message, EINVAL); return nil; }
     // Only a locally constructed host request can select the native role. Guest RPCs never carry this authority.
@@ -1062,6 +1121,9 @@ static LSBJob *enqueueJob(LSBReceivedMessage *message, LSBJob *parent, uint32_t 
         (parent || message->object || message->ports.registeredPresent || message->ports.bootstrapPresent)) {
         replyError(message, EACCES); return nil;
     }
+    // Guest-supplied duplicate/removed flags cannot change the native session decision; native helpers stay untouched.
+    int environmentError = executionRole == LSB_EXECUTION_SIMULATOR ? applySessionEnvironment(&message->plan) : 0;
+    if (environmentError) { replyError(message, environmentError); return nil; }
     retryAdoptions();
     if (pendingAdoptions.count) { replyError(message, EAGAIN); return nil; }
     if (launchLaneFailed) { replyError(message, EBUSY); return nil; }
@@ -1111,6 +1173,8 @@ static void enqueueExec(LSBReceivedMessage *message, LSBJob *old) {
         replyError(message, ENOTSUP); return;
     }
     if (jobs.count >= BrokerJobCapacity) { replyError(message, EAGAIN); return; }
+    int environmentError = applySessionEnvironment(&message->plan);
+    if (environmentError) { replyError(message, environmentError); return; }
     LSBJob *job = [LSBJob new];
     int error = inheritChildStatus(job, old);
     if (error) { replyError(message, error); return; }
@@ -1297,6 +1361,14 @@ static void registerDisplayServices(LSBJob *active, mach_port_t service) {
     LSBFramebufferServer *framebuffer = active.framebuffer;
     LSBIOSurfaceServer *iosurface = active.iosurface;
     BOOL nativeConfigdSelected = active.nativeConfigdSelected;
+    LSBHapticServer *haptics = active.haptics;
+    mach_port_t hapticPort = haptics.registrationPort;
+    int hapticPortError = 0;
+    if (haptics && (!MACH_PORT_VALID(hapticPort) || mach_port_mod_refs(mach_task_self(), hapticPort, MACH_PORT_RIGHT_SEND, 1))) {
+        hapticPortError = EPIPE;
+        hapticPort = MACH_PORT_NULL;
+    }
+    // Copy on main before close can revoke the server's reference. The worker owns this right independently of the Objective-C object.
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         // Launchd can spend several seconds synchronously spawning its initial xpcproxy batch before servicing the final registration.
         // Keep each original request/reply alive within one bounded startup budget; timeout is an unknown outcome, not retry permission.
@@ -1340,19 +1412,13 @@ static void registerDisplayServices(LSBJob *active, mach_port_t service) {
                                                           metal, deadline, &backboardMetalStatus);
             endpointError = backboardMetalError;
         }
-        kern_return_t hapticsLookupStatus = -1, hapticsStatus = -1;
+        kern_return_t hapticsStatus = -1;
         int hapticsError = ECANCELED;
-        BOOL hapticsEnabled = LSBExperimentalHapticsEnabled();
-        if (!endpointError && indigo && hapticsEnabled) {
-            // Stock 23A343 CoreHaptics uses this NSXPC service. Publish only the native host's fixed lookup result;
-            // clients still connect with their real extension audit identity, and native hapticd enforces its own policy.
-            const char *name = "com.apple.audio.hapticd";
-            mach_port_t endpoint = MACH_PORT_NULL;
-            hapticsLookupStatus = bootstrap_look_up(bootstrap_port, name, &endpoint);
-            hapticsError = hapticsLookupStatus ? EIO : !MACH_PORT_VALID(endpoint) ? EPIPE :
-                registerDisplayEndpoint(service, &expected, name, endpoint, deadline, &hapticsStatus);
-            if (MACH_PORT_VALID(endpoint)) mach_port_deallocate(mach_task_self(), endpoint);
-            // Optional hardware access must not turn a missing service or rejected registration into a failed simulator boot.
+        if (!endpointError && haptics) {
+            // The native host relay owns its audio session and task token. Never publish native hapticd/AudioSession directly.
+            hapticsError = hapticPortError ? hapticPortError :
+                registerDisplayEndpoint(service, &expected, "com.apple.audio.hapticd", hapticPort, deadline, &hapticsStatus);
+            // Optional hardware access must not turn a rejected or unknown registration into a failed simulator boot.
         }
         // Release baseline jobs immediately after their registrations; the separate SpringBoard route must not delay backboardd.
         void (^finishBaseline)(void) = ^{
@@ -1366,8 +1432,7 @@ static void registerDisplayServices(LSBJob *active, mach_port_t service) {
             if (!current.servicesError) current.servicesError = helperLost ? EPIPE : endpointError;
             if (nativeConfigdSelected) fprintf(stderr, "[configd] native bridge error=%d lookup=%d bootstrap=%d\n",
                                                configdError, configdLookupStatus, configdStatus);
-            if (indigo && hapticsEnabled) fprintf(stderr, "[haptics] native bridge error=%d lookup=%d bootstrap=%d\n",
-                                hapticsError, hapticsLookupStatus, hapticsStatus);
+            if (haptics) fprintf(stderr, "[haptics] relay registration error=%d bootstrap=%d\n", hapticsError, hapticsStatus);
             if (indigo) fprintf(stderr, "[Indigo] registration error=%d bootstrap=%d\n", indigoError, indigoStatus);
             if (iosurface) fprintf(stderr, "[IOSurface] registration error=%d bootstrap=%d\n", iosurfaceError, iosurfaceStatus);
             if (framebuffer) fprintf(stderr, "[framebuffer] registration error=%d bootstrap=%d\n", framebufferError, framebufferStatus);
@@ -1384,6 +1449,7 @@ static void registerDisplayServices(LSBJob *active, mach_port_t service) {
         if (MACH_PORT_VALID(metal)) mach_port_deallocate(mach_task_self(), metal);
         if (MACH_PORT_VALID(publicMetal)) mach_port_deallocate(mach_task_self(), publicMetal);
         if (MACH_PORT_VALID(springBoardMetal)) mach_port_deallocate(mach_task_self(), springBoardMetal);
+        if (MACH_PORT_VALID(hapticPort)) mach_port_deallocate(mach_task_self(), hapticPort);
         mach_port_deallocate(mach_task_self(), service);
         if (!MACH_PORT_VALID(springBoardMetal)) dispatch_async(dispatch_get_main_queue(), finishBaseline);
         if (springBoardHelperIdentifier) dispatch_async(dispatch_get_main_queue(), ^{
@@ -1399,6 +1465,25 @@ static void registerDisplayServices(LSBJob *active, mach_port_t service) {
     });
 }
 
+static void prepareHapticServer(LSBJob *owner) {
+    if (!sessionHapticsEnabled || !owner.indigo || owner.haptics) return;
+    __weak LSBJob *weakOwner = owner;
+    uint64_t generation = rebootGeneration;
+    int error = 0;
+    owner.haptics = [[LSBHapticServer alloc] initWithAuthorization:^BOOL(const audit_token_t *audit) {
+        // The relay invokes this off main; all broker lifecycle state stays serialized with CHECKIN, exec and session drain.
+        __block BOOL allowed = NO;
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            LSBJob *current = weakOwner;
+            if (!current || findJob(current.identifier) != current || current.finishing || sessionDraining ||
+                generation != rebootGeneration || !sessionHapticsEnabled) return;
+            for (LSBJob *candidate in jobs) if (authenticatedSimulatorJob(candidate, audit)) { allowed = YES; break; }
+        });
+        return allowed;
+    } error:&error];
+    fprintf(stderr, "[haptics] relay initialization error=%d\n", owner.haptics ? 0 : error ? error : EIO);
+}
+
 static int prepareLaunchdHandshake(LSBJob *job) {
     if (job.nativeConfigdSelected) job.servicesPending = YES;
     if (enableIndigo) {
@@ -1412,6 +1497,7 @@ static int prepareLaunchdHandshake(LSBJob *job) {
         if (!job.framebuffer) return error ? error : ENOMEM;
         job.iosurface = [[LSBIOSurfaceServer alloc] initWithError:&error];
         if (!job.iosurface) return error ? error : ENOMEM;
+        prepareHapticServer(job);
         job.servicesPending = YES;
         [NSNotificationCenter.defaultCenter postNotificationName:LSBHostIndigoDidChangeNotification object:nil];
         [NSNotificationCenter.defaultCenter postNotificationName:LSBHostFramebufferDidChangeNotification object:nil];
@@ -1585,6 +1671,24 @@ static void handleMessage(LSBReceivedMessage *message) {
     for (LSBJob *job in jobs) if (job.pid == pid && job.pidVersion == generation) { sender = job; break; }
     if (sessionDraining) { replyError(message, ECANCELED); return; }
     switch (message->kind) {
+        case LSB_REQUEST_OPEN_AUDIO_OUTPUT: {
+            if (!authenticatedSimulatorJob(sender, &message->audit)) { replyError(message, EACCES); return; }
+            if (!sessionAudioEnabled) { replyError(message, EPERM); return; }
+            if (sender.audioOutput) { replyError(message, EBUSY); return; }
+            int error = 0;
+            sender.audioOutput = [[LSBAudioOutput alloc] initWithError:&error];
+            if (!sender.audioOutput && !error) error = EIO;
+            int sendError = LSBTransportReplyAudioOutput(message, error, error ? NULL : sender.audioOutput.sharedMemory);
+            if (error || sendError) { [sender.audioOutput invalidate]; sender.audioOutput = nil; }
+            disposeMessage(message);
+            return;
+        }
+        case LSB_REQUEST_CLOSE_AUDIO_OUTPUT:
+            if (!authenticatedSimulatorJob(sender, &message->audit)) { replyError(message, EACCES); return; }
+            if (!sessionAudioEnabled) { replyError(message, EPERM); return; }
+            [sender.audioOutput invalidate]; sender.audioOutput = nil;
+            replyError(message, 0);
+            return;
         case LSB_REQUEST_COPY_PROCESS_TASK: {
             if (!authenticatedSimulatorJob(sender, &message->audit)) { replyError(message, EACCES); return; }
             if (!sender.guestTaskForPIDAllowed) { replyError(message, EPERM); return; }
@@ -2069,7 +2173,7 @@ static int initialPlan(LSBReceivedMessage *message, int argc, const char *argv[]
         if (![NSFileManager.defaultManager createDirectoryAtPath:home withIntermediateDirectories:YES attributes:nil error:&directoryError])
             error = EIO;
         NSArray<NSString *> *environment = @[@"TERM=xterm-256color", [@"HOME=" stringByAppendingString:home],
-            [NSString stringWithFormat:@"PATH=%@/bin:%@/usr/bin", runtimeRoot, runtimeRoot]];
+            [NSString stringWithFormat:@"PATH=%@/usr/local/bin:%@/bin:%@/usr/bin", runtimeRoot, runtimeRoot, runtimeRoot]];
         for (NSString *entry in environment) {
             if (error) break;
             if (plan->envc == LSB_MAX_VECTOR) { error = E2BIG; break; }
@@ -2194,9 +2298,13 @@ static void completeUserspaceReboot(uint64_t generation) {
         return;
     }
     if (pendingDeviceType) {
-        int deviceError = LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(runtimeRoot, pendingDeviceCapabilities);
+        int deviceError = LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(runtimeRoot, pendingDeviceCapabilities, pendingHapticsEnabled);
         if (deviceError) { rebootDrainFailed = YES; finishDeviceChange(deviceError); return; }
         sessionDeviceType = pendingDeviceType;
+        sessionHapticsEnabled = pendingHapticsEnabled;
+        sessionAudioEnabled = pendingAudioEnabled;
+        if (pendingAudioPreference) LSBSaveConfiguredAudioOutputEnabled(sessionAudioEnabled);
+        if (pendingHapticsPreference) LSBSaveConfiguredHapticsEnabled(sessionHapticsEnabled);
         LSBSaveConfiguredGuestDeviceType(sessionDeviceType);
     }
     LSBLaunchdConfigurationSetDeviceType(sessionDeviceType);
@@ -2305,11 +2413,14 @@ int LSBStartHost(int argc, const char *argv[], const char *envp[]) {
         if (!error) error = prepareRuntimeRoot();
         if (!error) {
             sessionDeviceType = LSBConfiguredGuestDeviceType();
+            sessionHapticsEnabled = LSBExperimentalHapticsEnabled();
+            sessionAudioEnabled = LSBExperimentalAudioOutputEnabled();
             NSDictionary *capabilities = nil;
-            error = LSBCopyGuestDeviceCapabilities(runtimeRoot, sessionDeviceType, &capabilities);
+            error = sessionHapticsEnabled ? LSBCopyStagedGuestDeviceCapabilities(runtimeRoot, sessionDeviceType, &capabilities) :
+                LSBCopyGuestDeviceCapabilities(runtimeRoot, sessionDeviceType, &capabilities);
             // Preserve command-line and legacy setups without a profile. Selecting another device always requires its staged original.
-            if (error == ENOENT && sessionDeviceType == LSBDefaultGuestDeviceType()) error = 0;
-            if (!error && capabilities) error = LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(runtimeRoot, capabilities);
+            if (error == ENOENT && !sessionHapticsEnabled && sessionDeviceType == LSBDefaultGuestDeviceType()) error = 0;
+            if (!error && capabilities) error = LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(runtimeRoot, capabilities, sessionHapticsEnabled);
             LSBLaunchdConfigurationSetDeviceType(sessionDeviceType);
         }
         if (error) { fprintf(stderr, "[broker] Startup failed: %s\n", strerror(error)); return error; }

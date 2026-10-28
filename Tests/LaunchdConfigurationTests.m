@@ -831,7 +831,7 @@ static void testAdditionalJobs(LSBReceivedMessage *message, NSString *root, NSSt
     directory = [dataPath stringByAppendingPathComponent:@"Library/LiveSimBooter-LifecycleDaemons"];
     job = readPlist([directory stringByAppendingPathComponent:@"com.kdt.LiveSimBooter.lifecycle.plist"]);
     assert([readPlist(configPath)[@"Bootstrap"][@"Paths"] isEqualToArray:@[directory]]);
-    assert([job[@"ProgramArguments"] isEqualToArray:@[@"/bin/lifecycle-probe"]]);
+    assert([job[@"ProgramArguments"] isEqualToArray:@[@"/usr/local/bin/lifecycle-probe"]]);
     assert(!job[@"EnvironmentVariables"][@"LSB_REGISTER_METAL_COMPILER"]);
     assert(!job[@"MachServices"] && ![job[@"KeepAlive"] boolValue]);
     dispose(message);
@@ -901,6 +901,8 @@ int main(void) {
         assert(!environmentValue(plan, "SIMULATOR_FRAMEBUFFER_FRAMEWORK"));
         assert(!environmentValue(plan, "LSB_SIMULATE_SYSTEM_POWER"));
         assert(!strcmp(environmentValue(plan, "HOME"), dataPath.fileSystemRepresentation));
+        NSString *searchPath = [NSString stringWithFormat:@"%@/usr/local/bin:%@/usr/bin:%@/bin:%@/usr/sbin:%@/sbin", root, root, root, root, root];
+        assert(!strcmp(environmentValue(plan, "PATH"), searchPath.UTF8String));
         assert(!environmentValue(plan, "TERM") && !environmentValue(plan, "LSB_FAKE_PTY_STATE"));
         assert(!environmentValue(plan, "XPC_USERSPACE_REBOOT_TO_BOOT_MODE") && !environmentValue(plan, "XPC_SIMULATOR_HOLDING_TANK_FD_HACK"));
         NSString *configPath = [NSString stringWithUTF8String:plan->strings + plan->argv[1]];
@@ -914,6 +916,7 @@ int main(void) {
         assert([config[@"Bootstrap"][@"Child"][@"SIMULATOR_HID_SYSTEM_MANAGER"]
             isEqualToString:[root stringByAppendingPathComponent:@"Library/Frameworks/SimulatorHID.framework"]]);
         for (NSString *scope in @[@"Self", @"Child"]) {
+            assert([config[@"Bootstrap"][scope][@"PATH"] isEqualToString:searchPath]);
             assert([config[@"Bootstrap"][scope][@"SIMULATOR_BOOT_TIME"] isEqualToString:bootGeneration]);
             assert([config[@"Bootstrap"][scope][@"LSB_SIMULATOR_BOOT_UUID"] isEqualToString:bootUUID]);
             assert([config[@"Bootstrap"][scope][@"SIMULATOR_PRODUCT_CLASS"] isEqualToString:@"D84"]);

@@ -119,6 +119,19 @@ int main(void) {
         feed(replies, @"\033[?25l"); assert(!replies.cursorVisible);
         feed(replies, @"\033[?25h"); assert(replies.cursorVisible);
 
+        LSBTerminalScreen *paste = screen(3, 20);
+        assert([[paste pasteSequenceForText:@"é\nnext"] isEqualToString:@"é\rnext"]);
+        feed(paste, @"\033[?200"); feed(paste, @"4h"); // Mode changes may arrive split across output reads.
+        assert(paste.bracketedPasteEnabled);
+        assert([[paste pasteSequenceForText:@"é\nnext"] isEqualToString:@"\033[200~é\nnext\033[201~"]);
+        assert(![paste pasteSequenceForText:@""].length);
+        feed(paste, @"\033[?25;2004l");
+        assert(!paste.cursorVisible && !paste.bracketedPasteEnabled);
+        feed(paste, @"\033[?25;2004h");
+        assert(paste.cursorVisible && paste.bracketedPasteEnabled);
+        feed(paste, @"\033c");
+        assert(!paste.bracketedPasteEnabled && paste.cursorVisible);
+
         LSBTerminalScreen *controlEcho = screen(3, 40);
         __weak LSBTerminalScreen *weakControlEcho = controlEcho;
         controlEcho.reply = ^(NSData *data) {
@@ -160,6 +173,6 @@ int main(void) {
         feed(bounded, @"\033[3J\033[2J\033[H");
         assert([[bounded text] isEqualToString:@" "]);
     }
-    puts("TerminalScreen: coalesced/hidden presentation, final output, split UTF-8/ANSI, editing, reentrant replies, and bounded resize passed");
+    puts("TerminalScreen: presentation, split UTF-8/ANSI, editing, bracketed paste, reentrant replies, and bounded resize passed");
     return 0;
 }

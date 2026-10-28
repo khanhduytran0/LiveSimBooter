@@ -1,80 +1,114 @@
 # Guest haptics
 
-An opt-in experimental path connects guest CoreHaptics to a native `com.apple.audio.hapticd` endpoint. It has not reached
-physical playback: the current diagnostic initializes an engine but loses its connection when starting it. The separately
-verified keyboard-pattern correction below fixes AHAP loading and keyboard input;
-it does not establish physical haptic output.
+The experimental bridge gives guest CoreHaptics an authenticated, session-owned native haptic relay. A public CoreHaptics
+engine produced a physically confirmed transient on the iPhone 15 with the pinned guest runtime. The separately verified keyboard-pattern correction below fixes AHAP loading
+and keyboard input; it does not itself establish physical haptic output.
 
-## Native service and capability projection
+## Native relay and capability projection
 
-Set `LSB_EXPERIMENTAL_HAPTICS=1` in the **native host launch environment** to enable this investigation. Only that exact value
-enables it. By default the host publishes the staged stock capability values unchanged, does not query the native haptic capability,
-and does not look up or publish the hapticd endpoint. Setting an environment variable in Fish or a guest does not enable it.
-Cold-relaunch the native app without the variable to restore the staged original profile; ordinary userspace reboot preserves
-the native host's launch environment. Preserve the original staged profiles when using this experiment.
+Haptics default off. Enable the native Settings option and apply it to a fresh simulator session, or launch the native host
+with exactly `LSB_EXPERIMENTAL_HAPTICS=1`. The broker snapshots the choice for that session. A guest environment variable
+cannot enable a host service. Disabled sessions preserve the staged stock capability profile and do not load the optional
+Objective-C guest haptic helper. See [setup](agent-setup.md) for helper staging and [host services](simulator-host-services.md) for the service inventory.
 
-With this opt-in during graphical startup, [the native broker](../Host/Broker.m) looks up exactly `com.apple.audio.hapticd` in its native
-bootstrap namespace. If that returns a valid send right, the broker registers it in this session's simulator launchd bridge
-namespace after the critical display endpoints. The lookup reference is released after registration. A missing service,
-registration rejection, or unknown timeout is logged and does not fail baseline display startup; the request is not retried.
-Guests cannot supply arbitrary native service names. Their NSXPC connections retain the real native extension audit identity,
-and native hapticd retains its own authorization policy.
+[HapticServer](../Host/HapticServer.m) publishes only `com.apple.audio.hapticd` into the session's simulator bootstrap namespace.
+It admits current simulator jobs through the broker's full native audit-token check and owns at most 64 peer connections.
+Its NSXPC listener uses Apple's `xpc_connection_enable_sim2host_4sim` before activation. The optional guest helper calls
+the same API for exactly the inactive `com.apple.audio.hapticd` client connection: both ends must select mode 2.
+Plain simulator mode 1 does not match this relay, and a local native mode-0/mode-2 control also failed with XPC error 4097.
+Stock `NSXPCListener` constructs each peer; no libxpc memory layout or NSXPC implementation address is patched.
+The typed server/callback protocols in [PrivateHaptics](../Host/PrivateHaptics.h) follow the pinned CoreHaptics interface,
+including the native shared-memory ring reply. Event timing and pattern playback remain in CoreHaptics/native audiomxd.
 
-Pinned 23A343 CoreHaptics `-[AVHapticClient setupConnectionWithOptions:error:]` uses this service name by default and the
-`CHHapticServerInterface`/`CHHapticClientInterface` protocols. Its hardware-capability path is not an unconditional simulator
-false: `+[AVHapticPlayer supportsHaptics]` reaches `MGGetBoolAnswer("gqDnklGQnpv5ilgh5uHckw")` through
-`PlatformUtilities_iOS::ProductSupportsClosedLoopHaptics`. In the pinned simulator `libMobileGestalt.dylib`
-(`878A27E4-22E8-3E39-8CE9-62FEB8301B36`), the callback at image offset `0xec80` reads the plaintext
-`capabilities.DeviceSupportsClosedLoopHaptics` key through the SimCapabilities reader at `0x2ccbc`. That reader loads
-the existing `SIMULATOR_CAPABILITIES` plist once per process. The supplied device profiles omit this key.
+Each admitted peer gets a genuine **host-owned** auxiliary AVAudioSession, task identity token, and native NSXPC connection.
+The relay replaces the guest's audio-session ID, sharing flag, bypass flag and process token before configuring audiomxd;
+`BypassAudioSession` is always false on that native leg. Unrelated pattern/audio options are preserved. The host is the actual
+native client, so native foreground/background and actuator policy still apply to it. Guest identity remains available for
+relay admission; it is not substituted into a forged native audit token. Disconnect, native interruption or simulator shutdown
+invalidates both legs and releases the native session. Admission and cleanup run off main; shutdown never waits on main.
 
-[DeviceConfiguration](../Host/DeviceConfiguration.m), under the same opt-in, queries native `MGCopyAnswer` for the corresponding hashed question
-once per native host lifetime. Only an actual CFBoolean true enables the projected capability. False, unavailable, and
-non-Boolean responses publish false, including when the input was a restored generated profile containing an old true.
-Cold startup and device-picker apply adapt just this one key while atomically publishing the active capabilities plist.
-The selected simulator model, geometry, and other capability values remain unchanged; the original staged file is untouched. Normal userspace
-reboots retain the same physical-device result. No guest interposer, shared-cache patch, or protocol-layout change is used
-for this projection. Native query status and optional service-registration status are logged separately.
+The optional [HapticCompatibility](../Guest/HapticCompatibility.m) constructor handles the simulator's intentionally empty
+AudioSession implementation. It checks the original 23A343 CoreHaptics UUID, method encoding and initial instructions,
+then adapts only `doInit:sessionIsShared:options:bypassAudioSession:error:` with session ID zero and the default haptic service.
+That bypass applies to the **local constructor**; the relay replaces it with its real host session before any native request.
+Other services and nonzero session IDs keep their original constructor behavior. The helper is separate from the C shim
+and links Foundation/CoreHaptics only for enabled sessions. The original method remains responsible for engine state,
+player construction, callbacks and error reporting.
 
-The iPhone 15 / iOS 26.1 trials with the 23A343 guest ran without LLDB. Native lookup, guest registration, and the guest's
-own hapticd lookup succeeded. The unadapted profile returned `closed-loop-gestalt=0` and `supports-haptics=0`; after projection,
-the host reported an exact native CFBoolean true and the guest reported both values as 1. These results establish discovery
-and capability propagation, not a working feedback path.
+Pinned 23A343 CoreHaptics (`2AFD3C06-3A36-35CE-8940-B381C1AFFC0B`)
+`-[AVHapticClient setupConnectionWithOptions:error:]` uses the fixed service and the
+`CHHapticServerInterface`/`CHHapticClientInterface` protocols. Its capability path reaches
+`MGGetBoolAnswer("gqDnklGQnpv5ilgh5uHckw")` through `PlatformUtilities_iOS::ProductSupportsClosedLoopHaptics`.
+In pinned simulator libMobileGestalt (`878A27E4-22E8-3E39-8CE9-62FEB8301B36`), callback `+0xec80` reads
+`capabilities.DeviceSupportsClosedLoopHaptics` through the SimCapabilities reader at `+0x2ccbc`, which loads
+`SIMULATOR_CAPABILITIES` once per process. The supplied profiles omit this key.
 
-The bounded diagnostic then found three separate boundaries:
+[DeviceConfiguration](../Host/DeviceConfiguration.m) queries the corresponding native MGCopyAnswer once per host lifetime.
+Only an actual CFBoolean true enables the projected capability. False, absent and malformed responses publish false.
+Only this key changes; simulator model, geometry and other capabilities remain intact, and the staged original stays immutable.
+Disabling haptics republishes that original profile, removing any earlier generated true value.
 
-1. Public `-[CHHapticEngine initAndReturnError:]` fails with CoreHaptics error **-4815**, `InvalidAudioSession`. The pinned
-   implementation obtains an auxiliary AVAudioSession whose session ID is zero in this guest. Setting `playsHapticsOnly`
-   after construction does not avoid that initializer check.
-2. A typed private `initWithOptions:error:` call with the stock `BypassAudioSession` option avoids audio-session creation,
-   but engine initialization fails with **NSCocoaErrorDomain 4097**, connection to `com.apple.audio.hapticd`.
-3. An explicitly enabled, temporary interposer changes only the inactive connection to that exact service from simulator
-   XPC wire mode 1 to native mode 0. With this adaptation, engine initialization succeeds, but the stopped handler receives
-   reason -1 and `startAndReturnError:` fails with **NSCocoaErrorDomain 4097**. No pattern was played. The reason for this
-   later connection loss is still under investigation.
+## Optional playback probe
 
-The temporary connection adaptation is not part of the guest shim or setup overlay. It is loaded as an ordinary diagnostic
-dylib dependency and enabled from `main`, preserving the production inserted-library policy. Before accessing its named
-connection layout, it verifies the pinned libxpc UUID `8E65DA13-E624-392F-8392-B80BF6FEC65E`, the original setter/getter
-instructions, and inactive state/mode. It neither changes unrelated services nor fabricates an audio-session identifier.
-The generic `xpc_connection_enable_sim2host_4sim` API selects mode 2, which is different from the native mode required by
-this unmodified service. The probe logs connection creation to distinguish another connection from a later protocol or
-service rejection; the evidence so far does not identify the final cause.
+Build the unsigned arm64 simulator probe with the same SDK setup as the guest helpers:
 
-The current capability and endpoint publication are unfinished experimental implementation, not a claim that normal UIKit
-feedback works. In the pinned UIKitCore, even its haptics-only feedback engine creates the audio-session-based engine first,
-then applies `playsHapticsOnly`; it also needs a narrowly scoped construction adaptation if the native transport is proven.
-Capability/endpoint publication remain opt-in together so ordinary guests do not discover a physical feature whose bridge
-cannot yet complete a request. The bounded probe mutes audio and
-requests one transient; even an accepted player request would still require observer confirmation of a felt pulse.
+```sh
+sh Tools/build-haptic-probe.sh "$LSB_WORK/guest/lsb-haptic-relay-probe"
+```
 
-Broker tests cover default/invalid opt-in exclusion, lookup/registration errors, unknown timeouts without retry, send-right ownership, full audit identity,
-headless exclusion, and independence from display startup. DeviceConfiguration tests cover exact CFBoolean handling,
-all catalog profiles, unchanged identity/geometry, immutable staged inputs, stale true removal, malformed plists, and repeat
-publication. They also verify stock-value preservation for every catalog device, actual plist Booleans after serialization,
-and restoration of stock values after disabling the opt-in. Active profiles are serialized once for atomic publication, so their
-encoding may change while staged input bytes remain untouched. Ignored `tmp/haptic-bridge/` holds the diagnostic source,
-binaries, disassembly and local logs; these are experiment artifacts, not setup prerequisites.
+Add `--add-binary "/usr/local/bin/lsb-haptic-relay-probe=$LSB_WORK/guest/lsb-haptic-relay-probe"` to the runtime staging
+command in [setup](agent-setup.md). The stager signs it using the destination app's identity and identifier. For an existing
+runtime, use [sign-sim-executable.py](../Tools/sign-sim-executable.py) with those same signing settings before copying it;
+this preserves `MH_EXECUTE` while clearing `CS_EXECSEG_MAIN_BINARY`. Stop affected guests before replacing an installed binary.
+
+Enable haptics for the simulator session, stage `libLiveSimHaptics.dylib`, keep the native host foregrounded, and hold the phone.
+Discover the **current native host PID** from the native process list, then run this in guest Fish:
+
+```sh
+/usr/local/bin/lsb-haptic-relay-probe --expected-host-pid CURRENT_NATIVE_HOST_PID
+```
+
+The probe first verifies that the service peer is that host PID. A missing or different peer stops the test before engine
+construction; do not substitute native audiomxd's PID. It then uses the public CoreHaptics initializer, plays one transient,
+and stops. Exit status 0 confirms accepted playback and cleanup; a person must separately confirm physical vibration.
+It has a 20-second deadline and never requests the unsafe direct-native bypass described below.
+
+## Evidence and limits
+
+The iPhone 15 / iOS 26.1 trials with the 23A343 guest ran without LLDB. Native MG returned an exact true Boolean;
+after projection the guest reported `closed-loop-gestalt=1` and `supports-haptics=1`. Native and guest endpoint lookups succeeded.
+Subsequent probes isolated these boundaries:
+
+1. The stock public engine initializer fails with CoreHaptics **-4815 InvalidAudioSession**: the simulator's auxiliary
+   AVAudioSession has ID zero. Setting `playsHapticsOnly` after construction is too late.
+2. A temporary, pinned connection-mode diagnostic reached native audiomxd directly. Sending its private bypass option
+   without a real audio session caused a native audiomxd null dereference during start. Do not repeat that experiment.
+3. A typed diagnostic created a genuine native auxiliary session under the extension's actual audit identity, kept it alive
+   through engine start/play/stop, then destroyed it. All API operations succeeded and audiomxd remained stable. The user
+   felt no vibration: native logs explicitly marked the extension `BackgroundRunning` and muted its haptic channel.
+4. The relay therefore moves **ownership**, not guest identity, to the foreground host. On 2026-10-28, the normal public
+   `initAndReturnError:` succeeded through the optional helper, followed by start, one transient, stop and exit status 0.
+   The user repeated the command while holding the phone and confirmed a felt vibration. The native logs no longer showed
+   the haptic background mute; the audio-only mute was expected from `playsHapticsOnly`.
+
+The successful run used host PID 4076 and guest probe PID 4144 (repeat 4149), without LLDB. Its preflight NSXPC query
+verified that the peer PID was the native host. Shared-memory/event playback then used the stock guest CoreHaptics engine,
+not an independent host vibration call. This establishes the public engine path; ordinary UIKit feedback and keyboard
+haptic preferences still need separate interaction checks. `LSB_HAPTIC_TRACE=1` in the native host environment enables
+bounded peer/connection lifecycle logs; failures remain bounded and visible without this tracing flag.
+
+The earlier direct-native endpoints and connection-mode patch are not the production path. No native AudioSession service
+is published to guests by the relay implementation. Research sources, binaries and native logs are under ignored
+`tmp/haptic-continue-20261028/`; these local artifacts are not setup prerequisites.
+
+Focused [relay tests](../Tests/HapticRelayTests.m) exercise exact Boolean/identity replacement, preservation of caller options,
+real NSXPC mode-2 admission off main with a full audit token, mixed 64-bit/double/error reply signatures, and the actual XPC
+shared-memory reply. Broker tests cover session/generation admission and endpoint lifetime; DeviceConfiguration tests cover
+stock preservation, typed native capability projection and restoration. The device observation above is separate from these local checks.
+
+The final build was launched without forced feature environment variables. The user confirmed that both Haptic passthrough
+and Audio output applied from native Settings with simulator restarts; both preferences persisted as Booleans. Ordinary
+UIKit/keyboard feedback remains separate from the confirmed public CoreHaptics probe.
 
 ## Keyboard-pattern URL correction on the iOS 27 host
 

@@ -7,6 +7,8 @@
 NSString *const LSBHostSessionStateDidChangeNotification = @"LSBHostSessionStateDidChangeTests";
 static LSBGuestDeviceType *currentDevice, *requestedDevice;
 static BOOL available;
+static BOOL hapticsEnabled, hapticsForced, requestedHaptics, hapticsRequest;
+static BOOL audioEnabled, audioForced, requestedAudio, audioRequest;
 static unsigned requestCount;
 static int immediateError;
 static void (^pendingCompletion)(int, BOOL);
@@ -27,10 +29,34 @@ static LSBGuestDeviceSettings *newModel(void) {
 
 LSBGuestDeviceType *LSBHostCurrentDeviceType(void) { return currentDevice; }
 BOOL LSBHostCanApplyDeviceType(void) { return available; }
+BOOL LSBHostCurrentHapticsEnabled(void) { return hapticsEnabled; }
+BOOL LSBHapticsForcedByEnvironment(void) { return hapticsForced; }
+BOOL LSBHostCurrentAudioOutputEnabled(void) { return audioEnabled; }
+BOOL LSBAudioOutputForcedByEnvironment(void) { return audioForced; }
 void LSBHostApplyDeviceType(LSBGuestDeviceType *type, void (^completion)(int, BOOL)) {
     assert(NSThread.isMainThread && type && completion && !pendingCompletion);
     ++requestCount;
     requestedDevice = type;
+    hapticsRequest = audioRequest = NO;
+    if (immediateError) completion(immediateError, NO);
+    else pendingCompletion = [completion copy];
+}
+void LSBHostApplyHapticsEnabled(BOOL enabled, void (^completion)(int, BOOL)) {
+    assert(NSThread.isMainThread && completion && !pendingCompletion);
+    ++requestCount;
+    requestedHaptics = enabled;
+    hapticsRequest = YES;
+    audioRequest = NO;
+    if (immediateError) completion(immediateError, NO);
+    else pendingCompletion = [completion copy];
+}
+
+void LSBHostApplyAudioOutputEnabled(BOOL enabled, void (^completion)(int, BOOL)) {
+    assert(NSThread.isMainThread && completion && !pendingCompletion);
+    ++requestCount;
+    requestedAudio = enabled;
+    audioRequest = YES;
+    hapticsRequest = NO;
     if (immediateError) completion(immediateError, NO);
     else pendingCompletion = [completion copy];
 }
@@ -50,7 +76,11 @@ static void complete(int error, BOOL restarted) {
     assert(pendingCompletion);
     void (^completion)(int, BOOL) = pendingCompletion;
     pendingCompletion = nil;
-    if (!error) currentDevice = requestedDevice;
+    if (!error) {
+        if (audioRequest) audioEnabled = requestedAudio;
+        else if (hapticsRequest) hapticsEnabled = requestedHaptics;
+        else currentDevice = requestedDevice;
+    }
     completion(error, restarted);
 }
 
@@ -200,12 +230,101 @@ static void testObserverDoesNotRetainController(void) {
     notifyBroker();
 }
 
+static void testHapticsUsesConfirmedSessionAndSharedApply(void) {
+    currentDevice = LSBDefaultGuestDeviceType();
+    available = YES;
+    hapticsEnabled = hapticsForced = NO;
+    LSBGuestDeviceSettings *model = newModel();
+    assert(!model.hapticsEnabled && !model.hapticsForced && [model.hapticsStatusText containsString:@"Off by default"]);
+    unsigned before = requestCount;
+    [model applyHapticsEnabled:NO];
+    assert(requestCount == before);
+    [model applyHapticsEnabled:YES];
+    assert(model.pending && !model.canApply && !model.hapticsEnabled && requestedHaptics && requestCount == before + 1);
+    [model applyDeviceIdentifier:@"ipad-a16"];
+    [model applyHapticsEnabled:YES];
+    assert(requestCount == before + 1);
+    [model refresh];
+    assert(model.pending && !model.hapticsEnabled);
+    complete(0, NO);
+    assert(!model.pending && model.hapticsEnabled && [model.hapticsStatusText containsString:@"Tap Start"]);
+    LSBGuestDeviceSettings *reopened = newModel();
+    assert(reopened.hapticsEnabled); // A new controller reads the broker's saved/committed decision.
+    [model applyHapticsEnabled:NO];
+    complete(ENOENT, NO);
+    assert(model.hapticsEnabled && [model.hapticsStatusText containsString:@"profile is missing"]);
+    [model applyHapticsEnabled:NO];
+    complete(EIO, YES);
+    assert(model.hapticsEnabled && [model.hapticsStatusText containsString:@"Reopen the host"]);
+    [model applyHapticsEnabled:NO];
+    complete(0, YES);
+    assert(!model.hapticsEnabled && [model.hapticsStatusText containsString:@"fresh session"]);
+
+    [model applyDeviceIdentifier:@"ipad-9"];
+    before = requestCount;
+    [model applyHapticsEnabled:YES];
+    assert(requestCount == before);
+    complete(0, YES);
+    hapticsForced = hapticsEnabled = YES;
+    [model refresh];
+    assert(model.hapticsForced && model.hapticsEnabled);
+    before = requestCount;
+    [model applyHapticsEnabled:NO];
+    assert(requestCount == before && !model.pending);
+    hapticsForced = hapticsEnabled = NO;
+}
+
+static void testAudioUsesConfirmedSessionAndSharedApply(void) {
+    currentDevice = LSBDefaultGuestDeviceType();
+    available = YES;
+    audioEnabled = audioForced = NO;
+    hapticsEnabled = YES;
+    LSBGuestDeviceSettings *model = newModel();
+    assert(!model.audioOutputEnabled && !model.audioOutputForced && [model.audioOutputStatusText containsString:@"Off by default"]);
+    unsigned before = requestCount;
+    [model applyAudioOutputEnabled:NO];
+    assert(requestCount == before);
+    [model applyAudioOutputEnabled:YES];
+    assert(model.pending && !model.canApply && !model.audioOutputEnabled && requestedAudio && requestCount == before + 1);
+    [model applyDeviceIdentifier:@"ipad-a16"];
+    [model applyHapticsEnabled:NO];
+    [model applyAudioOutputEnabled:YES];
+    assert(requestCount == before + 1);
+    [model refresh];
+    assert(model.pending && !model.audioOutputEnabled);
+    complete(0, NO);
+    assert(!model.pending && model.audioOutputEnabled && model.hapticsEnabled && [model.audioOutputStatusText containsString:@"Tap Start"]);
+    assert(newModel().audioOutputEnabled);
+    for (NSNumber *error in @[@(ENOENT), @(EBUSY), @(EPERM), @(EIO)]) {
+        [model applyAudioOutputEnabled:NO];
+        complete(error.intValue, error.intValue == EIO);
+        assert(model.audioOutputEnabled && model.hapticsEnabled && !model.pending);
+    }
+    [model applyAudioOutputEnabled:NO];
+    complete(0, YES);
+    assert(!model.audioOutputEnabled && model.hapticsEnabled && [model.audioOutputStatusText containsString:@"fresh session"]);
+    [model applyHapticsEnabled:NO];
+    before = requestCount;
+    [model applyAudioOutputEnabled:YES];
+    assert(requestCount == before);
+    complete(0, YES);
+    audioForced = audioEnabled = YES;
+    [model refresh];
+    assert(model.audioOutputForced && model.audioOutputEnabled);
+    before = requestCount;
+    [model applyAudioOutputEnabled:NO];
+    assert(requestCount == before && !model.pending);
+    audioForced = audioEnabled = NO;
+}
+
 int main(void) {
     @autoreleasepool {
         testPendingAndBrokerReadiness();
         testColdSelectionAndRefresh();
         testErrorsLeaveSelectionUnchanged();
         testFullWidthIsPersistentHostPresentationOnly();
+        testHapticsUsesConfirmedSessionAndSharedApply();
+        testAudioUsesConfirmedSessionAndSharedApply();
         testObserverDoesNotRetainController();
         assert(!pendingCompletion);
         assert(LSBGuestDeviceSettings.sharedController == LSBGuestDeviceSettings.sharedController);

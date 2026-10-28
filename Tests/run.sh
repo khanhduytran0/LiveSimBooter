@@ -3,10 +3,22 @@ set -eu
 cd "$(dirname "$0")/.."
 test_directory=$(mktemp -d /tmp/LiveSimBooter-tests.XXXXXX)
 trap 'rm -rf "$test_directory"' EXIT HUP INT TERM
-for test_name in HostStartupPolicy UserspaceReboot NativeRuntimePolicy; do
+for test_name in HostStartupPolicy UserspaceReboot NativeRuntimePolicy InsertedLibraries; do
     xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 "Tests/${test_name}Tests.c" -o "$test_directory/$test_name"
     "$test_directory/$test_name"
 done
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/AudioOutputRingTests.c ProcessSupport/AudioOutput.c -o "$test_directory/AudioOutputRing"
+"$test_directory/AudioOutputRing"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_TRANSPORT_TESTING \
+    Tests/AudioOutputTransportTests.c ProcessSupport/SpawnPlan.c -o "$test_directory/AudioOutputTransport"
+"$test_directory/AudioOutputTransport"
+xcrun --sdk macosx clang -fblocks -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_AUDIO_OUTPUT_TESTING \
+    Guest/AudioOutputCompatibility.c Tests/AudioOutputCompatibilityTests.c -framework CoreFoundation -o "$test_directory/AudioOutputCompatibility"
+"$test_directory/AudioOutputCompatibility"
+xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
+    Tests/HapticRelayTests.m -framework Foundation -framework AVFAudio -o "$test_directory/HapticRelay"
+"$test_directory/HapticRelay"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/NativeProductionStatusTests.c -framework CoreFoundation -o "$test_directory/NativeProductionStatus"
 "$test_directory/NativeProductionStatus"
@@ -400,6 +412,11 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
     Tests/TerminalScreenTests.m -framework Foundation -o "$test_directory/TerminalScreen"
 "$test_directory/TerminalScreen"
+terminal_test_macos_sdk=$(xcrun --sdk macosx --show-sdk-path)
+xcrun --sdk macosx clang -target arm64-apple-ios26.0-macabi -fobjc-arc -fblocks -Wall -Wextra -Werror \
+    -iframework "$terminal_test_macos_sdk/System/iOSSupport/System/Library/Frameworks" \
+    Tests/TerminalInputProxyTests.m -framework UIKit -framework Foundation -framework CoreGraphics -o "$test_directory/TerminalInputProxy"
+"$test_directory/TerminalInputProxy"
 xcrun --sdk macosx clang -fobjc-arc -Wall -Wextra -Werror -arch arm64 \
     Tests/BackgroundAudioTests.m Host/BackgroundAudio.m -framework Foundation -o "$test_directory/BackgroundAudio"
 "$test_directory/BackgroundAudio"

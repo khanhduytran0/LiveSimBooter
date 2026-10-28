@@ -428,7 +428,7 @@ static void testMalformedReboot(unsigned variant, int fd, mach_port_t sentPort) 
         case 3: xpc_dictionary_set_string(request, "version", "2"); break;
         case 4: xpc_dictionary_set_value(request, "version", NULL); break;
         case 5: xpc_dictionary_set_string(request, "kind", "10"); break;
-        case 6: xpc_dictionary_set_uint64(request, "kind", LSB_REQUEST_REBOOT_USERSPACE + 1); break;
+        case 6: xpc_dictionary_set_uint64(request, "kind", LSB_REQUEST_COPY_DEBUGGER_INFO + 1); break;
         case 7: xpc_dictionary_set_uint64(request, "request-id", 1); break;
         case 8: xpc_dictionary_set_int64(request, "request-id", 0); break;
         case 9: xpc_dictionary_set_int64(request, "error", EACCES); break;
@@ -1444,7 +1444,7 @@ static int host(const char *executable) {
 }
 
 int main(int argc, char **argv) {
-    _Static_assert(LSB_TRANSPORT_VERSION == 2 && LSB_BOOTSTRAP_VERSION == 2, "native production status versions bootstrap metadata independently");
+    _Static_assert(LSB_TRANSPORT_VERSION == 4 && LSB_BOOTSTRAP_VERSION == 2, "native production status versions bootstrap metadata independently");
     // Bound a failed regression test without adding a signal handler to the production transport.
     alarm(20);
     return argc == 2 && !strcmp(argv[1], "--client") ? client() : host(argv[0]);

@@ -24,6 +24,13 @@ static int testProcPIDInfo(int pid, int flavor, uint64_t arg, void *buffer, int 
     return procResult;
 }
 
+static int inspectionGuardPID, inspectionGuardError;
+int LSBInspectionUnsupportedPID(int pid) { return pid == inspectionGuardPID ? inspectionGuardError : 0; }
+bool LSBPeerProcessCallerEnabled(uintptr_t caller) { (void)caller; return false; }
+int LSBPeerProcessPIDInfo(uintptr_t caller, int pid, int flavor, uint64_t arg, void *buffer, int size, int result, int originalErrno) {
+    (void)caller; (void)pid; (void)flavor; (void)arg; (void)buffer; (void)size; (void)originalErrno; return result;
+}
+#define LSB_GUEST_RUNTIME
 #define LSB_PROCESS_EVENTS_TESTING
 #define proc_pidinfo testProcPIDInfo
 #include "../Guest/ProcessEvents.c"
@@ -446,6 +453,11 @@ static void testProcPIDTranslation(void) {
     assert(LSBProcPIDInfo(90400, 99, 2, bytes, sizeof(bytes)) == 192 && observedPID == 90401);
     for (unsigned i = 0; i < sizeof(bytes); ++i) assert(bytes[i] == 0xa5);
     assert(LSBProcPIDInfo(90499, 18, 3, bytes, sizeof(bytes)) == 192 && observedPID == 90499);
+    observedPID = 0; inspectionGuardPID = 90499; inspectionGuardError = ESRCH;
+    assert(!LSBProcPIDInfo(90499, 18, 3, bytes, sizeof(bytes)) && errno == ESRCH && !observedPID);
+    inspectionGuardPID = 90400; inspectionGuardError = ENOTSUP;
+    assert(!LSBProcPIDInfo(90400, 18, 3, bytes, sizeof(bytes)) && errno == ENOTSUP && !observedPID);
+    inspectionGuardPID = inspectionGuardError = 0;
     for (unsigned i = 0; i < sizeof(bytes); ++i) assert(bytes[i] == 0xa5);
     LSBChildExecUpdate update;
     assert(!LSBChildStatusPrepareExec(&ledger, ticket, 90402, &update));

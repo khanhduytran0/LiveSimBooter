@@ -11,16 +11,21 @@
 #include <unistd.h>
 #include <sys/event.h>
 #include <sys/wait.h>
+#include <sys/sysctl.h>
 #include "../Host/GuestEntitlementsConversion.h"
 #import "../Host/DeviceConfiguration.h"
 static LSBGuestDeviceType *testConfiguredDeviceType(void);
 static void testSaveDeviceType(LSBGuestDeviceType *);
+static int testInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *, NSData *);
 #define LSBConfiguredGuestDeviceType testConfiguredDeviceType
 #define LSBSaveConfiguredGuestDeviceType testSaveDeviceType
+#define LSBInstallGuestDeviceCapabilitiesWithNativeHaptics testInstallGuestDeviceCapabilitiesWithNativeHaptics
 static int testCopyXMLFromDEREntitlements(const void *, size_t, void **, size_t *);
 static int testReadMachOCodeDirectoryHash(int, unsigned char [20]);
 static kern_return_t testTaskInfo(task_name_t, task_flavor_t, task_info_t, mach_msg_type_number_t *);
 static kern_return_t testBootstrapLookup(mach_port_t, const char *, mach_port_t *);
+static int testPeerDebuggerQuery(mach_port_t, const audit_token_t *, uint32_t, struct kinfo_proc *);
+#define LSBPeerDebuggerQuery testPeerDebuggerQuery
 #define LSBCopyXMLFromDEREntitlements testCopyXMLFromDEREntitlements
 #define LSBReadMachOCodeDirectoryHash testReadMachOCodeDirectoryHash
 #define LSBLaunchdRegisterEndpointWithTimeout LSBTestRegisterEndpoint
@@ -30,6 +35,7 @@ static kern_return_t testBootstrapLookup(mach_port_t, const char *, mach_port_t 
 #define handleMessage brokerHandleMessage
 #include "../Host/Broker.m"
 #undef handleMessage
+#undef LSBPeerDebuggerQuery
 #undef task_info
 #undef bootstrap_look_up
 #undef LSBLaunchdRegisterEndpointWithTimeout
@@ -38,6 +44,7 @@ static kern_return_t testBootstrapLookup(mach_port_t, const char *, mach_port_t 
 #undef LSBReadMachOCodeDirectoryHash
 #undef LSBConfiguredGuestDeviceType
 #undef LSBSaveConfiguredGuestDeviceType
+#undef LSBInstallGuestDeviceCapabilitiesWithNativeHaptics
 
 static uint32_t testNativeProductionStatus = LSB_NATIVE_DEVELOPMENT;
 uint32_t LSBHostNativeProductionStatus(void) { return testNativeProductionStatus; }
@@ -52,6 +59,12 @@ static void testSaveDeviceType(LSBGuestDeviceType *type) {
     assert(type == LSBGuestDeviceTypeForIdentifier(type.identifier));
     savedDeviceIdentifier = [type.identifier copy];
     ++devicePreferenceWrites;
+}
+static int testInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *root, NSData *data) {
+    if (!LSBExperimentalHapticsEnabled()) return LSBInstallGuestDeviceCapabilities(root, data);
+    NSData *adapted = nil;
+    int error = LSBProjectGuestHapticsCapability(data, kCFBooleanFalse, &adapted);
+    return error ? error : LSBInstallGuestDeviceCapabilities(root, adapted);
 }
 
 typedef struct {
@@ -87,15 +100,18 @@ static void (^readyReplyHook)(void);
 static void (^checkInReplyHook)(void);
 static unsigned endpointCalls;
 static NSMutableArray<NSNumber *> *publicTestEndpoints;
-static int endpointErrors[7];
-static char registeredEndpoints[7][128];
-static mach_port_t registeredPorts[7];
-static audit_token_t registeredAudits[7];
-static uint32_t registeredTimeouts[7];
+static int endpointErrors[8];
+static char registeredEndpoints[8][128];
+static mach_port_t registeredPorts[8];
+static audit_token_t registeredAudits[8];
+static uint32_t registeredTimeouts[8];
 static void (^endpointHook)(unsigned index);
 static unsigned nativeConfigdLookupCalls;
 static kern_return_t nativeConfigdLookupError;
 static mach_port_t nativeConfigdEndpoint;
+static unsigned nativeHapticsLookupCalls;
+static kern_return_t nativeHapticsLookupError;
+static mach_port_t nativeHapticsEndpoint;
 static unsigned unregisterCalls;
 static int unregisterError;
 static uint32_t unregisterTimeout;
@@ -110,6 +126,18 @@ static LSBPeerProcessIdentity identityReply;
 static audit_token_t testTaskAudit;
 static BOOL useRealTaskInfo, preserveCheckInIdentity, mismatchTaskAudit;
 static kern_return_t taskInfoError;
+static unsigned debuggerQueryCalls;
+static int debuggerQueryError;
+static void (^debuggerQueryHook)(void);
+static struct kinfo_proc debuggerInfoReply;
+static int testPeerDebuggerQuery(mach_port_t endpoint, const audit_token_t *expected, uint32_t timeout, struct kinfo_proc *info) {
+    assert(!NSThread.isMainThread && MACH_PORT_VALID(endpoint) && expected->val[5] && expected->val[7] && timeout == 500);
+    ++debuggerQueryCalls;
+    memset(info, 0, sizeof(*info));
+    if (!debuggerQueryError) { info->kp_proc.p_pid = expected->val[5]; info->kp_proc.p_flag = P_TRACED; }
+    if (debuggerQueryHook) dispatch_sync(dispatch_get_main_queue(), debuggerQueryHook);
+    return debuggerQueryError;
+}
 
 static int testReadMachOCodeDirectoryHash(int fd, unsigned char output[20]) {
     struct stat info;
@@ -140,7 +168,8 @@ static void handleMessage(LSBReceivedMessage *message) {
         message->peerIdentity.audit = message->audit;
         memcpy(message->peerIdentity.shortInfo, &message->audit.val[5], sizeof(uint32_t));
     }
-    if (message->kind == LSB_REQUEST_COPY_PROCESS_IDENTITY || message->kind == LSB_REQUEST_RESOLVE_NATIVE_CHILD_PID) {
+    if (message->kind == LSB_REQUEST_COPY_PROCESS_IDENTITY || message->kind == LSB_REQUEST_RESOLVE_NATIVE_CHILD_PID ||
+        message->kind == LSB_REQUEST_COPY_DEBUGGER_INFO) {
         LSBJob *sender = nil;
         for (LSBJob *job in jobs) if (job.pid == (pid_t)message->audit.val[5] && job.pidVersion == message->audit.val[7]) { sender = job; break; }
         BOOL logical = message->kind == LSB_REQUEST_COPY_PROCESS_IDENTITY && sender.simulatorLaunchd;
@@ -158,7 +187,17 @@ static int testCopyXMLFromDEREntitlements(const void *der, size_t size, void **x
 
 static kern_return_t testBootstrapLookup(mach_port_t bootstrap, const char *name, mach_port_t *port) {
     assert(!NSThread.isMainThread && bootstrap == bootstrap_port);
-    assert(!strcmp(name, "com.apple.SystemConfiguration.configd") && port);
+    assert(port);
+    if (!strcmp(name, "com.apple.audio.hapticd")) {
+        ++nativeHapticsLookupCalls;
+        *port = MACH_PORT_NULL;
+        if (nativeHapticsLookupError) return nativeHapticsLookupError;
+        if (MACH_PORT_VALID(nativeHapticsEndpoint))
+            assert(!mach_port_mod_refs(mach_task_self(), nativeHapticsEndpoint, MACH_PORT_RIGHT_SEND, 1));
+        *port = nativeHapticsEndpoint;
+        return KERN_SUCCESS;
+    }
+    assert(!strcmp(name, "com.apple.SystemConfiguration.configd"));
     ++nativeConfigdLookupCalls;
     *port = MACH_PORT_NULL;
     if (nativeConfigdLookupError) return nativeConfigdLookupError;
@@ -170,7 +209,7 @@ static kern_return_t testBootstrapLookup(mach_port_t bootstrap, const char *name
 
 int LSBTestRegisterEndpoint(mach_port_t service, const audit_token_t *audit, const char *name,
                             mach_port_t endpoint, uint32_t timeoutMilliseconds, kern_return_t *status) {
-    assert(!NSThread.isMainThread && MACH_PORT_VALID(service) && audit && name && status && endpointCalls < 7);
+    assert(!NSThread.isMainThread && MACH_PORT_VALID(service) && audit && name && status && endpointCalls < 8);
     unsigned index = endpointCalls++;
     assert(strlen(name) < sizeof(registeredEndpoints[index]));
     strcpy(registeredEndpoints[index], name);
@@ -328,6 +367,18 @@ int LSBTransportReplyEntitlements(LSBReceivedMessage *message, int error, const 
     entitlementsReply = error ? nil : [NSData dataWithBytes:bytes length:size];
     return LSBTransportReply(message, error, 0, 0, NULL, NULL, NULL);
 }
+static NSData *processListReply;
+int LSBTransportReplyDebuggerInfo(LSBReceivedMessage *message, int error, const struct kinfo_proc *info) {
+    assert(message->kind == LSB_REQUEST_COPY_DEBUGGER_INFO && (error ? info == NULL : info && info->kp_proc.p_pid == message->targetPID));
+    memset(&debuggerInfoReply, 0, sizeof(debuggerInfoReply));
+    if (info) debuggerInfoReply = *info;
+    return LSBTransportReply(message, error, 0, 0, NULL, NULL, NULL);
+}
+int LSBTransportReplyProcessList(LSBReceivedMessage *message, int error, const LSBProcessList *list, size_t size) {
+    assert(message->kind == LSB_REQUEST_LIST_PROCESSES && (error ? !list && !size : !LSBValidateProcessList(list, size)));
+    processListReply = error ? nil : [NSData dataWithBytes:list length:size];
+    return LSBTransportReply(message, error, 0, 0, NULL, NULL, NULL);
+}
 int LSBTransportReplyProcessIdentity(LSBReceivedMessage *message, int error, const LSBPeerProcessIdentity *identity) {
     assert(message->kind == LSB_REQUEST_COPY_PROCESS_IDENTITY && (error ? identity == NULL : identity != NULL));
     LSBPeerProcessIdentityDispose(&identityReply);
@@ -379,6 +430,8 @@ void LSBTransportDisposeMessage(LSBReceivedMessage *message) {
     message->object = NULL;
     if (MACH_PORT_VALID(message->nativeServicePort)) mach_port_deallocate(mach_task_self(), message->nativeServicePort);
     message->nativeServicePort = MACH_PORT_NULL;
+    if (MACH_PORT_VALID(message->processDebuggerPort)) mach_port_deallocate(mach_task_self(), message->processDebuggerPort);
+    message->processDebuggerPort = MACH_PORT_NULL;
     LSBPeerProcessIdentityDispose(&message->peerIdentity);
     for (unsigned i = 0; i < LSB_MAX_FDS; ++i) {
         if (message->fds[i] >= 0) close(message->fds[i]);
@@ -443,6 +496,9 @@ static void resetBroker(void) {
     LSBPeerProcessIdentityDispose(&identityReply);
     useRealTaskInfo = preserveCheckInIdentity = mismatchTaskAudit = NO;
     taskInfoError = KERN_SUCCESS;
+    debuggerQueryCalls = 0;
+    debuggerQueryError = 0;
+    debuggerQueryHook = nil;
     xmlConversionError = 0;
     codeDirectoryHash = nil;
     codeDirectoryHashError = 0;
@@ -451,6 +507,10 @@ static void resetBroker(void) {
     nativeConfigdLookupCalls = 0;
     nativeConfigdLookupError = KERN_SUCCESS;
     nativeConfigdEndpoint = MACH_PORT_NULL;
+    nativeHapticsLookupCalls = 0;
+    unsetenv("LSB_EXPERIMENTAL_HAPTICS");
+    nativeHapticsLookupError = KERN_FAILURE;
+    nativeHapticsEndpoint = MACH_PORT_NULL;
     unregisterCalls = unregisterTimeout = 0;
     unregisterError = 0;
     memset(unregisteredEndpoint, 0, sizeof(unregisteredEndpoint));
@@ -1782,6 +1842,55 @@ static void testNativeConfigdBridgeRegistration(void) {
     }
 }
 
+static void testNativeHapticsBridgeRegistration(void) {
+    enum { Success, Headless, LookupFailure, RegistrationFailure, UnknownTimeout, MissingEndpoint, DisplayFailure, Disabled, InvalidOptIn };
+    for (unsigned test = Success; test <= InvalidOptIn; ++test) {
+        resetBroker();
+        if (test != Disabled) assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", test == InvalidOptIn ? "true" : "1", 1));
+        LSBJob *launchd = runTestJob(nil, 799);
+        launchd.simulatorLaunchd = YES;
+        if (test != Headless) {
+            launchd.indigo = [RecordedIndigoServer new];
+            launchd.framebuffer = [RecordedFramebufferServer new];
+            launchd.iosurface = [RecordedIOSurfaceServer new];
+        }
+        launchd.servicesPending = YES;
+        mach_port_t service = newServiceEndpoint(), native = newServiceEndpoint();
+        nativeHapticsEndpoint = test == MissingEndpoint ? MACH_PORT_NULL : native;
+        nativeHapticsLookupError = test == LookupFailure ? KERN_PROTECTION_FAILURE : KERN_SUCCESS;
+        if (test == RegistrationFailure) endpointErrors[3] = EACCES;
+        if (test == UnknownTimeout) endpointErrors[3] = ETIMEDOUT;
+        if (test == DisplayFailure) endpointErrors[0] = EACCES;
+        endpointHook = ^(unsigned index) {
+            if (index != 3) return;
+            mach_port_urefs_t references = 0;
+            assert(nativeHapticsLookupCalls == 1 && registeredPorts[index] == native);
+            assert(!strcmp(registeredEndpoints[index], "com.apple.audio.hapticd"));
+            assert(!mach_port_get_refs(mach_task_self(), native, MACH_PORT_RIGHT_SEND, &references) && references == 2);
+            audit_token_t expected = launchd.audit;
+            assert(!memcmp(&registeredAudits[index], &expected, sizeof(expected)));
+        };
+        registerDisplayServices(launchd, service);
+        runMainQueueUntil(^BOOL { return !launchd.servicesPending; });
+        unsigned expectedCalls = test == Headless ? 0 : test == DisplayFailure ? 1 :
+                                 test == LookupFailure || test == MissingEndpoint || test == Disabled || test == InvalidOptIn ? 3 : 4;
+        unsigned expectedLookups = test == Headless || test == DisplayFailure || test == Disabled || test == InvalidOptIn ? 0 : 1;
+        assert(endpointCalls == expectedCalls && nativeHapticsLookupCalls == expectedLookups);
+        assert(launchd.servicesError == (test == DisplayFailure ? EACCES : 0)); // Haptics failures never fail baseline services.
+        mach_port_urefs_t references = 0;
+        assert(!mach_port_get_refs(mach_task_self(), native, MACH_PORT_RIGHT_SEND, &references) && references == 1);
+        assert(!mach_port_get_refs(mach_task_self(), service, MACH_PORT_RIGHT_SEND, &references) && references == 1);
+        registerDisplayServices(launchd, service);
+        assert(endpointCalls == expectedCalls && nativeHapticsLookupCalls == expectedLookups); // Never retry an unknown registration.
+        finishJob(launchd, ECANCELED);
+        assert(!mach_port_deallocate(mach_task_self(), native));
+        assert(!mach_port_mod_refs(mach_task_self(), native, MACH_PORT_RIGHT_RECEIVE, -1));
+        assert(!mach_port_deallocate(mach_task_self(), service));
+        assert(!mach_port_mod_refs(mach_task_self(), service, MACH_PORT_RIGHT_RECEIVE, -1));
+    }
+    unsetenv("LSB_EXPERIMENTAL_HAPTICS");
+}
+
 static void testDirectConfigdWaitsForSelectedBridge(void) {
     for (unsigned variant = 0; variant < 4; ++variant) {
         resetBroker();
@@ -2182,7 +2291,7 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
     NSArray *selected = @[@"com.apple.notifyd", @"com.apple.lsd", @"com.apple.runningboardd", @"com.apple.containermanagerd",
         @"com.apple.fontservicesd", @"com.apple.containermanagerd.system", @"com.apple.distnoted.xpc.daemon", @"com.apple.configd_sim",
         @"com.apple.sleepd", @"com.apple.systemstatusd", @"com.apple.SpringBoard", @"com.apple.iconservices.iconservicesagent", @"com.apple.TextInput.kbd",
-        @"com.apple.assistantd", @"com.apple.PosterBoard"];
+        @"com.apple.assistantd", @"com.apple.PosterBoard", @"com.apple.DragUI.druid"];
     NSDictionary *enabled = @{@"#IfFeatureFlagEnabled": @"SystemStatus/EmbeddedDaemon", @"#Then": @YES};
     NSDictionary *disabled = @{@"#IfFeatureFlagDisabled": @"SystemStatus/EmbeddedDaemon", @"#Then": @YES};
     NSArray *statusServices = @[@"com.apple.systemstatus", @"com.apple.systemstatus.publisher", @"com.apple.systemstatus.activityattribution"];
@@ -2970,6 +3079,86 @@ static LSBJob *runIdentityJob(const char *path, pid_t nativePID, unsigned genera
     return job;
 }
 
+static RecordedReply *requestProcessList(audit_token_t caller) {
+    processListReply = nil;
+    LSBReceivedMessage *request = messageFor(LSB_REQUEST_LIST_PROCESSES, caller.val[5], caller.val[7], 0);
+    request->audit = caller;
+    unsigned object = ((TestMessageObject *)request->object)->identifier;
+    handleMessage(request);
+    RecordedReply *reply = replyFor(object);
+    assert(reply && (reply->error ? !processListReply : processListReply != nil));
+    return reply;
+}
+
+static void testProcessListEntitlementsAndAuthentication(void) {
+    resetBroker();
+    for (id value in @[@YES, @NO, @1, @0, @"true", @[], @{}]) {
+        NSData *plist = [NSPropertyListSerialization dataWithPropertyList:@{@"proc_info-allow": value, @"com.apple.druid": value}
+                                                                  format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
+        uint32_t size = (uint32_t)plist.length + 8;
+        const unsigned char header[] = {0xfa, 0xde, 0x71, 0x71, size >> 24, size >> 16, size >> 8, size};
+        NSMutableData *blob = [NSMutableData dataWithBytes:header length:sizeof(header)];
+        [blob appendData:plist];
+        BOOL expected = CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() && [value boolValue];
+        assert(processInfoAllowedByEntitlements(blob) == expected);
+        assert(booleanGuestEntitlement(blob, @"com.apple.druid") == expected);
+    }
+    assert(!processInfoAllowedByEntitlements(nil) && !processInfoAllowedByEntitlements([NSData dataWithBytes:"invalid" length:7]));
+    char temporary[] = "/tmp/LSBProcessList.XXXXXX", canonical[PATH_MAX];
+    assert(mkdtemp(temporary) && realpath(temporary, canonical));
+    NSString *directory = [NSString stringWithUTF8String:canonical];
+    runtimeRoot = [directory stringByAppendingPathComponent:@"RuntimeRoot"];
+    NSString *bin = [runtimeRoot stringByAppendingPathComponent:@"bin"];
+    NSFileManager *manager = NSFileManager.defaultManager;
+    assert([manager createDirectoryAtPath:bin withIntermediateDirectories:YES attributes:nil error:NULL]);
+    const unsigned char der[] = {0x70, 27, 2, 1, 1, 0xb0, 22, 0x30, 20, 0x0c, 15,
+        'p', 'r', 'o', 'c', '_', 'i', 'n', 'f', 'o', '-', 'a', 'l', 'l', 'o', 'w', 1, 1, 0xff};
+    NSData *grantDER = [NSData dataWithBytes:der length:sizeof(der)];
+    NSString *path = [bin stringByAppendingPathComponent:@"inspect"];
+    assert([entitlementImage(grantDER, YES) writeToFile:path atomically:YES]);
+    LSBJob *caller = runIdentityJob("/bin/inspect", getpid() + 500, 1800, 1);
+    assert(caller.guestProcessInfoAllowed && !caller.guestEntitlementsError && !caller.guestXMLEntitlementsError);
+    assert(!unlink(path.fileSystemRepresentation)); // Permission and path remain the immutable launch snapshot.
+    assert([[@"plain image" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:path atomically:YES]);
+    LSBJob *target = runIdentityJob("/bin/inspect", getpid() + 501, 1801, 2);
+    assert(!target.guestProcessInfoAllowed);
+    target.guestPID = 42;
+    target.parentIdentifier = caller.identifier;
+    LSBChildStatusSetParentPID(target.childStatus, caller.guestPID);
+    assert(!requestProcessList(caller.audit)->error);
+    const LSBProcessList *list = processListReply.bytes;
+    assert(list->count == 2 && list->records[1].guestPID == 42 && list->records[1].parentPID == caller.guestPID);
+    LSBPeerProcessIdentity identity = target.peerIdentity;
+    assert(!memcmp(&list->records[1].audit, &identity.audit, sizeof(audit_token_t)));
+    assert(!strcmp(list->records[1].executablePath, "/bin/inspect"));
+    assert(requestProcessList(target.audit)->error == EPERM);
+    for (unsigned word = 0; word < 8; ++word) {
+        audit_token_t changed = caller.audit; changed.val[word] ^= 1;
+        assert(requestProcessList(changed)->error == EACCES);
+    }
+    for (unsigned condition = 0; condition < 6; ++condition) {
+        target.retiredForExec = condition == 0; target.finishing = condition == 1;
+        target.phase = condition == 2 ? JobDispatched : JobRunning;
+        target.executionRole = condition == 3 ? LSB_EXECUTION_NATIVE_METAL_SERVICE : LSB_EXECUTION_SIMULATOR;
+        target.peerIdentityError = condition == 4 ? EIO : 0;
+        if (condition == 5) ++target.pidVersion;
+        assert(!requestProcessList(caller.audit)->error && ((const LSBProcessList *)processListReply.bytes)->count == 1);
+        if (condition == 5) --target.pidVersion;
+    }
+    target.peerIdentityError = 0; target.retiredForExec = target.finishing = NO;
+    target.phase = JobRunning; target.executionRole = LSB_EXECUTION_SIMULATOR;
+    caller.retiredForExec = YES;
+    assert(requestProcessList(caller.audit)->error == EACCES); caller.retiredForExec = NO;
+    caller.phase = JobDispatched;
+    assert(requestProcessList(caller.audit)->error == EACCES); caller.phase = JobRunning;
+    caller.executionRole = LSB_EXECUTION_NATIVE_METAL_SERVICE;
+    assert(requestProcessList(caller.audit)->error == EACCES); caller.executionRole = LSB_EXECUTION_SIMULATOR;
+    sessionDraining = YES;
+    assert(requestProcessList(caller.audit)->error == ECANCELED); sessionDraining = NO;
+    resetBroker();
+    assert([manager removeItemAtPath:directory error:NULL]);
+}
+
 static RecordedReply *requestProcessIdentity(audit_token_t caller, pid_t target) {
     LSBPeerProcessIdentityDispose(&identityReply);
     LSBReceivedMessage *request = messageFor(LSB_REQUEST_COPY_PROCESS_IDENTITY, caller.val[5], caller.val[7], 0);
@@ -2980,6 +3169,110 @@ static RecordedReply *requestProcessIdentity(audit_token_t caller, pid_t target)
     RecordedReply *reply = replyFor(object);
     assert(reply && (reply->error ? !MACH_PORT_VALID(identityReply.taskName) : MACH_PORT_VALID(identityReply.taskName)));
     return reply;
+}
+
+static LSBJob *debuggerJob(pid_t nativePID, pid_t guestPID, unsigned generation, const char *path) {
+    LSBJob *job = auditJob(nativePID, guestPID, generation, NO);
+    LSBPeerProcessIdentity identity = {.audit = job.audit};
+    memcpy(identity.shortInfo, &nativePID, sizeof(nativePID));
+    strlcpy(identity.executablePath, path, sizeof(identity.executablePath));
+    assert(!task_name_for_pid(mach_task_self(), getpid(), &identity.taskName));
+    job.peerIdentity = identity;
+    job.peerIdentityError = 0;
+    return job;
+}
+
+static RecordedReply *requestDebuggerRegistration(audit_token_t caller, mach_port_t endpoint) {
+    LSBReceivedMessage *request = messageFor(LSB_REQUEST_REGISTER_DEBUGGER_PORT, caller.val[5], caller.val[7], 0);
+    request->audit = caller;
+    if (MACH_PORT_VALID(endpoint)) assert(!mach_port_mod_refs(mach_task_self(), endpoint, MACH_PORT_RIGHT_SEND, 1));
+    request->processDebuggerPort = endpoint;
+    unsigned object = ((TestMessageObject *)request->object)->identifier;
+    handleMessage(request);
+    return replyFor(object);
+}
+
+static RecordedReply *requestDebuggerActivation(audit_token_t caller) {
+    LSBReceivedMessage *request = messageFor(LSB_REQUEST_REGISTER_DEBUGGER_PORT, caller.val[5], caller.val[7], 0);
+    request->audit = caller; request->activateDebuggerPort = true;
+    unsigned object = ((TestMessageObject *)request->object)->identifier;
+    handleMessage(request);
+    return replyFor(object);
+}
+
+static RecordedReply *requestDebuggerInfo(audit_token_t caller, pid_t target) {
+    memset(&debuggerInfoReply, 0, sizeof(debuggerInfoReply));
+    LSBReceivedMessage *request = messageFor(LSB_REQUEST_COPY_DEBUGGER_INFO, caller.val[5], caller.val[7], 0);
+    request->audit = caller; request->targetPID = target;
+    unsigned object = ((TestMessageObject *)request->object)->identifier;
+    handleMessage(request);
+    runMainQueueUntil(^BOOL { return replyFor(object) != NULL; });
+    return replyFor(object);
+}
+
+static void testCooperativeDebuggerAuthentication(void) {
+    resetBroker();
+    LSBJob *caller = debuggerJob(8200, 8100, 9300, "/System/Library/PrivateFrameworks/DragUI.framework/Support/druid");
+    LSBJob *target = debuggerJob(8300, 8201, 9301, "/System/Library/CoreServices/SpringBoard.app/SpringBoard");
+    caller.guestDragUIAllowed = YES;
+    mach_port_t endpoint;
+    assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &endpoint));
+    assert(!mach_port_insert_right(mach_task_self(), endpoint, endpoint, MACH_MSG_TYPE_MAKE_SEND));
+    mach_port_urefs_t initial = sendReferences(endpoint);
+    for (unsigned word = 0; word < 8; ++word) {
+        audit_token_t changed = target.audit; changed.val[word] ^= 1;
+        assert(requestDebuggerRegistration(changed, endpoint)->error == EACCES && sendReferences(endpoint) == initial);
+    }
+    assert(requestDebuggerRegistration(target.audit, MACH_PORT_NULL)->error == EINVAL);
+    assert(requestDebuggerActivation(target.audit)->error == EINVAL && !target.processDebuggerReady);
+    assert(!requestDebuggerRegistration(target.audit, endpoint)->error && target.processDebuggerPort == endpoint);
+    assert(sendReferences(endpoint) == initial + 1);
+    assert(requestDebuggerRegistration(target.audit, endpoint)->error == EALREADY && sendReferences(endpoint) == initial + 1);
+    assert(!target.processDebuggerReady && requestDebuggerInfo(caller.audit, target.pid)->error == ENOTSUP && !debuggerQueryCalls);
+    for (unsigned word = 0; word < 8; ++word) {
+        audit_token_t changed = target.audit; changed.val[word] ^= 1;
+        assert(requestDebuggerActivation(changed)->error == EACCES && !target.processDebuggerReady);
+    }
+    assert(!requestDebuggerActivation(target.audit)->error && target.processDebuggerReady);
+    assert(requestDebuggerActivation(target.audit)->error == EALREADY);
+    assert(!requestDebuggerInfo(caller.audit, target.pid)->error && debuggerInfoReply.kp_proc.p_pid == target.pid &&
+           debuggerInfoReply.kp_proc.p_flag == P_TRACED && debuggerQueryCalls == 1 && !caller.debuggerQueryPending);
+    assert(sendReferences(endpoint) == initial + 1);
+    for (unsigned word = 0; word < 8; ++word) {
+        audit_token_t changed = caller.audit; changed.val[word] ^= 1;
+        assert(requestDebuggerInfo(changed, target.pid)->error == EACCES && debuggerQueryCalls == 1);
+    }
+    caller.guestDragUIAllowed = NO;
+    assert(requestDebuggerInfo(caller.audit, target.pid)->error == EACCES); caller.guestDragUIAllowed = YES;
+    LSBPeerProcessIdentity original = caller.peerIdentity, modified = original;
+    strcpy(modified.executablePath, "/Plugins/druid"); caller.peerIdentity = modified;
+    assert(requestDebuggerInfo(caller.audit, target.pid)->error == EACCES); caller.peerIdentity = original;
+    caller.debuggerQueryPending = YES;
+    assert(requestDebuggerInfo(caller.audit, target.pid)->error == EBUSY); caller.debuggerQueryPending = NO;
+    assert(requestDebuggerInfo(caller.audit, target.guestPID)->error == ESRCH && debuggerQueryCalls == 1);
+    for (unsigned condition = 0; condition < 5; ++condition) {
+        target.retiredForExec = condition == 0; target.finishing = condition == 1;
+        target.phase = condition == 2 ? JobDispatched : JobRunning;
+        target.executionRole = condition == 3 ? LSB_EXECUTION_NATIVE_METAL_SERVICE : LSB_EXECUTION_SIMULATOR;
+        target.peerIdentityError = condition == 4 ? EIO : 0;
+        assert(requestDebuggerInfo(caller.audit, target.pid)->error == ESRCH && debuggerQueryCalls == 1);
+    }
+    target.retiredForExec = target.finishing = NO; target.phase = JobRunning;
+    target.executionRole = LSB_EXECUTION_SIMULATOR; target.peerIdentityError = 0;
+    debuggerQueryError = ETIMEDOUT;
+    assert(requestDebuggerInfo(caller.audit, target.pid)->error == ETIMEDOUT && !debuggerInfoReply.kp_proc.p_pid && debuggerQueryCalls == 2);
+    debuggerQueryError = 0;
+    debuggerQueryHook = ^{ target.retiredForExec = YES; };
+    assert(requestDebuggerInfo(caller.audit, target.pid)->error == ESRCH && !debuggerInfoReply.kp_proc.p_pid && debuggerQueryCalls == 3);
+    target.retiredForExec = NO;
+    debuggerQueryHook = ^{ audit_token_t audit = target.audit; ++audit.val[7]; target.audit = audit; ++target.pidVersion; };
+    assert(requestDebuggerInfo(caller.audit, target.pid)->error == ESRCH && !debuggerInfoReply.kp_proc.p_pid && debuggerQueryCalls == 4);
+    debuggerQueryHook = nil;
+    releaseGuestProcessIdentity(target);
+    assert(!target.processDebuggerPort && sendReferences(endpoint) == initial);
+    assert(!mach_port_mod_refs(mach_task_self(), endpoint, MACH_PORT_RIGHT_SEND, -1));
+    assert(!mach_port_mod_refs(mach_task_self(), endpoint, MACH_PORT_RIGHT_RECEIVE, -1));
+    resetBroker();
 }
 
 static RecordedReply *requestNativeChildPID(audit_token_t caller, pid_t target) {
@@ -3854,6 +4147,7 @@ static void testRebootPreservesQueuedKqueueCallbacks(void) {
 
 static NSData *deviceProfile(LSBGuestDeviceType *type) {
     NSDictionary *profile = @{@"capabilities": @{
+        @"DeviceSupportsClosedLoopHaptics": @NO,
         @"modelIdentifier": type.modelIdentifier, @"productClass": type.productClass,
         @"displays": @[@{@"deviceName": @"primary", @"width": @(type.width), @"height": @(type.height),
             @"scale": @(type.scale), @"hdpi": @(type.pitch), @"vdpi": @(type.pitch)}]
@@ -4035,6 +4329,7 @@ int main(void) {
         testDisplayEndpointRegistrationCompletesAll();
         testDisplayRegistrationSharesStartupBudget();
         testNativeConfigdBridgeRegistration();
+        testNativeHapticsBridgeRegistration();
         testDirectConfigdWaitsForSelectedBridge();
         testNativeMetalReadyGatesLaunchd();
         testNativeMetalOwnerLifecycle();
@@ -4053,6 +4348,8 @@ int main(void) {
         testGuestEntitlementsPathBoundaries();
         testPeerIdentityKernelValidation();
         testPeerIdentitySnapshotsAndAuthentication();
+        testProcessListEntitlementsAndAuthentication();
+        testCooperativeDebuggerAuthentication();
         testLaunchdChildIdentityAndSignals();
         testLaunchdNativeChildPIDResolution();
         testPeerExecutablePathContainment();

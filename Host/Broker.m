@@ -19,6 +19,7 @@
 #include "NativeMetalControl.h"
 #include "GuestEntitlements.h"
 #include "GuestEntitlementsConversion.h"
+#include "PeerDebugger.h"
 #import "IndigoHIDServer.h"
 #import "FramebufferServer.h"
 #import "IOSurfaceServer.h"
@@ -28,8 +29,10 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <sys/proc.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -78,6 +81,9 @@ enum { JobQueued, JobStarting, JobDispatched, JobRunning };
 @property int guestEntitlementsError;
 @property (nonatomic, copy) NSData *guestXMLEntitlements;
 @property int guestXMLEntitlementsError;
+@property BOOL guestProcessInfoAllowed;
+@property BOOL guestDragUIAllowed, debuggerQueryPending, processDebuggerReady;
+@property mach_port_t processDebuggerPort;
 @property (nonatomic, copy) NSData *guestCodeDirectoryHash;
 @property int guestCodeDirectoryHashError;
 @property LSBPeerProcessIdentity peerIdentity;
@@ -97,6 +103,7 @@ enum { JobQueued, JobStarting, JobDispatched, JobRunning };
 }
 - (void)dealloc {
     LSBPeerProcessIdentityDispose(&_peerIdentity);
+    if (MACH_PORT_VALID(_processDebuggerPort)) mach_port_deallocate(mach_task_self(), _processDebuggerPort);
     if (_nativeMetalControl) LSBNativeMetalControlUnmap(_nativeMetalControl);
     if (MACH_PORT_VALID(_nativeServicePort)) mach_port_deallocate(mach_task_self(), _nativeServicePort);
     if (_launchdHandshake) { LSBLaunchdHandshakeDispose(_launchdHandshake); free(_launchdHandshake); }
@@ -143,6 +150,8 @@ typedef struct { audit_token_t audit; pid_t guestPID; } LSBRetiredIdentity;
 static LSBRetiredIdentity retiredIdentities[RetiredIdentityCapacity];
 static unsigned retiredIdentityCount, auditResolutionLogs;
 static unsigned peerIdentityLogs;
+static unsigned peerDebuggerProbeLogs;
+static unsigned cooperativeDebuggerLogs;
 static unsigned guestEntitlementErrorLogs;
 static unsigned guestProxySigningErrorLogs;
 static BOOL retiredIdentitiesFull;
@@ -354,7 +363,20 @@ static void logGuestEntitlementError(LSBJob *job) {
     }
 }
 
+// Only an actual plist Boolean true authorizes inspection; integers/strings and absent or malformed metadata fail closed.
+static BOOL booleanGuestEntitlement(NSData *blob, NSString *key) {
+    if (!LSBGuestEntitlementsHasValidBlobHeaderForOperation(blob.bytes, blob.length, 7)) return NO;
+    NSData *plist = [blob subdataWithRange:NSMakeRange(8, blob.length - 8)];
+    id object = [NSPropertyListSerialization propertyListWithData:plist options:NSPropertyListImmutable format:NULL error:NULL];
+    if (![object isKindOfClass:NSDictionary.class]) return NO;
+    id value = object[key];
+    return value && CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() && CFBooleanGetValue((__bridge CFBooleanRef)value);
+}
+static BOOL processInfoAllowedByEntitlements(NSData *blob) { return booleanGuestEntitlement(blob, @"proc_info-allow"); }
+
 static void snapshotGuestEntitlements(LSBJob *job) {
+    job.guestProcessInfoAllowed = NO;
+    job.guestDragUIAllowed = NO;
     job.guestEntitlements = nil;
     job.guestXMLEntitlements = nil;
     job.guestCodeDirectoryHash = nil;
@@ -376,6 +398,10 @@ static void snapshotGuestEntitlements(LSBJob *job) {
     if (!job.guestXMLEntitlementsError) {
         job.guestXMLEntitlements = [[NSData alloc] initWithBytesNoCopy:xml length:size freeWhenDone:YES];
         if (!job.guestXMLEntitlements) { free(xml); job.guestXMLEntitlementsError = ENOMEM; }
+        else {
+            job.guestProcessInfoAllowed = processInfoAllowedByEntitlements(job.guestXMLEntitlements);
+            job.guestDragUIAllowed = booleanGuestEntitlement(job.guestXMLEntitlements, @"com.apple.druid");
+        }
     }
     logGuestEntitlementError(job);
 }
@@ -393,6 +419,49 @@ static int validatePeerTaskIdentity(const LSBPeerProcessIdentity *identity, cons
         count != TASK_AUDIT_TOKEN_COUNT || memcmp(&audit, expected, sizeof(audit))) return EACCES;
     // TASK_AUDIT_TOKEN proves identity, not task-port flavor. The trusted native CHECKIN path obtains this right with task_name_for_pid(self).
     return 0;
+}
+
+// Temporary opt-in native diagnostic: these are fresh kernel queries, not the immutable CHECKIN status snapshot.
+// PROC_PIDT_SHORTBSDINFO is omitted from the iOS SDK; the public libproc record uses this fixed 64-byte layout.
+extern int proc_pidinfo(int, int, uint64_t, void *, int);
+typedef struct {
+    uint32_t pid, ppid, pgid, status;
+    char comm[16];
+    uint32_t flags, uid, gid, ruid, rgid, svuid, svgid, reserved;
+} LSBPeerDebuggerBSDInfo;
+_Static_assert(sizeof(LSBPeerDebuggerBSDInfo) == LSB_PEER_SHORT_INFO_BYTES, "peer debugger short BSD info ABI");
+
+static void logNativeDebuggerProbe(pid_t pid, uint32_t version, const LSBPeerProcessIdentity *identity, const audit_token_t *expected) {
+    int before = identity ? validatePeerTaskIdentity(identity, expected) : 0;
+    if (before) {
+        fprintf(stderr, "[broker] debugger probe native=%d version=%u before=%d skipped\n", pid, version, before);
+        return;
+    }
+    struct kinfo_proc info = {0};
+    size_t size = sizeof(info);
+    int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    errno = 0;
+    int sysctlResult = sysctl(mib, 4, &info, &size, NULL, 0), sysctlError = errno;
+    LSBPeerDebuggerBSDInfo bsd = {0};
+    errno = 0;
+    int bsdResult = proc_pidinfo(pid, LSB_PEER_SHORT_INFO_FLAVOR, 0, &bsd, sizeof(bsd)), bsdError = errno;
+    int after = identity ? validatePeerTaskIdentity(identity, expected) : 0;
+    fprintf(stderr, "[broker] debugger probe %s native=%d version=%u before=%d after=%d "
+            "sysctl=%d errno=%d size=%zu pid=%d flags=0x%x traced=%d bsd=%d errno=%d pid=%u flags=0x%x traced=%d\n",
+            identity ? "peer" : "self", pid, version, before, after, sysctlResult, sysctlError, size,
+            info.kp_proc.p_pid, info.kp_proc.p_flag, !!(info.kp_proc.p_flag & P_TRACED), bsdResult, bsdError,
+            bsd.pid, bsd.flags, !!(bsd.flags & 2u));
+}
+
+static void logPeerDebuggerProbe(const LSBPeerProcessIdentity *identity, const audit_token_t *expected) {
+    int saved = errno;
+    const char *enabled = getenv("LSB_TRACE_PEER_DEBUGGER_STATE");
+    if (enabled && !strcmp(enabled, "1") && peerDebuggerProbeLogs < 64) {
+        if (!peerDebuggerProbeLogs) logNativeDebuggerProbe(getpid(), 0, NULL, NULL);
+        ++peerDebuggerProbeLogs;
+        logNativeDebuggerProbe((pid_t)expected->val[5], expected->val[7], identity, expected);
+    }
+    errno = saved;
 }
 
 static int copyGuestExecutablePath(const LSBSpawnPlan *plan, char output[LSB_PATH_BYTES]) {
@@ -421,6 +490,9 @@ static void releaseGuestProcessIdentity(LSBJob *job) {
     job.peerIdentity = (LSBPeerProcessIdentity){0};
     job.peerIdentityError = ESRCH;
     LSBPeerProcessIdentityDispose(&snapshot);
+    if (MACH_PORT_VALID(job.processDebuggerPort)) mach_port_deallocate(mach_task_self(), job.processDebuggerPort);
+    job.processDebuggerPort = MACH_PORT_NULL;
+    job.processDebuggerReady = NO;
 }
 
 static void logPeerIdentityRequest(pid_t sender, pid_t target, uint32_t version, int error) {
@@ -1251,6 +1323,20 @@ static void registerDisplayServices(LSBJob *active, mach_port_t service) {
                                                           metal, deadline, &backboardMetalStatus);
             endpointError = backboardMetalError;
         }
+        kern_return_t hapticsLookupStatus = -1, hapticsStatus = -1;
+        int hapticsError = ECANCELED;
+        BOOL hapticsEnabled = LSBExperimentalHapticsEnabled();
+        if (!endpointError && indigo && hapticsEnabled) {
+            // Stock 23A343 CoreHaptics uses this NSXPC service. Publish only the native host's fixed lookup result;
+            // clients still connect with their real extension audit identity, and native hapticd enforces its own policy.
+            const char *name = "com.apple.audio.hapticd";
+            mach_port_t endpoint = MACH_PORT_NULL;
+            hapticsLookupStatus = bootstrap_look_up(bootstrap_port, name, &endpoint);
+            hapticsError = hapticsLookupStatus ? EIO : !MACH_PORT_VALID(endpoint) ? EPIPE :
+                registerDisplayEndpoint(service, &expected, name, endpoint, deadline, &hapticsStatus);
+            if (MACH_PORT_VALID(endpoint)) mach_port_deallocate(mach_task_self(), endpoint);
+            // Optional hardware access must not turn a missing service or rejected registration into a failed simulator boot.
+        }
         // Release baseline jobs immediately after their registrations; the separate SpringBoard route must not delay backboardd.
         void (^finishBaseline)(void) = ^{
             LSBJob *current = findJob(identifier);
@@ -1263,6 +1349,8 @@ static void registerDisplayServices(LSBJob *active, mach_port_t service) {
             if (!current.servicesError) current.servicesError = helperLost ? EPIPE : endpointError;
             if (nativeConfigdSelected) fprintf(stderr, "[configd] native bridge error=%d lookup=%d bootstrap=%d\n",
                                                configdError, configdLookupStatus, configdStatus);
+            if (indigo && hapticsEnabled) fprintf(stderr, "[haptics] native bridge error=%d lookup=%d bootstrap=%d\n",
+                                hapticsError, hapticsLookupStatus, hapticsStatus);
             if (indigo) fprintf(stderr, "[Indigo] registration error=%d bootstrap=%d\n", indigoError, indigoStatus);
             if (iosurface) fprintf(stderr, "[IOSurface] registration error=%d bootstrap=%d\n", iosurfaceError, iosurfaceStatus);
             if (framebuffer) fprintf(stderr, "[framebuffer] registration error=%d bootstrap=%d\n", framebufferError, framebufferStatus);
@@ -1352,6 +1440,115 @@ static int prepareLaunchdHandshake(LSBJob *job) {
     return 0;
 }
 
+static int copyGuestProcessList(LSBProcessList **output, size_t *size) {
+    *output = NULL;
+    *size = 0;
+    _Static_assert(BrokerJobCapacity <= LSB_PROCESS_LIST_CAPACITY, "process list must cover every broker job");
+    LSBProcessList *list = calloc(1, LSBProcessListSize(LSB_PROCESS_LIST_CAPACITY));
+    if (!list) return ENOMEM;
+    list->version = LSB_PROCESS_LIST_VERSION;
+    list->recordSize = sizeof(LSBProcessRecord);
+    for (LSBJob *job in jobs) {
+        if (job.phase != JobRunning || job.retiredForExec || job.finishing || job.executionRole != LSB_EXECUTION_SIMULATOR ||
+            job.guestPID <= 0 || job.peerIdentityError) continue;
+        LSBPeerProcessIdentity identity = job.peerIdentity;
+        audit_token_t audit = job.audit;
+        if (job.pid <= 0 || job.pid != (pid_t)audit.val[5] || job.pidVersion != audit.val[7] ||
+            memcmp(&identity.audit, &audit, sizeof(audit))) continue;
+        if (list->count == LSB_PROCESS_LIST_CAPACITY) { free(list); return EOVERFLOW; }
+        LSBProcessRecord *record = &list->records[list->count++];
+        record->guestPID = job.guestPID;
+        LSBJob *parent = findJob(job.parentIdentifier);
+        record->parentPID = job.childStatus ? LSBChildStatusGetParentPID(job.childStatus) : parent.guestPID;
+        record->audit = audit;
+        memcpy(record->shortInfo, identity.shortInfo, sizeof(record->shortInfo));
+        memcpy(record->executablePath, identity.executablePath, sizeof(record->executablePath));
+    }
+    int error = LSBValidateProcessList(list, LSBProcessListSize(list->count));
+    if (error) { free(list); return error; }
+    *output = list;
+    *size = LSBProcessListSize(list->count);
+    return 0;
+}
+
+static BOOL authenticatedSimulatorJob(LSBJob *job, const audit_token_t *expected) {
+    audit_token_t audit = job.audit;
+    return job && [jobs containsObject:job] && job.phase == JobRunning && !job.retiredForExec && !job.finishing &&
+        job.executionRole == LSB_EXECUTION_SIMULATOR && !job.peerIdentityError && job.pid > 0 &&
+        audit.val[5] == (uint32_t)job.pid && audit.val[7] == job.pidVersion && !memcmp(&audit, expected, sizeof(audit));
+}
+
+static BOOL debuggerTargetCurrent(LSBJob *job, const audit_token_t *expected) {
+    LSBPeerProcessIdentity identity = job.peerIdentity;
+    return authenticatedSimulatorJob(job, expected) && !validatePeerTaskIdentity(&identity, expected);
+}
+
+static BOOL traceCooperativeDebugger(void) {
+    const char *enabled = getenv("LSB_TRACE_PEER_DEBUGGER_STATE");
+    if (!enabled || strcmp(enabled, "1") || cooperativeDebuggerLogs >= 128) return NO;
+    ++cooperativeDebuggerLogs;
+    return YES;
+}
+
+static void replyDebuggerRegistration(LSBReceivedMessage *message, int error) {
+    int saved = errno;
+    if (traceCooperativeDebugger()) fprintf(stderr, "[broker] debugger endpoint native=%u generation=%u phase=%s result=%d\n",
+        message->audit.val[5], message->audit.val[7], message->activateDebuggerPort ? "activate" : "prepare", error);
+    errno = saved;
+    replyError(message, error);
+}
+
+static void finishPeerDebuggerQuery(LSBReceivedMessage *message, uint32_t generation, int error, const struct kinfo_proc *info) {
+    int saved = errno;
+    if (traceCooperativeDebugger()) {
+        fprintf(stderr, "[broker] debugger cooperative sender=%u target=%d generation=%u result=%d",
+                message->audit.val[5], message->targetPID, generation, error);
+        if (!error) fprintf(stderr, " fresh-flags=0x%x traced=%d", info->kp_proc.p_flag, !!(info->kp_proc.p_flag & P_TRACED));
+        fputc('\n', stderr);
+    }
+    errno = saved;
+    LSBTransportReplyDebuggerInfo(message, error, error ? NULL : info);
+    disposeMessage(message);
+}
+
+static void beginPeerDebuggerQuery(LSBJob *sender, LSBReceivedMessage *message) {
+    LSBPeerProcessIdentity caller = sender.peerIdentity;
+    if (!authenticatedSimulatorJob(sender, &message->audit) || !sender.guestDragUIAllowed ||
+        strcmp(caller.executablePath, "/System/Library/PrivateFrameworks/DragUI.framework/Support/druid")) {
+        finishPeerDebuggerQuery(message, 0, EACCES, NULL); return;
+    }
+    if (message->targetPID <= 0) { finishPeerDebuggerQuery(message, 0, EINVAL, NULL); return; }
+    if (sender.debuggerQueryPending) { finishPeerDebuggerQuery(message, 0, EBUSY, NULL); return; }
+    LSBJob *target = nil;
+    for (LSBJob *job in jobs) if (job.pid == message->targetPID && job.phase == JobRunning && !job.retiredForExec && !job.finishing &&
+        job.executionRole == LSB_EXECUTION_SIMULATOR) {
+        if (target) { finishPeerDebuggerQuery(message, 0, ESRCH, NULL); return; }
+        target = job;
+    }
+    audit_token_t expected = target.audit;
+    if (!debuggerTargetCurrent(target, &expected)) { finishPeerDebuggerQuery(message, expected.val[7], ESRCH, NULL); return; }
+    mach_port_t endpoint = target.processDebuggerPort;
+    if (!target.processDebuggerReady || !MACH_PORT_VALID(endpoint)) { finishPeerDebuggerQuery(message, expected.val[7], ENOTSUP, NULL); return; }
+    if (mach_port_mod_refs(mach_task_self(), endpoint, MACH_PORT_RIGHT_SEND, 1)) {
+        finishPeerDebuggerQuery(message, expected.val[7], ESRCH, NULL); return;
+    }
+    sender.debuggerQueryPending = YES;
+    // The target's existing guest exception thread services this self-query. UIKit and the broker remain responsive if it is paused.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        struct kinfo_proc info;
+        int error = LSBPeerDebuggerQuery(endpoint, &expected, 500, &info);
+        mach_port_deallocate(mach_task_self(), endpoint);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            sender.debuggerQueryPending = NO;
+            int result = error;
+            if (sessionDraining) result = ECANCELED;
+            else if (!authenticatedSimulatorJob(sender, &message->audit)) result = EACCES;
+            else if (!debuggerTargetCurrent(target, &expected) || !target.processDebuggerReady || target.processDebuggerPort != endpoint) result = ESRCH;
+            finishPeerDebuggerQuery(message, expected.val[7], result, result ? NULL : &info);
+        });
+    });
+}
+
 static void handleMessage(LSBReceivedMessage *message) {
     pid_t pid = (pid_t)message->audit.val[5];
     uint32_t generation = message->audit.val[7];
@@ -1359,6 +1556,31 @@ static void handleMessage(LSBReceivedMessage *message) {
     for (LSBJob *job in jobs) if (job.pid == pid && job.pidVersion == generation) { sender = job; break; }
     if (sessionDraining) { replyError(message, ECANCELED); return; }
     switch (message->kind) {
+        case LSB_REQUEST_REGISTER_DEBUGGER_PORT: {
+            if (!debuggerTargetCurrent(sender, &message->audit)) { replyDebuggerRegistration(message, EACCES); return; }
+            if (message->activateDebuggerPort) {
+                if (MACH_PORT_VALID(message->processDebuggerPort) || !MACH_PORT_VALID(sender.processDebuggerPort)) {
+                    replyDebuggerRegistration(message, EINVAL); return;
+                }
+                if (sender.processDebuggerReady) { replyDebuggerRegistration(message, EALREADY); return; }
+                sender.processDebuggerReady = YES;
+                replyDebuggerRegistration(message, 0);
+                return;
+            }
+            mach_port_type_t type = 0;
+            if (!MACH_PORT_VALID(message->processDebuggerPort) || mach_port_type(mach_task_self(), message->processDebuggerPort, &type) ||
+                !(type & MACH_PORT_TYPE_SEND) || (type & (MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME | MACH_PORT_TYPE_PORT_SET))) {
+                replyDebuggerRegistration(message, EINVAL); return;
+            }
+            if (MACH_PORT_VALID(sender.processDebuggerPort)) { replyDebuggerRegistration(message, EALREADY); return; }
+            sender.processDebuggerPort = message->processDebuggerPort;
+            message->processDebuggerPort = MACH_PORT_NULL;
+            replyDebuggerRegistration(message, 0);
+            return;
+        }
+        case LSB_REQUEST_COPY_DEBUGGER_INFO:
+            beginPeerDebuggerQuery(sender, message);
+            return;
         case LSB_REQUEST_REBOOT_USERSPACE: {
             audit_token_t expected = sender.audit;
             if (!sender || sender.phase != JobRunning || sender.retiredForExec || sender.finishing || sender.parentIdentifier ||
@@ -1399,6 +1621,21 @@ static void handleMessage(LSBReceivedMessage *message) {
             pid_t resolved = 0;
             int error = resolveAuditPID(&message->targetAudit, &resolved);
             LSBTransportReply(message, error, error ? 0 : resolved, 0, NULL, NULL, NULL);
+            disposeMessage(message);
+            return;
+        }
+        case LSB_REQUEST_LIST_PROCESSES: {
+            audit_token_t expected = sender.audit;
+            if (!sender || sender.phase != JobRunning || sender.retiredForExec || sender.finishing ||
+                sender.executionRole != LSB_EXECUTION_SIMULATOR || memcmp(&message->audit, &expected, sizeof(expected))) {
+                replyError(message, EACCES); return;
+            }
+            if (!sender.guestProcessInfoAllowed) { replyError(message, EPERM); return; }
+            LSBProcessList *list = NULL;
+            size_t size = 0;
+            int error = copyGuestProcessList(&list, &size);
+            LSBTransportReplyProcessList(message, error, list, size);
+            free(list);
             disposeMessage(message);
             return;
         }
@@ -1450,6 +1687,7 @@ static void handleMessage(LSBReceivedMessage *message) {
             audit_token_t targetAudit = target.audit;
             int error = target ? target.peerIdentityError : ESRCH;
             if (!error && validatePeerTaskIdentity(&snapshot, &targetAudit)) error = ESRCH;
+            if (!error) logPeerDebuggerProbe(&snapshot, &targetAudit);
             logPeerIdentityRequest(pid, message->targetPID, target.pidVersion, error);
             LSBTransportReplyProcessIdentity(message, error, error ? NULL : &snapshot);
             disposeMessage(message);
@@ -1741,7 +1979,7 @@ static int initialPlan(LSBReceivedMessage *message, int argc, const char *argv[]
                                   "com.apple.fontservicesd", "com.apple.containermanagerd.system", "com.apple.distnoted.xpc.daemon",
                                   "com.apple.configd_sim", "com.apple.sleepd", "com.apple.systemstatusd", "com.apple.SpringBoard",
                                   "com.apple.iconservices.iconservicesagent", "com.apple.TextInput.kbd", "com.apple.assistantd",
-                                  "com.apple.PosterBoard", NULL};
+                                  "com.apple.PosterBoard", "com.apple.DragUI.druid", NULL};
         enableIndigo = YES;
         const char *const *labels = argc > 2 ? argv + 2 : defaults;
         int error = LSBPrepareLaunchdServicesPlan(message, runtimeRoot.fileSystemRepresentation, envp, labels);
@@ -1905,7 +2143,7 @@ static void completeUserspaceReboot(uint64_t generation) {
         return;
     }
     if (pendingDeviceType) {
-        int deviceError = LSBInstallGuestDeviceCapabilities(runtimeRoot, pendingDeviceCapabilities);
+        int deviceError = LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(runtimeRoot, pendingDeviceCapabilities);
         if (deviceError) { rebootDrainFailed = YES; finishDeviceChange(deviceError); return; }
         sessionDeviceType = pendingDeviceType;
         LSBSaveConfiguredGuestDeviceType(sessionDeviceType);
@@ -2020,7 +2258,7 @@ int LSBStartHost(int argc, const char *argv[], const char *envp[]) {
             error = LSBCopyGuestDeviceCapabilities(runtimeRoot, sessionDeviceType, &capabilities);
             // Preserve command-line and legacy setups without a profile. Selecting another device always requires its staged original.
             if (error == ENOENT && sessionDeviceType == LSBDefaultGuestDeviceType()) error = 0;
-            if (!error && capabilities) error = LSBInstallGuestDeviceCapabilities(runtimeRoot, capabilities);
+            if (!error && capabilities) error = LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(runtimeRoot, capabilities);
             LSBLaunchdConfigurationSetDeviceType(sessionDeviceType);
         }
         if (error) { fprintf(stderr, "[broker] Startup failed: %s\n", strerror(error)); return error; }

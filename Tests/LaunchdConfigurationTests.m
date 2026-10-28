@@ -410,7 +410,7 @@ static NSDictionary *snapshotDirectory(NSString *directory) {
 }
 
 static void testServiceCapacity(LSBReceivedMessage *message, NSString *root, NSString *dataPath, NSString *configPath) {
-    enum { capacity = 16 };
+    enum { capacity = 20 };
     assert(capacity + 3 < LSB_CHILD_STATUS_CAPACITY);
     NSString *stockDirectory = [root stringByAppendingPathComponent:@"System/Library/LaunchDaemons"];
     char names[capacity + 1][64];

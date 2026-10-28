@@ -1,6 +1,9 @@
 #import "DeviceConfiguration.h"
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -82,4 +85,58 @@ int LSBInstallGuestDeviceCapabilities(NSString *root, NSData *data) {
     if (error) unlinkat(directory, temporary.fileSystemRepresentation, 0);
     close(directory);
     return error;
+}
+
+int LSBProjectGuestHapticsCapability(NSData *data, CFTypeRef nativeAnswer, NSData **output) {
+    if (!output) return EINVAL;
+    *output = nil;
+    if (![data isKindOfClass:NSData.class] || !data.length || data.length > 2 * 1024 * 1024) return EINVAL;
+    id original = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL];
+    if (![original isKindOfClass:NSDictionary.class] || ![original[@"capabilities"] isKindOfClass:NSDictionary.class]) return EINVAL;
+    NSNumber *supported = nativeAnswer && CFGetTypeID(nativeAnswer) == CFBooleanGetTypeID() &&
+        CFBooleanGetValue((CFBooleanRef)nativeAnswer) ? @YES : @NO;
+    // 23A343 MobileGestalt's closed-loop callback (0xec80) reads this plaintext SimCapabilities key (0x2ccbc).
+    // This describes the bridged physical actuator, without changing the selected simulator's identity or display profile.
+    NSString *key = @"DeviceSupportsClosedLoopHaptics";
+    id previous = original[@"capabilities"][key];
+    if (previous && CFGetTypeID((__bridge CFTypeRef)previous) == CFBooleanGetTypeID() && [previous isEqual:supported]) {
+        *output = data.copy;
+        return 0;
+    }
+    NSMutableDictionary *profile = [original mutableCopy], *capabilities = [original[@"capabilities"] mutableCopy];
+    capabilities[key] = supported;
+    profile[@"capabilities"] = capabilities;
+    *output = [NSPropertyListSerialization dataWithPropertyList:profile format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+    return *output ? 0 : EINVAL;
+}
+
+static CFBooleanRef nativeHapticsCapability(void) {
+    static CFBooleanRef cachedAnswer;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // Native host only: no MobileGestalt pointer or CF object crosses into the guest.
+        typedef CFTypeRef (*MGCopyAnswerFunction)(CFStringRef question);
+        void *library = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_LAZY | RTLD_LOCAL);
+        MGCopyAnswerFunction copyAnswer = library ? (MGCopyAnswerFunction)dlsym(library, "MGCopyAnswer") : NULL;
+        CFTypeRef answer = copyAnswer ? copyAnswer(CFSTR("gqDnklGQnpv5ilgh5uHckw")) : NULL;
+        BOOL known = answer && CFGetTypeID(answer) == CFBooleanGetTypeID();
+        if (known) cachedAnswer = CFBooleanGetValue((CFBooleanRef)answer) ? kCFBooleanTrue : kCFBooleanFalse;
+        fprintf(stderr, "[haptics] native closed-loop support=%s answer-type=%lu\n",
+                known ? CFBooleanGetValue(cachedAnswer) ? "true" : "false" : "unknown", answer ? (unsigned long)CFGetTypeID(answer) : 0);
+        if (answer) CFRelease(answer);
+        if (library) dlclose(library);
+    });
+    return cachedAnswer;
+}
+
+BOOL LSBExperimentalHapticsEnabled(void) {
+    const char *value = getenv("LSB_EXPERIMENTAL_HAPTICS");
+    return value && !strcmp(value, "1");
+}
+
+int LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *root, NSData *data) {
+    if (!LSBExperimentalHapticsEnabled()) return LSBInstallGuestDeviceCapabilities(root, data);
+    NSData *adapted = nil;
+    int error = LSBProjectGuestHapticsCapability(data, nativeHapticsCapability(), &adapted);
+    return error ? error : LSBInstallGuestDeviceCapabilities(root, adapted);
 }

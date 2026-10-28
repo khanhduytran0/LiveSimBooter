@@ -95,6 +95,13 @@ independently of the physical phone's model. The staged path is
 for that physical file. The [device picker](device-types.md) keeps capabilities, identity and framebuffer geometry together.
 Stage its seven original profiles below to enable Home-button/Home-indicator iPhones and iPads; iPhone 8/8 Plus remain experimental on this OS.
 
+Normal startup and device-picker apply publish the staged stock capabilities unchanged. The unfinished native haptic bridge
+is disabled by default: `LSB_EXPERIMENTAL_HAPTICS=1` in the **native host launch environment** enables both fixed hapticd
+endpoint publication and projection of `DeviceSupportsClosedLoopHaptics` from the actual native MobileGestalt answer.
+Only exact CFBoolean true enables that capability; unknown or malformed answers become false. Other profile fields and original
+staged profiles remain unchanged. Engine initialization has succeeded only with an additional temporary diagnostic adaptation;
+engine start still fails and physical playback is unverified. This opt-in is not a setup requirement; see [haptic validation](keyboard-haptics.md).
+
 ## Build and inspect the cache
 
 The tracked [cache inventory](../Tools/setup-ios26-cache-inputs.json) freezes 1,350 original runtime images; the stock builder
@@ -481,7 +488,7 @@ For app icons, the staged registration manifest is `RuntimeRoot/usr/share/LiveSi
 `/usr/libexec/app-registration --manifest /usr/share/LiveSimBooter/applications.json` as a job **inside the existing simulator
 launchd**, after lsd is running. It logs individual registration results; copying bundles alone does not prove registration.
 Use the [guest launchctl control setup](guest-control.md) to add its worker job and bootstrap the registration job. The worker
-label is opt-in and consumes one selected-job slot; current defaults plus the worker fit the 16-label limit. Bootstrap one-off
+label is opt-in and consumes one selected-job slot; current defaults plus the worker fit the 20-label limit. Bootstrap one-off
 registration jobs afterward rather than adding every diagnostic job to the initial selection. In job plists, use Boolean
 `<true/>`/`<false/>` for launchd policies and guest paths for logs/working directories. The `launchctl bootstrap` plist argument
 and the SSH client's `--data-root` are physical paths. Do not mix these path domains.
@@ -494,7 +501,7 @@ xcrun devicectl device process launch --device "$LSB_DEVICE" --terminate-existin
   --launchd-services com.apple.notifyd com.apple.lsd com.apple.runningboardd com.apple.containermanagerd \
   com.apple.fontservicesd com.apple.containermanagerd.system com.apple.distnoted.xpc.daemon com.apple.configd_sim \
   com.apple.sleepd com.apple.systemstatusd com.apple.SpringBoard com.apple.iconservices.iconservicesagent \
-  com.apple.TextInput.kbd com.apple.assistantd com.apple.PosterBoard com.kdt.LiveSimBooter.launchctl-control
+  com.apple.TextInput.kbd com.apple.assistantd com.apple.PosterBoard com.apple.DragUI.druid com.kdt.LiveSimBooter.launchctl-control
 ```
 
 After the worker starts, configure your actual SSH endpoint and group path, then submit the one-off job:

@@ -9,7 +9,9 @@ root `SimulatorData` or place roots directly inside a group or Documents; those 
 These notes record experiments since 2026-10-25. The tested 23A343 guest reaches SpringBoard with app icons and opens
 Contacts on iPhone18,2 / iOS 27.0 build 24A435. Touches, the simulator keyboard, the launchd-owned Fish terminal, native Metal
 presentation, the performance HUD, and live touch-marker settings have device evidence. The host keeps persistent IOSurface,
-Fish and Settings tabs. Native-cache retention with hardware workqueue redirection is the current default.
+Fish and Settings tabs. Production or unknown native MobileGestalt status retains the native cache with hardware workqueue
+redirection. Only exact Boolean false for `EffectiveProductionStatusAp` selects development cache detachment; Developer Mode
+alone does not select it. See [handoff policy](runtime-handoff.md).
 
 The user verified **Home Screen → Edit → Edit Wallpaper** and color/gradient wallpaper rendering. PosterBoard's lock-screen
 path and direct activation remain **broken (black output) and deferred**. The working editor's clipped Done button is also deferred;
@@ -23,11 +25,12 @@ Historical sections below describe earlier cache layouts and failures; use the s
 - [Source licensing](licensing.md): MIT original code, Apple-derived APSL files, retained notices, and source availability.
 - [Runtime handoff](runtime-handoff.md): startup, local callbacks, thread storage, cache detachment, and debugger metadata.
 - [Multiprocess](multiprocess.md): App Group migration, native extension launches, synchronous XPC, FD replay, and current validation limits.
+- [Process inspection](process-inspection.md): authenticated guest process lists, original entitlement metadata, CocoaTop staging, and device-tested limits.
 - [Simulator launchd](launchd.md): empty bootstrap, tank handoff without execve, workqueue startup, and device findings.
 - [Guest launchctl](guest-control.md): restart individual jobs and reboot the simulator session through the guest bootstrap namespace.
 - [Guest SSH with Fish](sshdog.md): sshdog staging, keys, authenticated device connection, and remaining shell/PTY work.
 - [Backboardd](backboardd.md): the expanded runtime cache, service identity, and boot progress.
-- [Keyboard haptics](keyboard-haptics.md): the pinned system-pattern URL correction and verified iOS 27 host keyboard input.
+- [Guest haptics](keyboard-haptics.md): opt-in native hapticd/capability experiment, the engine-start failure, and the verified keyboard-pattern correction.
 - [Display settings](display-settings.md): native shortcuts backed by a fixed launchd-owned helper, with verified HUD and live touch toggles.
 - [Simulator preferences](cfprefsd.md): the stock cfprefsd job and isolated `BKDigitizerVisualizeTouches` preference.
 - [Services toward SpringBoard](springboard-services.md): simslim evidence, selected daemon startup, notification compatibility, and remaining limits.

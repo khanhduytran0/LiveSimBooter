@@ -18,7 +18,7 @@
 
 // Keep the initial service selection bounded independently of slots needed later for apps, helpers and adopted children.
 // Backboardd, cfprefsd and the terminal/settings helpers are direct launchd children alongside the selected services.
-enum { BaselineLaunchdChildren = 4, MaximumSelectedServices = 16 };
+enum { BaselineLaunchdChildren = 4, MaximumSelectedServices = 20 };
 _Static_assert(BaselineLaunchdChildren + MaximumSelectedServices < LSB_CHILD_STATUS_CAPACITY, "leave child-ledger slots for dynamic jobs");
 
 static LSBGuestDeviceType *configurationDeviceType;

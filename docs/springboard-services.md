@@ -231,7 +231,7 @@ instance. The initial libnotify lines in the probe log are retained output from 
 
 The earlier checkpoint, committed as `614737c` (`Start simulator core services and verify notification delivery`),
 enforced the 14-selected-job boundary and allowed the 34 physical jobs needed during a
-full set of exec replacements. Current local boundary tests permit 16 selected jobs and cover all 64
+full set of exec replacements. Current local boundary tests permit 20 selected jobs and cover all 64
 replacement overlaps plus the three native Metal helpers. At that checkpoint the phone was left using the production shim
 and the seven surviving additional daemons, with
 LaunchServices omitted to avoid demand-driven abort/restart cycles:
@@ -1103,7 +1103,7 @@ The attribute snapshots are in [the LLDB request log](../tmp/app-launch-fix/lldb
 The shared ledger is now **ABI 4**, with **64 slots** and a **2,080-byte** structure inside the unchanged **4 KiB** mapping.
 Old ABI/capacity combinations are rejected before slot access. Host, LiveProcess and guest shim must be deployed together;
 changing a header does not expand a running process's already initialized ledger. The initial service-selection limit
-is **16 selected jobs**, plus the fixed backboardd, cfprefsd and terminal helper jobs. The broker's physical-job limit is **132**: 64 children with room
+is **20 selected jobs**, plus the fixed backboardd, cfprefsd and terminal helper jobs. The broker's physical-job limit is **132**: 64 children with room
 for simultaneous exec replacements, simulator launchd, and three native Metal helpers. Unreaped statuses and observations
 that pin a slot still consume capacity. This increase supplies headroom; it does not remove resource limits.
 

@@ -2,6 +2,7 @@
 #define LSB_WORKQUEUE_BOOTSTRAP_H
 
 #include <stdint.h>
+#include <mach/mach.h>
 
 // Captured in native code before cache detachment. The feature getter does not initialize the native workqueue.
 #define LSB_HOST_WORKQUEUE_START_ENV "LSB_HOST_WORKQUEUE_START"
@@ -14,5 +15,8 @@
 void LSBWorkqueueRegister(uintptr_t simulatorStart);
 int LSBWorkqueueSupported(void);
 int LSBWorkqueueOpen(void);
+// After guest TLS/constructors only: initialize the shared guest exception server if needed, then add one private receive port to its wait set.
+// Caller retains the receive right and removes it by destroying that right. Never creates a second server or opens the kernel workqueue.
+int LSBWorkqueueAddProcessControlPort(mach_port_t port);
 
 #endif

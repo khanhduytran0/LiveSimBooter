@@ -15,8 +15,8 @@ xcrun --sdk iphonesimulator clang -arch arm64 -target arm64-apple-ios14.0-simula
     Guest/WorkqueueBootstrap.c Guest/UserspaceReboot.c Guest/LaunchdCompatibility.c Guest/LaunchdIdentity.c Guest/LaunchdJobIdentity.c \
     Guest/XPCWireCompatibility.c Guest/SystemPowerCompatibility.c Guest/LoggingCompatibility.c \
     Guest/FrameworkBundleCompatibility.c Guest/NotificationSharedMemory.c Guest/CodeSigningCompatibility.c Guest/SpringBoardEntitlements.c \
-    Guest/PeerProcessCompatibility.c Guest/ExtensionKitRegistration.c Guest/UserHomeCompatibility.c Guest/SharedCachePathCompatibility.c \
-    ProcessSupport/ChildStatus.c ProcessSupport/FakePTY.c \
+    Guest/PeerProcessCompatibility.c Guest/ProcessInspection.c Guest/ExtensionKitRegistration.c Guest/UserHomeCompatibility.c Guest/SharedCachePathCompatibility.c \
+    Guest/ProcessDebugger.c ProcessSupport/PeerDebugger.c ProcessSupport/ChildStatus.c ProcessSupport/FakePTY.c \
     ProcessSupport/SpawnPlan.c ProcessSupport/SpawnTransport.c -framework IOKit -framework CoreFoundation -o "$output"
 xcrun --sdk iphonesimulator clang -arch arm64 -target arm64-apple-ios14.0-simulator -std=c11 -Wall -Wextra -Werror \
     Guest/SpawnProbe.c -o "$probe"

@@ -6,10 +6,12 @@
 #include "PeerProcessIdentity.h"
 #include "GuestCodeSignature.h"
 #include "NativeRuntimePolicy.h"
+#include "ProcessInspection.h"
 #include <mach/mach.h>
+#include <sys/sysctl.h>
 
 #define LSB_BROKER_PORT_ENV "LSB_BROKER_PORT"
-#define LSB_TRANSPORT_VERSION 2
+#define LSB_TRANSPORT_VERSION 4
 
 // Bootstrap-only metadata is versioned independently from the outer transport envelope.
 #define LSB_BOOTSTRAP_VERSION 2
@@ -18,7 +20,8 @@ enum LSBExecutionRole { LSB_EXECUTION_SIMULATOR = 0, LSB_EXECUTION_NATIVE_METAL_
 enum LSBRequestKind {
     LSB_REQUEST_SPAWN = 1, LSB_REQUEST_CHECKIN = 2, LSB_REQUEST_READY = 3, LSB_REQUEST_KILL = 4, LSB_REQUEST_EXEC = 5,
     LSB_REQUEST_RESOLVE_AUDIT_PID = 6, LSB_REQUEST_COPY_ENTITLEMENTS = 7, LSB_REQUEST_COPY_PROCESS_IDENTITY = 8,
-    LSB_REQUEST_RESOLVE_NATIVE_CHILD_PID = 9, LSB_REQUEST_REBOOT_USERSPACE = 10
+    LSB_REQUEST_RESOLVE_NATIVE_CHILD_PID = 9, LSB_REQUEST_REBOOT_USERSPACE = 10, LSB_REQUEST_LIST_PROCESSES = 11,
+    LSB_REQUEST_REGISTER_DEBUGGER_PORT = 12, LSB_REQUEST_COPY_DEBUGGER_INFO = 13
 };
 typedef struct {
     uint64_t requestID;
@@ -53,6 +56,8 @@ typedef struct {
     audit_token_t targetAudit;
     LSBPeerProcessIdentity peerIdentity; // CHECKIN owns its taskName; audit comes from the kernel and path remains empty.
     mach_port_t nativeServicePort; // Owned send reference, allowed only on a native service READY request.
+    mach_port_t processDebuggerPort; // Owned send reference, allowed only on REGISTER_DEBUGGER_PORT after guest initialization.
+    bool activateDebuggerPort; // Second phase: endpoint becomes queryable only after the guest publishes its trusted broker audit.
     LSBSpawnPlan plan;
     int fds[LSB_MAX_FDS];
     LSBSpawnPorts ports;
@@ -83,6 +88,15 @@ int LSBTransportKill(pid_t targetPID, int signalNumber);
 // Simulator launchd only: request a replacement userspace after an accepted guest reboot reaches its terminal exit.
 // Carries no payload or rights. Returns an errno value; success means broker acceptance, not completion of the replacement boot.
 int LSBTransportRebootUserspace(void);
+// Actual Boolean proc_info-allow required. Current committed simulator jobs only; no rights or native helper processes.
+// Success owns a malloc snapshot; failure clears both outputs. Caller must free the successful result.
+int LSBTransportListProcesses(LSBProcessList **list, size_t *size);
+// Registers one self-query endpoint after guest TLS is ready. Success returns the reply's genuine kernel sender audit identity.
+int LSBTransportRegisterDebuggerPort(mach_port_t endpoint, audit_token_t *brokerAudit);
+int LSBTransportActivateDebuggerPort(const audit_token_t *brokerAudit);
+// Exact native managed peer only. Broker restricts this to stock druid and its original Boolean entitlement.
+// Returns a fresh cooperative native self KERN_PROC_PID result, never a cached or fabricated debugger flag.
+int LSBTransportCopyDebuggerInfo(pid_t nativePID, struct kinfo_proc *info);
 // Simulator launchd only: resolve the complete kernel audit identity of a request sender to its committed stable guest PID.
 // Unmanaged native identities retain their native PID unless they alias a known managed identity. Never changes the audit token.
 // Returns an errno value and clears *pid on failure; rejected or retired identities must not fall back to their native PID.
@@ -109,6 +123,9 @@ int LSBTransportReply(LSBReceivedMessage *message, int error, pid_t pid, uint64_
                       const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS]);
 // COPY_ENTITLEMENTS only. Success borrows a bounded blob matching the requested operation; errors carry no bytes. Releases the request.
 int LSBTransportReplyEntitlements(LSBReceivedMessage *message, int error, const void *bytes, size_t size);
+// LIST_PROCESSES only; borrows the bounded validated snapshot and releases the request. Errors carry no bytes.
+int LSBTransportReplyProcessList(LSBReceivedMessage *message, int error, const LSBProcessList *list, size_t size);
+int LSBTransportReplyDebuggerInfo(LSBReceivedMessage *message, int error, const struct kinfo_proc *info);
 // COPY_PROCESS_IDENTITY only. Borrows identity and copies its task-name right; errors carry no identity. Releases the request object.
 int LSBTransportReplyProcessIdentity(LSBReceivedMessage *message, int error, const LSBPeerProcessIdentity *identity);
 // Bootstrap additionally copies a shared status-file FD and nonblocking wake-pipe read FD; caller retains ownership.

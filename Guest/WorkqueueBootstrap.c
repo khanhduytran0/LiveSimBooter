@@ -1,5 +1,6 @@
 #include "WorkqueueBootstrap.h"
 #include "ThreadBootstrap.h"
+#include "ProcessDebugger.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -29,6 +30,8 @@ static uintptr_t nativeEntry, guestEntry;
 static pthread_once_t bridgeOnce = PTHREAD_ONCE_INIT;
 static int bridgeError;
 static mach_port_t exceptionPort;
+static mach_port_t exceptionPortSet;
+static _Atomic(bool) exceptionServerReady;
 static mach_msg_type_number_t savedCount;
 static exception_mask_t savedMasks[EXC_TYPES_COUNT];
 static mach_port_t savedPorts[EXC_TYPES_COUNT];
@@ -161,6 +164,8 @@ typedef struct {
 } StateReply;
 #pragma pack(pop)
 typedef union { mach_msg_header_t header; uint64_t alignment; unsigned char bytes[MessageCapacity]; } Message;
+_Static_assert(sizeof(IdentityPrefix) + MaximumCodes * sizeof(int64_t) + 2 * sizeof(uint32_t) +
+               THREAD_STATE_MAX * sizeof(natural_t) + MAX_TRAILER_SIZE <= sizeof(Message), "exception message and audit trailer capacity");
 typedef struct {
     mach_port_t thread, task;
     exception_type_t exception;
@@ -425,9 +430,15 @@ static void *exceptionServer(void *unused) {
     (void)unused;
     for (;;) {
         Message message;
-        kern_return_t status = mach_msg(&message.header, MACH_RCV_MSG, 0, sizeof(message), exceptionPort, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+        mach_msg_option_t options = MACH_RCV_MSG | MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) |
+            MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT);
+        kern_return_t status = mach_msg(&message.header, options, 0, sizeof(message), exceptionPortSet, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
         if (status == MACH_RCV_INTERRUPTED) continue;
         if (status) _exit(126);
+        if (message.header.msgh_local_port != exceptionPort) {
+            LSBProcessDebuggerHandleMessage(&message.header, sizeof(message));
+            continue;
+        }
         StateReply reply;
         handleMessage(&message, &reply);
         status = mach_msg(&reply.header, MACH_SEND_MSG, reply.header.msgh_size, 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -456,6 +467,8 @@ static void initializeBridge(void) {
     hardwareTrace("initialize", KERN_SUCCESS, bridgeMask);
     bool ownsSend = false;
     if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &exceptionPort)) return;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_PORT_SET, &exceptionPortSet)) goto releasePort;
+    if (mach_port_move_member(mach_task_self(), exceptionPort, exceptionPortSet)) goto releasePort;
     if (mach_port_insert_right(mach_task_self(), exceptionPort, exceptionPort, MACH_MSG_TYPE_MAKE_SEND)) goto releasePort;
     ownsSend = true;
     savedCount = EXC_TYPES_COUNT;
@@ -477,22 +490,42 @@ static void initializeBridge(void) {
     }
     (void)pthread_detach(thread);
     bridgeError = 0;
+    atomic_store_explicit(&exceptionServerReady, true, memory_order_release);
     hardwareTrace("ready", KERN_SUCCESS, bridgeMask);
     return;
 restore:
     if (restoreHardwareBreakpoint()) _exit(126);
     restoreHandlers();
 releasePort:
+    if (MACH_PORT_VALID(exceptionPortSet)) (void)mach_port_mod_refs(mach_task_self(), exceptionPortSet, MACH_PORT_RIGHT_PORT_SET, -1);
+    exceptionPortSet = MACH_PORT_NULL;
     (void)mach_port_mod_refs(mach_task_self(), exceptionPort, MACH_PORT_RIGHT_RECEIVE, -1);
     if (ownsSend) (void)mach_port_deallocate(mach_task_self(), exceptionPort);
     exceptionPort = MACH_PORT_NULL;
 }
 
+static int ensureExceptionServer(void) {
+    if (atomic_load_explicit(&exceptionServerReady, memory_order_acquire)) return 0;
+    if (!atomic_load_explicit(&simulatorEntry, memory_order_acquire)) return ENOTSUP;
+    pthread_once(&bridgeOnce, initializeBridge);
+    return bridgeError;
+}
+
+int LSBWorkqueueAddProcessControlPort(mach_port_t port) {
+    mach_port_type_t type = 0;
+    if (!MACH_PORT_VALID(port) || port == exceptionPort || mach_port_type(mach_task_self(), port, &type) || !(type & MACH_PORT_TYPE_RECEIVE))
+        return EINVAL;
+    // Inserted-library constructors can precede libdispatch's lazy __workq_open. Start the same guest server now, after guest TLS is ready.
+    int error = ensureExceptionServer();
+    if (error) return error;
+    return mach_port_move_member(mach_task_self(), port, exceptionPortSet) ? EIO : 0;
+}
+
 int LSBWorkqueueOpen(void) {
     if (!atomic_load_explicit(&simulatorEntry, memory_order_acquire)) return __workq_open();
-    pthread_once(&bridgeOnce, initializeBridge);
+    int error = ensureExceptionServer();
     // libpthread ignores __workq_open's return value, so returning an error here would let it launch an unredirected worker.
-    if (bridgeError) _exit(126);
+    if (error) _exit(126);
     return __workq_open();
 }
 

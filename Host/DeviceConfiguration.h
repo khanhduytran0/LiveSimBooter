@@ -8,3 +8,9 @@ void LSBSaveConfiguredGuestDeviceType(LSBGuestDeviceType *type);
 int LSBCopyGuestDeviceCapabilities(NSString *runtimeRoot, LSBGuestDeviceType *type, NSData **data);
 // Call only before any guest starts or after all old guest processes have exited. Atomic replacement preserves readers.
 int LSBInstallGuestDeviceCapabilities(NSString *runtimeRoot, NSData *data);
+// Native-host diagnostic opt-in; the unfinished service bridge and capability projection share this exact gate.
+BOOL LSBExperimentalHapticsEnabled(void);
+// Without the opt-in, publish the stock profile unchanged. Enabled projection changes only physical closed-loop support.
+int LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *runtimeRoot, NSData *data);
+// Pure profile adaptation. Only CFBoolean true enables support; false/unavailable/malformed native answers publish false.
+int LSBProjectGuestHapticsCapability(NSData *data, CFTypeRef nativeAnswer, NSData **output);

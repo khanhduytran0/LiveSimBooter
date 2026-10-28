@@ -1,4 +1,5 @@
 #include "PeerProcessCompatibility.h"
+#include "ProcessInspection.h"
 #include "ProcessIdentity.h"
 #include "NotificationSharedMemory.h"
 #include "SpawnDiagnostics.h"
@@ -225,6 +226,8 @@ __attribute__((noinline)) int LSBLaunchdProcessTerminate(pid_t pid, int *signalN
 }
 
 static int peerPIDPath(uintptr_t caller, int pid, void *buffer, uint32_t size) {
+    int inspectionResult = 0;
+    if (LSBInspectionPIDPath(pid, buffer, size, &inspectionResult)) return inspectionResult;
     if (!LSBPeerProcessCallerEnabled(caller)) return proc_pidpath(pid, buffer, size);
     int result = proc_pidpath(pid, buffer, size), saved = errno;
     if ((!result && saved == EFAULT) || !buffer || !size || !peerQueryAllowed(caller, pid)) { errno = saved; return result; }

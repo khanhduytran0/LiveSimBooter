@@ -5,9 +5,19 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "../ProcessSupport/PeerDebugger.h"
 
 #define LSB_WORKQUEUE_BOOTSTRAP_TESTING
 #include "../Guest/WorkqueueBootstrap.c"
+
+static mach_port_t controlPort;
+static audit_token_t brokerAudit;
+static _Atomic(unsigned) controlQueries;
+void LSBProcessDebuggerHandleMessage(mach_msg_header_t *message, size_t capacity) {
+    assert(message->msgh_local_port == controlPort);
+    atomic_fetch_add(&controlQueries, 1);
+    LSBPeerDebuggerReply(message, capacity, &brokerAudit);
+}
 
 uintptr_t LSBThreadSignPC(uintptr_t start, uint32_t flags) {
     assert(flags & StateNoPtrauth);
@@ -19,6 +29,15 @@ int main(void) {
     guestEntry = 0x12b269a74;
     assert(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &exceptionPort) == KERN_SUCCESS);
     assert(mach_port_insert_right(mach_task_self(), exceptionPort, exceptionPort, MACH_MSG_TYPE_MAKE_SEND) == KERN_SUCCESS);
+    assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_PORT_SET, &exceptionPortSet));
+    assert(!mach_port_move_member(mach_task_self(), exceptionPort, exceptionPortSet));
+    assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &controlPort));
+    assert(!mach_port_insert_right(mach_task_self(), controlPort, controlPort, MACH_MSG_TYPE_MAKE_SEND));
+    atomic_store(&exceptionServerReady, true);
+    assert(!LSBWorkqueueAddProcessControlPort(controlPort));
+    mach_msg_type_number_t auditCount = TASK_AUDIT_TOKEN_COUNT;
+    assert(!task_info(mach_task_self(), TASK_AUDIT_TOKEN, (task_info_t)&brokerAudit, &auditCount));
+    assert(auditCount == TASK_AUDIT_TOKEN_COUNT);
     pthread_t server;
     assert(pthread_create(&server, NULL, exceptionServer, NULL) == 0);
     assert(pthread_detach(server) == 0);
@@ -60,7 +79,15 @@ int main(void) {
     assert(mach_port_get_refs(mach_task_self(), request.thread, MACH_PORT_RIGHT_SEND, &afterThread) == KERN_SUCCESS);
     assert(mach_port_get_refs(mach_task_self(), request.task, MACH_PORT_RIGHT_SEND, &afterTask) == KERN_SUCCESS);
     assert(beforeThread == afterThread && beforeTask == afterTask);
+    struct kinfo_proc info;
+    assert(!LSBPeerDebuggerQuery(controlPort, &brokerAudit, 500, &info));
+    assert(info.kp_proc.p_pid == getpid() && atomic_load(&controlQueries) == 1);
+    // Servicing a cooperative request must leave the original exception transport functional with its identity rights intact.
+    request.code[1] = nativeEntry;
+    state = request.state; count = ARM_THREAD_STATE64_COUNT;
+    assert(!forwardMach64(exceptionPort, EXCEPTION_STATE_IDENTITY, &request, &flavor, (thread_state_t)&state, &count));
+    assert(state.__pc == guestEntry);
     assert(mach_port_deallocate(mach_task_self(), request.thread) == KERN_SUCCESS);
-    puts("Workqueue Mach round-trip tests passed");
+    puts("Workqueue Mach: exception and authenticated control requests share one server thread with intact exception forwarding");
     return 0;
 }

@@ -80,6 +80,69 @@ static void preflightTests(NSString *parent) {
     }
 }
 
+static void hapticsProjectionTests(NSString *parent) {
+    const char *priorValue = getenv("LSB_EXPERIMENTAL_HAPTICS");
+    NSString *prior = priorValue ? @(priorValue) : nil;
+    unsetenv("LSB_EXPERIMENTAL_HAPTICS");
+    assert(!LSBExperimentalHapticsEnabled());
+    NSArray *answers = @[@YES, @NO, @1, @0, @"true", @{}, NSNull.null];
+    for (LSBGuestDeviceType *device in LSBGuestDeviceTypes()) {
+        NSData *original = profileData(device, nil, nil);
+        NSString *root = fixtureRoot(parent, [@"haptics-stock-" stringByAppendingString:device.identifier]);
+        assert(!LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(root, original));
+        assert([[NSData dataWithContentsOfFile:livePath(root)] isEqualToData:original]);
+        NSDictionary *before = [NSPropertyListSerialization propertyListWithData:original options:0 format:NULL error:NULL];
+        for (id answer in answers) {
+            CFTypeRef native = answer == NSNull.null ? NULL : (__bridge CFTypeRef)answer;
+            BOOL supported = native && CFGetTypeID(native) == CFBooleanGetTypeID() && CFBooleanGetValue((CFBooleanRef)native);
+            NSData *adapted = nil;
+            assert(!LSBProjectGuestHapticsCapability(original, native, &adapted));
+            assert(!LSBValidateGuestDeviceCapabilities(adapted, device));
+            NSDictionary *after = [NSPropertyListSerialization propertyListWithData:adapted options:0 format:NULL error:NULL];
+            id value = after[@"capabilities"][@"DeviceSupportsClosedLoopHaptics"];
+            assert(value && CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() && [value boolValue] == supported);
+            NSMutableDictionary *restored = [after mutableCopy], *capabilities = [after[@"capabilities"] mutableCopy];
+            [capabilities removeObjectForKey:@"DeviceSupportsClosedLoopHaptics"];
+            restored[@"capabilities"] = capabilities;
+            assert([restored isEqualToDictionary:before]); // Identity, geometry, and every other profile field are unchanged.
+            NSData *repeated = nil;
+            assert(!LSBProjectGuestHapticsCapability(adapted, native, &repeated) && [repeated isEqualToData:adapted]);
+            NSData *disabled = nil;
+            assert(!LSBProjectGuestHapticsCapability(adapted, NULL, &disabled));
+            NSDictionary *unknown = [NSPropertyListSerialization propertyListWithData:disabled options:0 format:NULL error:NULL];
+            assert(CFGetTypeID((__bridge CFTypeRef)unknown[@"capabilities"][@"DeviceSupportsClosedLoopHaptics"]) == CFBooleanGetTypeID());
+            assert(![unknown[@"capabilities"][@"DeviceSupportsClosedLoopHaptics"] boolValue]); // A restored generated profile cannot retain stale true.
+        }
+    }
+    NSData *output = nil;
+    assert(LSBProjectGuestHapticsCapability(nil, kCFBooleanTrue, &output) == EINVAL && !output);
+    assert(LSBProjectGuestHapticsCapability(profileData(LSBDefaultGuestDeviceType(), nil, nil), kCFBooleanTrue, NULL) == EINVAL);
+    for (id invalid in @[@[], @{}, @{@"capabilities": @YES}]) {
+        NSData *data = [NSPropertyListSerialization dataWithPropertyList:invalid format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+        output = [NSData data];
+        assert(LSBProjectGuestHapticsCapability(data, kCFBooleanTrue, &output) == EINVAL && !output);
+    }
+    NSString *root = fixtureRoot(parent, @"haptics-publication");
+    LSBGuestDeviceType *device = LSBDefaultGuestDeviceType();
+    NSData *original = profileData(device, nil, nil);
+    writeData(stagedPath(root, device), original);
+    for (NSString *disabled in @[@"", @"0", @"true", @"01", @"1 "]) {
+        assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", disabled.UTF8String, 1) && !LSBExperimentalHapticsEnabled());
+        assert(!LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(root, original));
+        assert([[NSData dataWithContentsOfFile:livePath(root)] isEqualToData:original]);
+    }
+    assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", "1", 1) && LSBExperimentalHapticsEnabled());
+    assert(!LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(root, original));
+    NSDictionary *installed = [NSPropertyListSerialization propertyListWithData:[NSData dataWithContentsOfFile:livePath(root)]
+                                                                      options:0 format:NULL error:NULL];
+    assert(CFGetTypeID((__bridge CFTypeRef)installed[@"capabilities"][@"DeviceSupportsClosedLoopHaptics"]) == CFBooleanGetTypeID());
+    assert([[NSData dataWithContentsOfFile:stagedPath(root, device)] isEqualToData:original]);
+    unsetenv("LSB_EXPERIMENTAL_HAPTICS");
+    assert(!LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(root, original));
+    assert([[NSData dataWithContentsOfFile:livePath(root)] isEqualToData:original]); // Disabling restores the staged stock bytes.
+    if (prior) assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", prior.UTF8String, 1));
+}
+
 static void noFollowTests(NSString *parent) {
     LSBGuestDeviceType *device = LSBDefaultGuestDeviceType();
     NSData *good = profileData(device, nil, nil);
@@ -201,6 +264,7 @@ int main(void) {
         assert(mkdtemp(directory));
         NSString *parent = @(directory);
         preflightTests(parent);
+        hapticsProjectionTests(parent);
         noFollowTests(parent);
         atomicInstallTests(parent);
         preferenceLookupTests();

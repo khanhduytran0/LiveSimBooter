@@ -36,6 +36,7 @@ static thread_state_flavor_t restoredFlavors[EXC_TYPES_COUNT + 1];
 static const char *const *testEnvironment;
 static bool overrideEnvironment;
 static unsigned environmentReads, allocationCalls;
+void LSBProcessDebuggerHandleMessage(mach_msg_header_t *message, size_t capacity) { (void)message; (void)capacity; abort(); }
 static const mach_port_t workerPort = 0x170b, handlerPort = 0x220b, replyPort = 0x330b;
 static mach_msg_return_t testMachMsg(mach_msg_header_t *, mach_msg_option_t, mach_msg_size_t, mach_msg_size_t,
                                     mach_port_name_t, mach_msg_timeout_t, mach_port_name_t);
@@ -604,6 +605,31 @@ static void forwardingTests(void) {
     assert(!supportedBehavior(EXCEPTION_STATE, THREAD_STATE_NONE));
 }
 
+static void processControlPortSetTests(void) {
+    mach_port_t port;
+    assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port));
+    assert(!mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND));
+    LSBWorkqueueRegister(0);
+    assert(LSBWorkqueueAddProcessControlPort(port) == ENOTSUP); // A native caller must never initialize a guest worker.
+    assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_PORT_SET, &exceptionPortSet));
+    atomic_store(&exceptionServerReady, true);
+    assert(LSBWorkqueueAddProcessControlPort(MACH_PORT_NULL) == EINVAL);
+    assert(LSBWorkqueueAddProcessControlPort(mach_task_self()) == EINVAL); // A send-only task capability is not a receive endpoint.
+    assert(!LSBWorkqueueAddProcessControlPort(port));
+    mach_msg_header_t message = {.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0), .msgh_size = sizeof(message),
+                                .msgh_remote_port = port, .msgh_id = 42};
+    assert(!mach_msg(&message, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(message), 0, MACH_PORT_NULL, 10, MACH_PORT_NULL));
+    union { mach_msg_header_t header; unsigned char bytes[256]; } received;
+    assert(!mach_msg(&received.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(received), exceptionPortSet, 10, MACH_PORT_NULL));
+    assert(received.header.msgh_local_port == port && received.header.msgh_id == 42);
+    mach_msg_destroy(&received.header);
+    assert(!mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND, -1));
+    assert(!mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1));
+    assert(!mach_port_mod_refs(mach_task_self(), exceptionPortSet, MACH_PORT_RIGHT_PORT_SET, -1));
+    exceptionPortSet = MACH_PORT_NULL;
+    atomic_store(&exceptionServerReady, false);
+}
+
 int main(void) {
     metadataTests();
     parseTests();
@@ -613,6 +639,7 @@ int main(void) {
     handlerRollbackTests();
     initializationPolicyTests();
     forwardingTests();
+    processControlPortSetTests();
     puts("WorkqueueBootstrap tests passed");
     return 0;
 }

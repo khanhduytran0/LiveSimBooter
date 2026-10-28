@@ -27,6 +27,10 @@ int LSBTestSandboxOriginal(pid_t pid, const char *operation, int type, ...);
 
 static int *testErrnoLocation(void) { ++policyErrnoReads; return __error(); }
 
+bool LSBInspectionPIDPath(int pid, void *buffer, uint32_t size, int *result) {
+    (void)pid; (void)buffer; (void)size; (void)result; return false;
+}
+
 const int SANDBOX_CHECK_NO_REPORT = 0x100000;
 pid_t LSBNativePID(void) { return 101; }
 pid_t LSBGuestPID(void) { return 99; }

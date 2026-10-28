@@ -87,6 +87,26 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_CHILD_
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_CHILD_KILL_TESTING \
     Tests/ProcessIdentityTests.c Guest/ChildKill.c Guest/ChildWait.c ProcessSupport/ChildStatus.c -DLSB_CHILD_WAIT_TESTING -o "$test_directory/ProcessIdentity"
 "$test_directory/ProcessIdentity"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/ProcessInspectionTests.c -o "$test_directory/ProcessInspection"
+"$test_directory/ProcessInspection"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_TRANSPORT_TESTING \
+    Tests/ProcessInspectionTransportTests.c ProcessSupport/SpawnTransport.c ProcessSupport/SpawnPlan.c -o "$test_directory/ProcessInspectionTransport"
+"$test_directory/ProcessInspectionTransport"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/ProcessDebuggerTests.c -o "$test_directory/ProcessDebugger"
+"$test_directory/ProcessDebugger"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_TRANSPORT_TESTING \
+    Tests/ProcessDebuggerTransportTests.c ProcessSupport/SpawnTransport.c ProcessSupport/SpawnPlan.c -o "$test_directory/ProcessDebuggerTransport"
+"$test_directory/ProcessDebuggerTransport"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/PeerDebuggerTests.c ProcessSupport/PeerDebugger.c -o "$test_directory/PeerDebugger"
+"$test_directory/PeerDebugger"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib -DLSB_INSPECTION_INTERPOSE_FIXTURE \
+    Guest/ProcessInspection.c Tests/ProcessInspectionInterposeTests.c -o "$test_directory/libProcessInspection.dylib"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/ProcessInspectionInterposeTests.c -o "$test_directory/ProcessInspectionInterpose"
+DYLD_INSERT_LIBRARIES="$test_directory/libProcessInspection.dylib" "$test_directory/ProcessInspectionInterpose"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -O1 \
     Tests/PeerProcessCompatibilityTests.c -o "$test_directory/PeerProcessCompatibility"
 "$test_directory/PeerProcessCompatibility"
@@ -178,8 +198,11 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/WorkqueueBootstrapTests.c -o "$test_directory/WorkqueueBootstrap"
 "$test_directory/WorkqueueBootstrap"
+xcrun clang -std=c11 -Wall -Wextra -Werror -Wno-unused-function \
+    Tests/WorkqueueStartupTests.c -o "$test_directory/WorkqueueStartup"
+"$test_directory/WorkqueueStartup"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/WorkqueueMachTests.c -o "$test_directory/WorkqueueMach"
+    Tests/WorkqueueMachTests.c ProcessSupport/PeerDebugger.c -o "$test_directory/WorkqueueMach"
 "$test_directory/WorkqueueMach"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/LaunchdHandshakeTests.c -o "$test_directory/LaunchdHandshake"

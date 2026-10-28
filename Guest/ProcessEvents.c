@@ -3,6 +3,7 @@
 #include "ProcessIdentity.h"
 #ifdef LSB_GUEST_RUNTIME
 #include "PeerProcessCompatibility.h"
+#include "ProcessInspection.h"
 #endif
 
 #include <errno.h>
@@ -272,6 +273,8 @@ static int processPIDInfo(int pid, int flavor, uint64_t arg, void *buffer, int b
 int LSBProcPIDInfo(int pid, int flavor, uint64_t arg, void *buffer, int bufferSize) {
 #ifdef LSB_GUEST_RUNTIME
     uintptr_t caller = (uintptr_t)__builtin_extract_return_addr(__builtin_return_address(0));
+    int inspectionError = LSBInspectionUnsupportedPID(pid);
+    if (inspectionError) { errno = inspectionError; return 0; }
 #endif
     int result = processPIDInfo(pid, flavor, arg, buffer, bufferSize);
 #ifdef LSB_GUEST_RUNTIME

@@ -95,7 +95,8 @@ independently of the physical phone's model. The staged path is
 for that physical file. The [device picker](device-types.md) keeps capabilities, identity and framebuffer geometry together.
 Stage its seven original profiles below to enable Home-button/Home-indicator iPhones and iPads; iPhone 8/8 Plus remain experimental on this OS.
 
-Normal startup and device-picker apply publish the staged stock capabilities unchanged. The unfinished native haptic bridge
+Normal startup and device-picker apply publish the staged stock capability values unchanged. The active file is serialized as
+a binary plist and replaced atomically; staged originals remain untouched. The unfinished native haptic bridge
 is disabled by default: `LSB_EXPERIMENTAL_HAPTICS=1` in the **native host launch environment** enables both fixed hapticd
 endpoint publication and projection of `DeviceSupportsClosedLoopHaptics` from the actual native MobileGestalt answer.
 Only exact CFBoolean true enables that capability; unknown or malformed answers become false. Other profile fields and original

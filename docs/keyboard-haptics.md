@@ -8,7 +8,7 @@ it does not establish physical haptic output.
 ## Native service and capability projection
 
 Set `LSB_EXPERIMENTAL_HAPTICS=1` in the **native host launch environment** to enable this investigation. Only that exact value
-enables it. By default the host publishes the staged stock capabilities unchanged, does not query the native haptic capability,
+enables it. By default the host publishes the staged stock capability values unchanged, does not query the native haptic capability,
 and does not look up or publish the hapticd endpoint. Setting an environment variable in Fish or a guest does not enable it.
 Cold-relaunch the native app without the variable to restore the staged original profile; ordinary userspace reboot preserves
 the native host's launch environment. Preserve the original staged profiles when using this experiment.
@@ -32,7 +32,7 @@ the existing `SIMULATOR_CAPABILITIES` plist once per process. The supplied devic
 once per native host lifetime. Only an actual CFBoolean true enables the projected capability. False, unavailable, and
 non-Boolean responses publish false, including when the input was a restored generated profile containing an old true.
 Cold startup and device-picker apply adapt just this one key while atomically publishing the active capabilities plist.
-The selected simulator model, geometry, other capabilities, and original staged profile remain unchanged. Normal userspace
+The selected simulator model, geometry, and other capability values remain unchanged; the original staged file is untouched. Normal userspace
 reboots retain the same physical-device result. No guest interposer, shared-cache patch, or protocol-layout change is used
 for this projection. Native query status and optional service-registration status are logged separately.
 
@@ -71,9 +71,10 @@ requests one transient; even an accepted player request would still require obse
 Broker tests cover default/invalid opt-in exclusion, lookup/registration errors, unknown timeouts without retry, send-right ownership, full audit identity,
 headless exclusion, and independence from display startup. DeviceConfiguration tests cover exact CFBoolean handling,
 all catalog profiles, unchanged identity/geometry, immutable staged inputs, stale true removal, malformed plists, and repeat
-publication. They also verify byte-preserving default publication for every catalog device and restoration of stock bytes
-after disabling the opt-in. Ignored `tmp/haptic-bridge/` holds the diagnostic source, binaries, disassembly and local logs; these are
-experiment artifacts, not setup prerequisites.
+publication. They also verify stock-value preservation for every catalog device, actual plist Booleans after serialization,
+and restoration of stock values after disabling the opt-in. Active profiles are serialized once for atomic publication, so their
+encoding may change while staged input bytes remain untouched. Ignored `tmp/haptic-bridge/` holds the diagnostic source,
+binaries, disassembly and local logs; these are experiment artifacts, not setup prerequisites.
 
 ## Keyboard-pattern URL correction on the iOS 27 host
 

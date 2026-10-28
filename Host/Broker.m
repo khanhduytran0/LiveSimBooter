@@ -141,7 +141,7 @@ static NSMutableSet<NSNumber *> *rebootPendingDeaths;
 static NSMutableArray<LSBRunningBoardMonitor *> *rebootDeathMonitors;
 static NSMutableArray<dispatch_source_t> *rebootExitSources;
 static LSBGuestDeviceType *sessionDeviceType, *pendingDeviceType;
-static NSData *pendingDeviceCapabilities;
+static NSDictionary *pendingDeviceCapabilities;
 static void (^deviceChangeCompletion)(int, BOOL);
 // Allow every launchd child to overlap its exec replacement, plus launchd and the backboardd, SpringBoard and public Metal helpers.
 enum { BrokerJobCapacity = 2 * LSB_CHILD_STATUS_CAPACITY + 4, DisplayRegistrationTimeoutSeconds = 30,
@@ -150,7 +150,6 @@ typedef struct { audit_token_t audit; pid_t guestPID; } LSBRetiredIdentity;
 static LSBRetiredIdentity retiredIdentities[RetiredIdentityCapacity];
 static unsigned retiredIdentityCount, auditResolutionLogs;
 static unsigned peerIdentityLogs;
-static unsigned peerDebuggerProbeLogs;
 static unsigned cooperativeDebuggerLogs;
 static unsigned guestEntitlementErrorLogs;
 static unsigned guestProxySigningErrorLogs;
@@ -191,7 +190,7 @@ void LSBHostApplyDeviceType(LSBGuestDeviceType *type, void (^completion)(int, BO
     if (!LSBHostCanApplyDeviceType()) { if (completion) completion(EBUSY, NO); return; }
     if (type == LSBHostCurrentDeviceType()) { if (completion) completion(0, NO); return; }
     int error = runtimeRoot ? 0 : prepareRuntimeRoot();
-    NSData *capabilities = nil;
+    NSDictionary *capabilities = nil;
     if (!error) error = LSBCopyGuestDeviceCapabilities(runtimeRoot, type, &capabilities);
     if (error) { if (completion) completion(error, NO); return; }
     if (!jobs) {
@@ -363,16 +362,18 @@ static void logGuestEntitlementError(LSBJob *job) {
     }
 }
 
-// Only an actual plist Boolean true authorizes inspection; integers/strings and absent or malformed metadata fail closed.
-static BOOL booleanGuestEntitlement(NSData *blob, NSString *key) {
-    if (!LSBGuestEntitlementsHasValidBlobHeaderForOperation(blob.bytes, blob.length, 7)) return NO;
+static NSDictionary *guestEntitlementsDictionary(NSData *blob) {
+    if (!LSBGuestEntitlementsHasValidBlobHeaderForOperation(blob.bytes, blob.length, 7)) return nil;
     NSData *plist = [blob subdataWithRange:NSMakeRange(8, blob.length - 8)];
     id object = [NSPropertyListSerialization propertyListWithData:plist options:NSPropertyListImmutable format:NULL error:NULL];
-    if (![object isKindOfClass:NSDictionary.class]) return NO;
-    id value = object[key];
+    return [object isKindOfClass:NSDictionary.class] ? object : nil;
+}
+
+// Only an actual plist Boolean true authorizes inspection; integers/strings and absent or malformed metadata fail closed.
+static BOOL booleanGuestEntitlement(NSDictionary *entitlements, NSString *key) {
+    id value = entitlements[key];
     return value && CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() && CFBooleanGetValue((__bridge CFBooleanRef)value);
 }
-static BOOL processInfoAllowedByEntitlements(NSData *blob) { return booleanGuestEntitlement(blob, @"proc_info-allow"); }
 
 static void snapshotGuestEntitlements(LSBJob *job) {
     job.guestProcessInfoAllowed = NO;
@@ -399,8 +400,9 @@ static void snapshotGuestEntitlements(LSBJob *job) {
         job.guestXMLEntitlements = [[NSData alloc] initWithBytesNoCopy:xml length:size freeWhenDone:YES];
         if (!job.guestXMLEntitlements) { free(xml); job.guestXMLEntitlementsError = ENOMEM; }
         else {
-            job.guestProcessInfoAllowed = processInfoAllowedByEntitlements(job.guestXMLEntitlements);
-            job.guestDragUIAllowed = booleanGuestEntitlement(job.guestXMLEntitlements, @"com.apple.druid");
+            NSDictionary *entitlements = guestEntitlementsDictionary(job.guestXMLEntitlements);
+            job.guestProcessInfoAllowed = booleanGuestEntitlement(entitlements, @"proc_info-allow");
+            job.guestDragUIAllowed = booleanGuestEntitlement(entitlements, @"com.apple.druid");
         }
     }
     logGuestEntitlementError(job);
@@ -419,49 +421,6 @@ static int validatePeerTaskIdentity(const LSBPeerProcessIdentity *identity, cons
         count != TASK_AUDIT_TOKEN_COUNT || memcmp(&audit, expected, sizeof(audit))) return EACCES;
     // TASK_AUDIT_TOKEN proves identity, not task-port flavor. The trusted native CHECKIN path obtains this right with task_name_for_pid(self).
     return 0;
-}
-
-// Temporary opt-in native diagnostic: these are fresh kernel queries, not the immutable CHECKIN status snapshot.
-// PROC_PIDT_SHORTBSDINFO is omitted from the iOS SDK; the public libproc record uses this fixed 64-byte layout.
-extern int proc_pidinfo(int, int, uint64_t, void *, int);
-typedef struct {
-    uint32_t pid, ppid, pgid, status;
-    char comm[16];
-    uint32_t flags, uid, gid, ruid, rgid, svuid, svgid, reserved;
-} LSBPeerDebuggerBSDInfo;
-_Static_assert(sizeof(LSBPeerDebuggerBSDInfo) == LSB_PEER_SHORT_INFO_BYTES, "peer debugger short BSD info ABI");
-
-static void logNativeDebuggerProbe(pid_t pid, uint32_t version, const LSBPeerProcessIdentity *identity, const audit_token_t *expected) {
-    int before = identity ? validatePeerTaskIdentity(identity, expected) : 0;
-    if (before) {
-        fprintf(stderr, "[broker] debugger probe native=%d version=%u before=%d skipped\n", pid, version, before);
-        return;
-    }
-    struct kinfo_proc info = {0};
-    size_t size = sizeof(info);
-    int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
-    errno = 0;
-    int sysctlResult = sysctl(mib, 4, &info, &size, NULL, 0), sysctlError = errno;
-    LSBPeerDebuggerBSDInfo bsd = {0};
-    errno = 0;
-    int bsdResult = proc_pidinfo(pid, LSB_PEER_SHORT_INFO_FLAVOR, 0, &bsd, sizeof(bsd)), bsdError = errno;
-    int after = identity ? validatePeerTaskIdentity(identity, expected) : 0;
-    fprintf(stderr, "[broker] debugger probe %s native=%d version=%u before=%d after=%d "
-            "sysctl=%d errno=%d size=%zu pid=%d flags=0x%x traced=%d bsd=%d errno=%d pid=%u flags=0x%x traced=%d\n",
-            identity ? "peer" : "self", pid, version, before, after, sysctlResult, sysctlError, size,
-            info.kp_proc.p_pid, info.kp_proc.p_flag, !!(info.kp_proc.p_flag & P_TRACED), bsdResult, bsdError,
-            bsd.pid, bsd.flags, !!(bsd.flags & 2u));
-}
-
-static void logPeerDebuggerProbe(const LSBPeerProcessIdentity *identity, const audit_token_t *expected) {
-    int saved = errno;
-    const char *enabled = getenv("LSB_TRACE_PEER_DEBUGGER_STATE");
-    if (enabled && !strcmp(enabled, "1") && peerDebuggerProbeLogs < 64) {
-        if (!peerDebuggerProbeLogs) logNativeDebuggerProbe(getpid(), 0, NULL, NULL);
-        ++peerDebuggerProbeLogs;
-        logNativeDebuggerProbe((pid_t)expected->val[5], expected->val[7], identity, expected);
-    }
-    errno = saved;
 }
 
 static int copyGuestExecutablePath(const LSBSpawnPlan *plan, char output[LSB_PATH_BYTES]) {
@@ -515,11 +474,10 @@ static int readControlledPlist(NSString *path, NSString *directory, NSDictionary
     if (!realpath(path.fileSystemRepresentation, canonical) || !realpath(directory.fileSystemRepresentation, parent)) return errno;
     size_t length = strlen(parent);
     if (strncmp(canonical, parent, length) || canonical[length] != '/') return EPERM;
-    NSData *data = [NSData dataWithContentsOfFile:path];
-    if (!data) return EIO;
-    id plist = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL];
-    if (![plist isKindOfClass:NSDictionary.class]) return EINVAL;
-    *output = plist;
+    NSError *error = nil;
+    *output = [NSDictionary dictionaryWithContentsOfURL:[NSURL fileURLWithPath:path] error:&error];
+    if (!*output) return [error.domain isEqualToString:NSCocoaErrorDomain] &&
+        error.code == NSFileReadCorruptFileError ? EINVAL : EIO;
     return 0;
 }
 
@@ -1687,7 +1645,6 @@ static void handleMessage(LSBReceivedMessage *message) {
             audit_token_t targetAudit = target.audit;
             int error = target ? target.peerIdentityError : ESRCH;
             if (!error && validatePeerTaskIdentity(&snapshot, &targetAudit)) error = ESRCH;
-            if (!error) logPeerDebuggerProbe(&snapshot, &targetAudit);
             logPeerIdentityRequest(pid, message->targetPID, target.pidVersion, error);
             LSBTransportReplyProcessIdentity(message, error, error ? NULL : &snapshot);
             disposeMessage(message);
@@ -2254,7 +2211,7 @@ int LSBStartHost(int argc, const char *argv[], const char *envp[]) {
         if (!error) error = prepareRuntimeRoot();
         if (!error) {
             sessionDeviceType = LSBConfiguredGuestDeviceType();
-            NSData *capabilities = nil;
+            NSDictionary *capabilities = nil;
             error = LSBCopyGuestDeviceCapabilities(runtimeRoot, sessionDeviceType, &capabilities);
             // Preserve command-line and legacy setups without a profile. Selecting another device always requires its staged original.
             if (error == ENOENT && sessionDeviceType == LSBDefaultGuestDeviceType()) error = 0;

@@ -12,10 +12,8 @@ static NSMutableDictionary *capabilities(LSBGuestDeviceType *device) {
 }
 
 static void validate(id document, LSBGuestDeviceType *device, int expected) {
-    NSData *data = [NSPropertyListSerialization dataWithPropertyList:document format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
-    assert(data);
     errno = EDOM;
-    assert(LSBValidateGuestDeviceCapabilities(data, device) == expected && errno == EDOM);
+    assert(LSBValidateGuestDeviceCapabilities(document, device) == expected && errno == EDOM);
 }
 
 int main(int argc, const char *argv[]) {
@@ -91,12 +89,10 @@ int main(int argc, const char *argv[]) {
         validate(document, device, 0);
         validate(document, LSBDefaultGuestDeviceType(), EINVAL);
         assert(LSBValidateGuestDeviceCapabilities(nil, device) == EINVAL);
-        assert(LSBValidateGuestDeviceCapabilities([NSData dataWithBytes:"bad" length:3], device) == EINVAL);
-        assert(LSBValidateGuestDeviceCapabilities([NSMutableData dataWithLength:2 * 1024 * 1024 + 1], device) == EINVAL);
         // Optional local integration check: supply a staged RuntimeRoot, without requiring Apple assets in the test checkout.
         if (argc == 2) for (LSBGuestDeviceType *entry in catalog) {
             NSURL *runtime = [NSURL fileURLWithPath:@(argv[1]) isDirectory:YES];
-            NSData *original = [NSData dataWithContentsOfURL:[entry capabilitiesURLInRuntimeRoot:runtime]];
+            NSDictionary *original = [NSDictionary dictionaryWithContentsOfURL:[entry capabilitiesURLInRuntimeRoot:runtime] error:NULL];
             assert(original && !LSBValidateGuestDeviceCapabilities(original, entry));
         }
         puts("Device type catalog tests passed");

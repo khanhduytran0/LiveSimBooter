@@ -24,6 +24,14 @@ _Static_assert(BaselineLaunchdChildren + MaximumSelectedServices < LSB_CHILD_STA
 static LSBGuestDeviceType *configurationDeviceType;
 void LSBLaunchdConfigurationSetDeviceType(LSBGuestDeviceType *type) { configurationDeviceType = type; }
 
+static int readStockPlist(NSString *path, int readFailure, NSDictionary **output) {
+    NSError *error = nil;
+    *output = [NSDictionary dictionaryWithContentsOfURL:[NSURL fileURLWithPath:path] error:&error];
+    if (*output) return 0;
+    // Preserve the existing distinction between unreadable files and invalid dictionary contents.
+    return !error || ([error.domain isEqualToString:NSCocoaErrorDomain] && error.code == NSFileReadCorruptFileError) ? EINVAL : readFailure;
+}
+
 static int openDirectory(int parent, const char *name) {
     if (mkdirat(parent, name, 0700) && errno != EEXIST) return -1;
     return openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -227,10 +235,10 @@ static int addServiceJobs(NSString *root, const char *const labels[], NSMutableD
         const char *rootBytes = root.fileSystemRepresentation;
         size_t rootLength = strlen(rootBytes);
         if (strncmp(canonical, rootBytes, rootLength) || canonical[rootLength] != '/') return EPERM;
-        NSData *data = [NSData dataWithContentsOfFile:stockPath];
-        if (!data) return EIO;
-        NSDictionary *stock = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL];
-        if (![stock isKindOfClass:NSDictionary.class] || ![stock[@"Label"] isEqual:label]) return EINVAL;
+        NSDictionary *stock;
+        int readError = readStockPlist(stockPath, EIO, &stock);
+        if (readError) return readError;
+        if (![stock[@"Label"] isEqual:label]) return EINVAL;
         NSString *program = stock[@"Program"];
         NSArray *arguments = stock[@"ProgramArguments"];
         if (program && !validGuestProgram(program)) return EINVAL;
@@ -440,11 +448,10 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
             if (backboard) {
                 // Import only service declarations. Native scheduler/identity policies in the stock plist are not emulated.
                 NSString *stockPath = [root stringByAppendingPathComponent:@"System/Library/LaunchDaemons/com.apple.backboardd.plist"];
-                NSData *stockData = [NSData dataWithContentsOfFile:stockPath];
-                if (!stockData) return ENOENT;
-                NSDictionary *stock = [NSPropertyListSerialization propertyListWithData:stockData options:NSPropertyListImmutable format:NULL error:NULL];
-                if (![stock isKindOfClass:NSDictionary.class] || ![stock[@"MachServices"] isKindOfClass:NSDictionary.class] ||
-                    ![stock[@"MachServices"] count]) return EINVAL;
+                NSDictionary *stock;
+                int readError = readStockPlist(stockPath, ENOENT, &stock);
+                if (readError) return readError;
+                if (![stock[@"MachServices"] isKindOfClass:NSDictionary.class] || ![stock[@"MachServices"] count]) return EINVAL;
                 job[@"MachServices"] = stock[@"MachServices"];
                 job[@"EnableTransactions"] = @NO;
                 // Register the physical runtime compiler bundle in backboardd's PID domain; descendants also face an executable-path gate.
@@ -458,12 +465,12 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
                 NSString *preferencesName = [preferencesLabel stringByAppendingString:@".plist"];
                 NSString *stockPath = [[root stringByAppendingPathComponent:@"System/Library/LaunchDaemons"]
                     stringByAppendingPathComponent:preferencesName];
-                NSData *stockData = [NSData dataWithContentsOfFile:stockPath];
-                if (!stockData) return ENOENT;
-                NSDictionary *stock = [NSPropertyListSerialization propertyListWithData:stockData options:NSPropertyListImmutable format:NULL error:NULL];
+                NSDictionary *stock;
+                int readError = readStockPlist(stockPath, ENOENT, &stock);
+                if (readError) return readError;
                 NSArray *arguments = @[@"/usr/sbin/cfprefsd", @"daemon"];
                 NSDictionary *services = @{@"com.apple.cfprefsd.daemon": @YES};
-                if (![stock isKindOfClass:NSDictionary.class] || ![stock[@"Label"] isEqual:preferencesLabel] ||
+                if (![stock[@"Label"] isEqual:preferencesLabel] ||
                     ![stock[@"ProgramArguments"] isEqual:arguments] || ![stock[@"MachServices"] isEqual:services]) return EINVAL;
                 // Simulator CoreFoundation's daemon entry selects this listener, even though the runtime also ships a System-session plist.
                 // Keep real job/service names and argv. Native scheduler, resource limits and system-session policy are not emulated.

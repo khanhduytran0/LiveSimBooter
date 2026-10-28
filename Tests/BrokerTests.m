@@ -16,7 +16,7 @@
 #import "../Host/DeviceConfiguration.h"
 static LSBGuestDeviceType *testConfiguredDeviceType(void);
 static void testSaveDeviceType(LSBGuestDeviceType *);
-static int testInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *, NSData *);
+static int testInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *, NSDictionary *);
 #define LSBConfiguredGuestDeviceType testConfiguredDeviceType
 #define LSBSaveConfiguredGuestDeviceType testSaveDeviceType
 #define LSBInstallGuestDeviceCapabilitiesWithNativeHaptics testInstallGuestDeviceCapabilitiesWithNativeHaptics
@@ -60,10 +60,10 @@ static void testSaveDeviceType(LSBGuestDeviceType *type) {
     savedDeviceIdentifier = [type.identifier copy];
     ++devicePreferenceWrites;
 }
-static int testInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *root, NSData *data) {
-    if (!LSBExperimentalHapticsEnabled()) return LSBInstallGuestDeviceCapabilities(root, data);
-    NSData *adapted = nil;
-    int error = LSBProjectGuestHapticsCapability(data, kCFBooleanFalse, &adapted);
+static int testInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *root, NSDictionary *profile) {
+    if (!LSBExperimentalHapticsEnabled()) return LSBInstallGuestDeviceCapabilities(root, profile);
+    NSDictionary *adapted = nil;
+    int error = LSBProjectGuestHapticsCapability(profile, kCFBooleanFalse, &adapted);
     return error ? error : LSBInstallGuestDeviceCapabilities(root, adapted);
 }
 
@@ -3100,10 +3100,23 @@ static void testProcessListEntitlementsAndAuthentication(void) {
         NSMutableData *blob = [NSMutableData dataWithBytes:header length:sizeof(header)];
         [blob appendData:plist];
         BOOL expected = CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() && [value boolValue];
-        assert(processInfoAllowedByEntitlements(blob) == expected);
-        assert(booleanGuestEntitlement(blob, @"com.apple.druid") == expected);
+        NSDictionary *entitlements = guestEntitlementsDictionary(blob);
+        assert(entitlements && booleanGuestEntitlement(entitlements, @"proc_info-allow") == expected);
+        assert(booleanGuestEntitlement(entitlements, @"com.apple.druid") == expected);
+        assert(!booleanGuestEntitlement(entitlements, @"missing"));
+        ((unsigned char *)blob.mutableBytes)[3] ^= 1;
+        assert(!guestEntitlementsDictionary(blob)); // A valid plist cannot authorize anything with the wrong signing-blob header.
     }
-    assert(!processInfoAllowedByEntitlements(nil) && !processInfoAllowedByEntitlements([NSData dataWithBytes:"invalid" length:7]));
+    assert(!guestEntitlementsDictionary(nil) && !guestEntitlementsDictionary([NSData dataWithBytes:"invalid" length:7]));
+    assert(!booleanGuestEntitlement(nil, @"proc_info-allow"));
+    for (id root in @[@[], @"not a dictionary"]) {
+        NSData *plist = [NSPropertyListSerialization dataWithPropertyList:root format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
+        uint32_t size = (uint32_t)plist.length + 8;
+        const unsigned char header[] = {0xfa, 0xde, 0x71, 0x71, size >> 24, size >> 16, size >> 8, size};
+        NSMutableData *blob = [NSMutableData dataWithBytes:header length:sizeof(header)];
+        [blob appendData:plist];
+        assert(!guestEntitlementsDictionary(blob));
+    }
     char temporary[] = "/tmp/LSBProcessList.XXXXXX", canonical[PATH_MAX];
     assert(mkdtemp(temporary) && realpath(temporary, canonical));
     NSString *directory = [NSString stringWithUTF8String:canonical];
@@ -4145,28 +4158,32 @@ static void testRebootPreservesQueuedKqueueCallbacks(void) {
     }
 }
 
-static NSData *deviceProfile(LSBGuestDeviceType *type) {
+static NSDictionary *deviceProfile(LSBGuestDeviceType *type) {
     NSDictionary *profile = @{@"capabilities": @{
         @"DeviceSupportsClosedLoopHaptics": @NO,
         @"modelIdentifier": type.modelIdentifier, @"productClass": type.productClass,
         @"displays": @[@{@"deviceName": @"primary", @"width": @(type.width), @"height": @(type.height),
             @"scale": @(type.scale), @"hdpi": @(type.pitch), @"vdpi": @(type.pitch)}]
     }};
-    NSData *data = [NSPropertyListSerialization dataWithPropertyList:profile format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
-    assert(data && !LSBValidateGuestDeviceCapabilities(data, type));
-    return data;
+    assert(!LSBValidateGuestDeviceCapabilities(profile, type));
+    return profile;
 }
 
-static NSString *stageDeviceProfile(LSBGuestDeviceType *type, NSData *data) {
+static NSString *stageDeviceProfile(LSBGuestDeviceType *type, NSDictionary *profile) {
     NSURL *url = [type capabilitiesURLInRuntimeRoot:[NSURL fileURLWithPath:runtimeRoot isDirectory:YES]];
     assert([NSFileManager.defaultManager createDirectoryAtURL:url.URLByDeletingLastPathComponent
         withIntermediateDirectories:YES attributes:nil error:NULL]);
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:profile format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
     assert([data writeToURL:url options:NSDataWritingAtomic error:NULL]);
     return url.path;
 }
 
 static NSString *activeDeviceProfilePath(void) {
     return [runtimeRoot stringByAppendingPathComponent:@"Library/Developer/CoreSimulator/DeviceType/capabilities.plist"];
+}
+
+static NSDictionary *activeDeviceProfile(void) {
+    return [NSDictionary dictionaryWithContentsOfURL:[NSURL fileURLWithPath:activeDeviceProfilePath()] error:NULL];
 }
 
 static void testDeviceApplyPreflight(void) {
@@ -4178,9 +4195,12 @@ static void testDeviceApplyPreflight(void) {
         LSBJob *launchd = terminalLaunchd();
         enableIndigo = YES;
         sessionDeviceType = LSBDefaultGuestDeviceType();
-        NSData *oldProfile = deviceProfile(sessionDeviceType);
+        NSDictionary *oldProfile = deviceProfile(sessionDeviceType);
         assert(!LSBInstallGuestDeviceCapabilities(runtimeRoot, oldProfile));
-        if (scenario != 2) stageDeviceProfile(target, scenario == 3 ? [@"invalid plist" dataUsingEncoding:NSUTF8StringEncoding] : deviceProfile(target));
+        if (scenario != 2) {
+            NSString *staged = stageDeviceProfile(target, deviceProfile(target));
+            if (scenario == 3) assert([[@"invalid plist" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:staged atomically:YES]);
+        }
         if (scenario == 1) startingJob = launchd;
         if (scenario == 5) jobs = nil; // Native Start gate has not launched any guest yet.
         __block unsigned calls = 0;
@@ -4193,7 +4213,7 @@ static void testDeviceApplyPreflight(void) {
         int expected[] = {EINVAL, EBUSY, ENOENT, EINVAL, 0, 0};
         assert(calls == 1 && result == expected[scenario] && !restarted);
         assert(!sessionDraining && rebootGeneration == generation && !pendingDeviceType && !deviceChangeCompletion);
-        assert(!submittedLaunches && !deliveredSignals && [[NSData dataWithContentsOfFile:activeDeviceProfilePath()] isEqual:oldProfile]);
+        assert(!submittedLaunches && !deliveredSignals && [activeDeviceProfile() isEqual:oldProfile]);
         assert(devicePreferenceWrites == (scenario == 5 ? 1 : 0));
         if (scenario == 5) assert(testConfiguredDeviceType() == target);
         else assert(findJob(launchd.identifier) == launchd);
@@ -4207,10 +4227,10 @@ static void testDeviceApplyWaitsForRootAndPersistsSelection(void) {
     NSString *directory = makeRebootRuntime();
     rememberRebootInputs();
     sessionDeviceType = LSBDefaultGuestDeviceType();
-    NSData *oldProfile = deviceProfile(sessionDeviceType);
+    NSDictionary *oldProfile = deviceProfile(sessionDeviceType);
     assert(!LSBInstallGuestDeviceCapabilities(runtimeRoot, oldProfile));
     LSBGuestDeviceType *target = LSBGuestDeviceTypeForIdentifier(@"ipad-a16");
-    NSData *newProfile = deviceProfile(target);
+    NSDictionary *newProfile = deviceProfile(target);
     NSString *stagedPath = stageDeviceProfile(target, newProfile);
     LSBJob *launchd = terminalLaunchd();
     managedJob(launchd, 6701);
@@ -4224,7 +4244,7 @@ static void testDeviceApplyWaitsForRootAndPersistsSelection(void) {
     assert(sessionDraining && !jobs.count && rebootPendingDeaths.count == 2 && rebootDeathMonitors.count == 2);
     assert(!calls && !devicePreferenceWrites && !submittedLaunches && deliveredSignals == 2);
     assert(!LSBHostCanApplyDeviceType() && LSBHostCurrentDeviceType() == LSBDefaultGuestDeviceType());
-    assert([[NSData dataWithContentsOfFile:activeDeviceProfilePath()] isEqual:oldProfile]);
+    assert([activeDeviceProfile() isEqual:oldProfile]);
     __block unsigned concurrentCalls = 0;
     LSBHostApplyDeviceType(LSBGuestDeviceTypeForIdentifier(@"iphone-11"), ^(int error, BOOL restart) {
         ++concurrentCalls; assert(error == EBUSY && !restart);
@@ -4235,13 +4255,13 @@ static void testDeviceApplyWaitsForRootAndPersistsSelection(void) {
     childExit(SIGKILL, 0);
     assert(rebootPendingDeaths.count == 1 && !calls && !submittedLaunches);
     assert([rebootPendingDeaths containsObject:@(launchd.identifier)]);
-    assert([[NSData dataWithContentsOfFile:activeDeviceProfilePath()] isEqual:oldProfile]);
+    assert([activeDeviceProfile() isEqual:oldProfile]);
     assert(!unlink(stagedPath.fileSystemRepresentation)); // Installation uses the validated snapshot, never a later source reread.
     rootExit(SIGKILL, 0);
     assert(calls == 1 && !result && restarted && !sessionDraining && !rebootDrainFailed);
     assert(!pendingDeviceType && !pendingDeviceCapabilities && !deviceChangeCompletion);
     assert(submittedLaunches == 1 && jobs.count == 1 && startingJob.simulatorLaunchd);
-    assert([[NSData dataWithContentsOfFile:activeDeviceProfilePath()] isEqual:newProfile]);
+    assert([activeDeviceProfile() isEqual:newProfile]);
     assert(devicePreferenceWrites == 1 && testConfiguredDeviceType() == target && LSBHostCurrentDeviceType() == target);
     sessionDeviceType = nil;
     assert(LSBHostCurrentDeviceType() == target); // Selection survives dropping the in-memory session selection.
@@ -4269,7 +4289,7 @@ static void testDeviceApplyFailureDoesNotOverlapSessions(void) {
         NSString *directory = makeRebootRuntime();
         rememberRebootInputs();
         sessionDeviceType = LSBDefaultGuestDeviceType();
-        NSData *oldProfile = deviceProfile(sessionDeviceType);
+        NSDictionary *oldProfile = deviceProfile(sessionDeviceType);
         assert(!LSBInstallGuestDeviceCapabilities(runtimeRoot, oldProfile));
         LSBGuestDeviceType *target = LSBGuestDeviceTypeForIdentifier(@"iphone-8-plus");
         stageDeviceProfile(target, deviceProfile(target));
@@ -4293,7 +4313,7 @@ static void testDeviceApplyFailureDoesNotOverlapSessions(void) {
         assert(calls == 1 && result && sessionDraining && rebootDrainFailed && !LSBHostCanApplyDeviceType());
         assert(!submittedLaunches && !jobs.count && !devicePreferenceWrites && !pendingDeviceType && !deviceChangeCompletion);
         assert(LSBHostCurrentDeviceType() == LSBDefaultGuestDeviceType());
-        if (!installFailure) assert([[NSData dataWithContentsOfFile:activeDeviceProfilePath()] isEqual:oldProfile]);
+        if (!installFailure) assert([activeDeviceProfile() isEqual:oldProfile]);
         completeUserspaceReboot(rebootGeneration);
         assert(calls == 1 && !submittedLaunches); // An error cannot replay completion or begin a second generation.
         resetBroker();

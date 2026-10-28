@@ -20,8 +20,8 @@ NSArray<LSBGuestDeviceType *> *LSBGuestDeviceTypes(void);
 LSBGuestDeviceType * _Nullable LSBGuestDeviceTypeForIdentifier(NSString * _Nullable identifier);
 LSBGuestDeviceType *LSBDefaultGuestDeviceType(void);
 
-// Validate an original capabilities plist against the selected catalog entry. No fallback, mutation, or global selected state.
-// Bounds the input to 2 MiB and returns EINVAL for malformed/mismatched input. Caller errno is preserved.
-int LSBValidateGuestDeviceCapabilities(NSData * _Nullable data, LSBGuestDeviceType * _Nullable device);
+// Validate an original capabilities dictionary against the selected catalog entry. No fallback, mutation, or global selected state.
+// Returns EINVAL for malformed/mismatched input. Caller errno is preserved.
+int LSBValidateGuestDeviceCapabilities(NSDictionary * _Nullable profile, LSBGuestDeviceType * _Nullable device);
 
 NS_ASSUME_NONNULL_END

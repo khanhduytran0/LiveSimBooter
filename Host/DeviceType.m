@@ -97,21 +97,17 @@ static BOOL optionalBoolean(NSDictionary *dictionary, NSString *key, BOOL expect
         [value boolValue] == expected);
 }
 
-static BOOL validateCapabilities(NSData *data, LSBGuestDeviceType *device) {
-    if (![data isKindOfClass:NSData.class] || !data.length || data.length > 2 * 1024 * 1024 ||
-        ![device isKindOfClass:LSBGuestDeviceType.class] || LSBGuestDeviceTypeForIdentifier(device.identifier) != device) return NO;
-    id root = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL];
-    if (![root isKindOfClass:NSDictionary.class]) return NO;
+static BOOL validateCapabilities(NSDictionary *root, LSBGuestDeviceType *device) {
+    if (![root isKindOfClass:NSDictionary.class] || ![device isKindOfClass:LSBGuestDeviceType.class]) return NO;
     NSDictionary *capabilities = root[@"capabilities"];
     if (![capabilities isKindOfClass:NSDictionary.class]) return NO;
-    const LSBDeviceTypeDescriptor *descriptor = NULL;
-    for (unsigned i = 0; i < sizeof(descriptors) / sizeof(*descriptors); ++i)
-        if ([device.identifier isEqualToString:@(descriptors[i].identifier)]) { descriptor = &descriptors[i]; break; }
-    if (!descriptor) return NO;
+    NSUInteger index = [LSBGuestDeviceTypes() indexOfObjectIdenticalTo:device];
+    if (index == NSNotFound) return NO;
+    const LSBDeviceTypeDescriptor *descriptor = &descriptors[index];
     if (!optionalString(capabilities, @"modelIdentifier", device.modelIdentifier) ||
         !optionalString(capabilities, @"productClass", device.productClass) ||
         !optionalString(capabilities, @"idiom", @(descriptor->idiom)) ||
-        !optionalBoolean(capabilities, @"ipad", descriptor->idiom[0] == 'p' && descriptor->idiom[1] == 'a') ||
+        !optionalBoolean(capabilities, @"ipad", device.isPad) ||
         !optionalBoolean(capabilities, @"DeviceSupportsDynamicIsland", descriptor->dynamicIsland) ||
         !optionalNumber(capabilities, @"HomeButtonType", descriptor->homeButton)) return NO;
     id artwork = capabilities[@"ArtworkTraits"];
@@ -135,9 +131,9 @@ static BOOL validateCapabilities(NSData *data, LSBGuestDeviceType *device) {
         matchesNumber(primary[@"vdpi"], device.pitch);
 }
 
-int LSBValidateGuestDeviceCapabilities(NSData *data, LSBGuestDeviceType *device) {
+int LSBValidateGuestDeviceCapabilities(NSDictionary *profile, LSBGuestDeviceType *device) {
     int savedErrno = errno;
-    int result = validateCapabilities(data, device) ? 0 : EINVAL;
+    int result = validateCapabilities(profile, device) ? 0 : EINVAL;
     errno = savedErrno;
     return result;
 }

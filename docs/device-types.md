@@ -63,21 +63,28 @@ Transfer the staged `RuntimeRoot/Library/Developer/CoreSimulator/DeviceTypes/` s
 RuntimeRoot/Library/Developer/CoreSimulator/DeviceTypes/<identifier>/capabilities.plist
 ```
 
-Keep these staged originals. On activation, the host atomically copies the selected bytes to the singular active path:
+Keep these staged originals. On activation, the host validates an immutable dictionary snapshot, serializes it once as a binary
+plist, and atomically publishes it to the singular active path:
 
 ```text
 RuntimeRoot/Library/Developer/CoreSimulator/DeviceType/capabilities.plist
 ```
 
 `SIMULATOR_CAPABILITIES` continues to point to that singular file. The host replaces it only before guest startup or after
-all old session processes have exited, because guest frameworks cache capabilities. Original profile files remain unchanged.
+all old session processes have exited, because guest frameworks cache capabilities. Original profile files remain byte-for-byte
+unchanged. Active plist encoding and key order may differ; its values are preserved unless the [haptics experiment](keyboard-haptics.md) is enabled.
 For an older single-profile setup, only the default device may use the existing singular file as its source; other selections
-require their staged originals. Missing, malformed, mismatched, or symlinked profiles fail preflight before stopping the session.
+require their staged originals. Missing, malformed, mismatched, or detected symlinked profiles fail preflight before stopping the session.
+
+Static checks require a regular input file, reject a symlinked runtime root, and compare resolved profile paths. The active
+destination must be absent or a regular file. These checks do not pin directory descriptors against concurrent path replacement;
+keep this host-owned profile subtree unchanged during preflight and publication. Atomic replacement preserves the previous
+active file if writing fails and lets existing readers finish reading their old file; it does not promise power-loss durability.
 
 ## Session and rendering boundaries
 
 [DeviceType.m](../Host/DeviceType.m) owns the catalog; [DeviceConfiguration.m](../Host/DeviceConfiguration.m) validates staged
-data and installs the active copy. A saved unknown preference falls back to the default catalog entry. No preference value
+dictionary values and installs the active copy. A saved unknown preference falls back to the default catalog entry. No preference value
 is interpreted as a file path or shell command.
 
 The broker snapshots one profile for each session and uses it for guest environment and framebuffer construction. The
@@ -92,8 +99,9 @@ preferences, containers, or app data.
 
 ## Validation scope
 
-Local tests cover profile lookup, typed capability validation, default-only legacy fallback, no-follow directory/file opens,
-nonregular inputs, and atomic installation preserving staged originals and existing readers. Framebuffer tests exercise
+Local tests cover profile lookup, typed capability validation, default-only legacy fallback, static path and nonregular-file checks,
+immutable snapshots, and semantic stock-value preservation. Atomic-installation checks cover staged originals, existing readers,
+and retention of the old active file on write failure. Framebuffer tests exercise
 alternate geometries through real Mach messages and IOSurfaces, including rejection of stale-size swapchains and surfaces.
 These checks do not establish that every listed device boots, lays out every app correctly, or survives a device-type switch
 on an iPhone; those require separate device verification.
@@ -141,3 +149,17 @@ The integrated local suite passed, including seven-profile layout coverage, frac
 packet/authentication tests, queued-release retries and session replacement. The iPhoneOS build, signature verification and
 `git diff --check` passed. No LLDB was attached, and the final owned-process inventory contained no stopped process. Evidence
 is under ignored `tmp/full-width-home/` and `tmp/userspace-reboot/full-width-home-baseline-console.log`.
+
+## Dictionary-loading refactor verification (2026-10-28)
+
+The dictionary-based loader and Foundation atomic publication passed the integrated local suite and a cold boot on
+physical iPhone16,2 / iOS 26.1 build 23B50 with guest Simulator 26.0 build 23A343. Host PID 1764 and guest launchd 1768
+started with diagnostics and experimental haptics disabled. Reading back the active binary plist produced the same values
+as the staged `iphone-15-pro-max` profile: primary display 1290 × 2796, scale 3, pitch 460. `df` PID 1833 exited 0;
+CocoaTop logical/native 1835/1836 opened visibly with 29 managed guest processes. No debugger was attached.
+
+Native host UUID was `A02E398B-B7E2-33F6-B6C7-984A78B2E59C`; shim remained
+`DF04683A-4D5D-3902-9DCF-A303FCD8BA42`. The unchanged 23A343 cache baseline was
+`0x110000000`, UUID `73ED978A-FD25-3166-A57A-34E21BB7E5B8`; mappings were not remeasured. Local logs/screenshot are
+under ignored `tmp/native-refactor/` and `tmp/guest-interactions/results/console-native-refactor.log`. This smoke test
+covers cold publication and app launch; it does not add new device-switch UI evidence beyond the earlier tests above.

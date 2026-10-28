@@ -117,16 +117,42 @@ static int inspectionRusage(int pid, int flavor, rusage_info_t *buffer) {
 }
 
 static kern_return_t inspectionTaskForPID(mach_port_name_t target, int pid, mach_port_name_t *task) {
-    int error = LSBInspectionUnsupportedPID(pid);
-    if (error) {
-        int saved = errno;
-        mach_port_name_t empty = MACH_PORT_NULL;
-        bool valid = task && writeBytes(task, &empty, sizeof(empty));
+    if (!atomic_load_explicit(&inspectionReady, memory_order_acquire)) return task_for_pid(target, pid, task);
+    int saved = errno;
+    bool self = pid > 0 && (pid == LSBGuestPID() || (pid == LSBNativePID() && !LSBInspectionUnsupportedPID(pid)));
+    if (self) {
+        if (target != mach_task_self()) return task_for_pid(target, LSBNativePID(), task);
+        mach_port_t copy = MACH_PORT_NULL;
+        if (!task || !writeBytes(task, &copy, sizeof(copy))) { errno = saved; return KERN_INVALID_ADDRESS; }
+        copy = mach_task_self();
+        // This immovable right stays in its own process. Add the reference callers expect to release after task_for_pid succeeds.
+        kern_return_t result = mach_port_mod_refs(mach_task_self(), copy, MACH_PORT_RIGHT_SEND, 1);
+        if (!result && !writeBytes(task, &copy, sizeof(copy))) {
+            mach_port_deallocate(mach_task_self(), copy);
+            result = KERN_INVALID_ADDRESS;
+        }
         errno = saved;
-        return !valid ? KERN_INVALID_ADDRESS : error == ENOTSUP ? KERN_NOT_SUPPORTED : KERN_INVALID_ARGUMENT;
+        return result;
     }
-    if (atomic_load_explicit(&hasProcessSnapshot, memory_order_acquire) && pid == LSBGuestPID()) pid = LSBNativePID();
-    return task_for_pid(target, pid, task);
+    int error = 0;
+    if (target != mach_task_self() || pid <= 0) {
+        error = LSBInspectionUnsupportedPID(pid);
+        if (!error) return task_for_pid(target, pid, task);
+    }
+    mach_port_t copy = MACH_PORT_NULL;
+    if (!task || !writeBytes(task, &copy, sizeof(copy))) { errno = saved; return KERN_INVALID_ADDRESS; }
+    // Authorization and live logical/native identity resolution belong to the broker, independently of a prior process-list snapshot.
+    if (!error) error = LSBTransportCopyProcessTask(pid, &copy);
+    if (!error && !writeBytes(task, &copy, sizeof(copy))) {
+        mach_port_deallocate(mach_task_self(), copy);
+        errno = saved;
+        return KERN_INVALID_ADDRESS;
+    }
+    errno = saved;
+    if (!error) return KERN_SUCCESS;
+    if (error == EPERM || error == EACCES) return KERN_PROTECTION_FAILURE;
+    if (error == ESRCH || error == EINVAL) return KERN_INVALID_ARGUMENT;
+    return error == ENOTSUP ? KERN_NOT_SUPPORTED : KERN_FAILURE;
 }
 
 static int inspectionSysctl(int *name, u_int count, void *output, size_t *length, void *input, size_t inputSize) {

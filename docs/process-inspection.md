@@ -1,7 +1,7 @@
 # Guest process inspection
 
-The process-list bridge exposes current managed simulator jobs to an authorized guest. It does not enumerate the native host,
-its Metal helpers, or unrelated device processes, and it transfers no task-control or task-inspect rights.
+The process-inspection bridge exposes current managed simulator jobs to authorized guests. Process enumeration and task-port access
+have separate entitlement checks. Neither includes the native host, native Metal helpers, or unrelated device processes.
 
 ## API and authorization
 
@@ -16,7 +16,10 @@ roles are denied. The original `__TEXT,__ents_der` is captured before guest exec
 | `sysctl(KERN_PROC_ALL)` | Fresh membership snapshot of committed simulator jobs, with logical PIDs/parents and guest executable paths. |
 | `proc_pidpath` after a successful snapshot | Physical executable path under the canonical `RuntimeRoot`; unknown PIDs return `ESRCH`. |
 | `KERN_PROC_PID` / `KERN_PROCARGS2` for self | Translate logical self to the real native PID and preserve the kernel's decision. |
-| Peer `KERN_PROC_PID`, `KERN_PROCARGS2`, `proc_pidinfo`, `proc_pid_rusage`, `task_for_pid` after a snapshot | Unsupported known peers are denied; unknown PIDs are rejected instead of reaching a possibly reused native PID. |
+| Self `task_for_pid(mach_task_self(), ...)` | Return `mach_task_self()` with one additional owned send reference, for logical self or an unambiguous native-self alias. |
+| Peer `task_for_pid(mach_task_self(), logicalPID, ...)` | Independently requires original Boolean `task_for_pid-allow=true`; returns an owned control right for the current committed simulator target. No prior list query is required. |
+| Peer `KERN_PROC_PID` for stock druid | Authenticated cooperative query returns fresh native debugger flags; see the dedicated path below. |
+| Other peer `KERN_PROC_PID`, `KERN_PROCARGS2`, `proc_pidinfo` and `proc_pid_rusage` after a snapshot | Unsupported known peers are denied; unknown PIDs are rejected instead of reaching a possibly reused native PID. |
 
 List copyout returns complete `kinfo_proc` records. A short buffer receives `ENOMEM` and the number of bytes actually copied;
 size-only queries return the required size. Before initialization, unmatched operations retain their original behavior.
@@ -29,20 +32,60 @@ RunningBoard. An unavailable root or a path/buffer overflow remains an error, wi
 
 Membership and logical parentage are current at each broker request, but the BSD status/flags/credentials come from the immutable native
 CHECKIN snapshot. They are not live CPU, memory, FD, thread, or debugger-state measurements. Zero-filled unsupported `kinfo_proc` fields
-must not be interpreted as measured zero usage. Peer task inspection and detail tabs remain incomplete. Real self-debugger queries still
+must not be interpreted as measured zero usage. Detail tabs remain incomplete. Real self-debugger queries still
 use the kernel; the list's initial `P_TRACED` value cannot establish whether a debugger attached later.
 
-In particular, peer `task_for_pid` returns `KERN_NOT_SUPPORTED` and a null port. The broker's task-name rights establish identity; they
-are not task-control rights. CocoaTop returns early from `updateMachInfo` when that request fails, so its CPU, memory, thread and role
-fields are incomplete. Its separate FD and rusage requests are also unsupported. The existing druid debugger-state request does not
-implement general task inspection. Fixing executable paths restores file-based bundle/icon lookup, not these statistics or detail tabs.
+Peer FD enumeration, rusage and unsupported `proc_pidinfo` operations remain unimplemented. A returned task right permits the caller
+to use native Mach task/thread APIs; it does not synthesize those other interfaces. The device task-port results below are separate
+from the earlier process-list evidence, which predates this implementation and correctly reports `KERN_NOT_SUPPORTED` for peer requests.
+
+## Managed task ports
+
+Outer spawn transport version **5**, bootstrap version **3** adds `COPY_PROCESS_TASK` and a simulator-only native capture offer.
+The broker authorizes a request using the caller's immutable original entitlement dictionary: `task_for_pid-allow` must be an actual
+Boolean true. `proc_info-allow` neither grants nor is required for this operation. Missing original metadata, malformed values,
+numeric/string lookalikes and native helper roles remain denied. A guest cannot supply a task capture offer or select a native role.
+
+The request names a positive logical guest PID. The broker resolves exactly one current committed simulator job, excluding pending,
+finishing and retired exec instances. After an exec replacement, the logical PID selects the replacement's genuine native task rather
+than the retired process or an unrelated process that reused its PID. Both requester authentication and target validation compare
+all eight audit-token words, including the native PID and generation. The captured task's current `TASK_AUDIT_TOKEN` must still match
+the target's authenticated identity. The reply includes that complete token and one copied send right; the guest verifies the token
+against the received task before returning an owned right to its caller. Errors carry no capability and clear the output port.
+
+The control right is acquired before guest handoff, while LiveProcess still has native TLS and libraries. The host supplies a send right
+to a private receive endpoint and a fresh 128-bit nonce in the CHECKIN reply. The native child temporarily installs an `EXC_BREAKPOINT` handler
+only on its current thread and executes a nonce-bearing breakpoint. The kernel sends an `EXCEPTION_STATE_IDENTITY` message to the
+host containing the genuine thread and task rights. The receiver checks the kernel audit trailer, exact message layout, full target
+audit identity, nonce, expected instruction and control-port capability before resuming the child past that instruction. It does not
+accept a task-self right supplied by the caller over XPC. The existing name-only CHECKIN right continues to establish identity; it
+does not become a control right merely because `task_info` succeeds.
+
+The child restores its previous thread exception handlers before simulator initialization, preserving a newer debugger registration
+if one replaced the temporary handler. It then drops its capture send reference. The host keeps the capture endpoint alive until READY
+confirms this handoff and releases the endpoint's receive/send rights on cancellation. The captured task right belongs to its native
+job instance and is released with identity cleanup on failure, retirement or termination. Every successful task query gives the guest
+one independent send reference, which the caller must release with `mach_port_deallocate`; failed validation or copyout releases any
+imported reference. Native Metal roles skip this capture path.
+
+Before the guest constructor, `task_for_pid` preserves the native call path without accessing guest TLS. After initialization,
+logical self and an unambiguous native-self alias return `mach_task_self()` with one additional local send reference. This right
+never leaves its own process, so its immovability is irrelevant. Native `task_for_pid` can deny even a self query on the tested phone.
+A known logical peer wins if its PID collides with that native-self alias in the cached list. Other supported peer calls go through the broker without native-PID fallback
+after denial. The existing druid debugger-state operation remains a separate fresh self-query protocol.
+
+Local tests cover real cross-process exception capture, task reply ownership, complete audit matching, exact entitlement types,
+current/retired job selection, malformed messages, bootstrap offer restrictions, pre-constructor forwarding and output-pointer faults.
+Task transport fixtures use task-name rights to test message shape and reference ownership; the separate exception-capture tests
+establish control-right provenance. Device evidence is recorded separately below. Avoid stepping or placing a breakpoint inside the
+short temporary-handler window: a different breakpoint fails validation instead of being advanced as the expected rendezvous.
 
 ## CocoaTop input
 
 The initial staged app used the user's CocoaTop fork at `b28d80cae46e604b49af86c1c3ae132b01f576e7`. Its working tree was clean when
 snapshotted; the later scene-compatible alert fix is described below. The complete 13-entry fork `task.xml` is embedded as XML and iOS 15+ DER metadata, including Boolean
-`proc_info-allow=true` and `com.apple.private.security.no-container`. The production Mach-O reader and CoreEntitlements decoder verify
-full dictionary equality. The processed source Info.plist retains guest bundle ID `ru.domo.cocoatop64`; 28 fork resource files, including
+`proc_info-allow=true`, `task_for_pid-allow=true` and `com.apple.private.security.no-container`. The production Mach-O reader and
+CoreEntitlements decoder verify full dictionary equality. The processed source Info.plist retains guest bundle ID `ru.domo.cocoatop64`; 28 fork resource files, including
 its launch storyboard, are preserved. Native signing uses the host identity/identifier without these guest privilege entitlements.
 
 The initial [D0m0/CocoaTop 2.2.3](https://github.com/D0m0/CocoaTop/releases/tag/2.2.3) rebuild reached UIKit but crashed when its cell builder
@@ -63,7 +106,9 @@ Sources, metadata, resources, binaries and recipes remain ignored under `tmp/coc
 third-party binaries. `tmp/cocoatop/fork-b28d80c/README.md` and its provenance files record the immutable source snapshot, processed
 Info.plist, build choices and staged unsigned app. These files may be absent in a fresh checkout.
 
-## Device evidence: 2026-10-28
+## Historical process-list device evidence: 2026-10-28
+
+This run predates the task-port implementation above.
 
 The fork UI and repeated command-line probes ran on iPhone16,2 with native iOS 26.1 build 23B50 and guest iOS Simulator 26.0 build 23A343,
 without LLDB attached. Native host PID was 1529 and guest launchd PID 1533. The unchanged cache baseline is base `0x110000000`,
@@ -101,8 +146,8 @@ that exact self query is translated to the native PID. During a drag, it also qu
 NSXPC connection. Both druid and the native host receive `EPERM` from direct cross-process queries on the tested phone.
 Returning an invented `P_TRACED` value would conceal a real debugger, so this path uses a cooperative fresh query instead.
 
-Outer spawn transport ABI 4 registers a private Mach endpoint after guest TLS is initialized. Its receive right joins the
-existing workqueue exception server's port set; no additional worker is created. A shared initializer also handles a guest
+Introduced in outer spawn transport ABI 4 and retained in ABI 5, this path registers a private Mach endpoint after guest TLS is initialized.
+Its receive right joins the existing workqueue exception server's port set; no additional worker is created. A shared initializer also handles a guest
 constructor running before libdispatch's lazy `__workq_open`. Registration has prepare/activate phases so the endpoint is
 published only after the guest authenticates and stores the native broker's full audit token.
 
@@ -156,3 +201,46 @@ decoder after signing. It replaced only the guest app executable after stopping 
 On the same iPhone/guest/cache baseline, the user confirmed that tapping the information row now shows a working dialog and dismisses
 without crashing. The signal-error and Reset paths compile but were not separately exercised. No debugger was attached.
 Ignored source snapshot, build/signing provenance, deployment receipt and console evidence are under `tmp/cocoatop/scene-alerts`.
+
+## Task-port and self-inspection device evidence: 2026-10-28
+
+These tests ran on iPhone16,2 with native iOS 26.1 build 23B50 and guest iOS Simulator 26.0 build 23A343, without LLDB attached.
+The cache remained at base `0x110000000`, UUID `73ED978A-FD25-3166-A57A-34E21BB7E5B8`; mappings and protections were not remeasured.
+The final session used host PID 2286, guest launchd PID 2290 and native Metal helper PID 2287. The authenticated native policy reported
+development status and selected cache detachment for simulator guests; the native host and Metal helpers retained their cache.
+
+The first task-port build passed the authorized peer probe (requester 2238, target 2239) and rejected the unentitled requester 2242.
+It exposed a separate self-query failure: after exec replacement, logical/native self 2262/2263 both returned `KERN_FAILURE` (5) with
+null ports through native `task_for_pid`. CocoaTop's `updateMachInfo` returned early on that error. Returning an additional local
+reference to `mach_task_self()` fixed this path without changing peer authorization or transferring an immovable right between processes.
+
+After replacing only the guest shim and starting a fresh session, the self probe executed an actual `POSIX_SPAWN_SETEXEC` replacement
+from logical/native PID 2350 to logical 2350 / native 2351. Queries using either PID returned `KERN_SUCCESS` and the genuine self-port
+name 515, preserved `errno=EDOM`, and allowed `MACH_TASK_BASIC_INFO`. Both returned references were released; the original self port
+still answered `TASK_AUDIT_TOKEN`. The probe printed `SELF_PROBE PASS` and exited 0. It carried no original entitlement metadata.
+
+The repeated authorized peer probe (2352 → 2353, target generation 5872) carried only original Boolean `task_for_pid-allow=true`;
+it did not require `proc_info-allow` or a process-list query. It obtained port 8203, verified the real target audit identity, read
+basic task information, enumerated two threads, and used `mach_vm_read_overwrite` to read the child's eight-byte test value
+`0x153426ab9876cdef`. The host, native Metal helper and an unknown PID were rejected with `KERN_INVALID_ARGUMENT` (4) and null ports.
+After SIGTERM, `waitpid` returned target 2353 with status `0xf`; a new query for that exited target was also rejected. The probe printed
+`TASK_PORT_PROBE PASS` and exited 0. The unentitled requester 2354 was denied access to child 2355 with `KERN_PROTECTION_FAILURE` (2)
+and a null port, both while the child ran and after termination; its denial test also exited 0 with `PASS`.
+
+CocoaTop then launched as logical PID 2357 / native PID 2358, and the user confirmed that its self inspection works. This confirms
+the task/self paths exercised above, not complete FD enumeration, rusage, every detail tab, or the accuracy of every displayed CPU field.
+
+| Artifact | UUID |
+| --- | --- |
+| Native host, unchanged by the self fix | `B08FF7D1-3E37-37C7-8CDC-07F6107B0787` |
+| Native LiveProcess extension | `3DD025DD-9F24-36BA-9234-D843E2059F4E` |
+| Initial task-port shim | `7639FC3A-EB1A-3309-8949-A5B8E1849F6A` |
+| Final shim with self fix | `F9AA9316-EA57-35BB-97A6-3EC5B6F1E810` |
+| Authorized peer probe | `923517AF-A53F-3A58-B822-833BC5248277` |
+| Denied peer probe | `067B5B2C-8DD0-3449-B19D-9FC3D691E8FA` |
+
+The full `sh Tests/run.sh` suite passed before the self fix. After it, focused self/peer unit and actual interposition checks passed,
+including local send-reference counts, copyout failures, early initialization and PID alias collisions; the simulator compile and
+device checks above also passed. The final shim was staged after stopping the session, with a rollback copy and no post-copy checksums.
+Ignored evidence is `tmp/task-ports/device/results/{console.log,tests.log,capture-tests.log,uuids.txt}` and
+`tmp/task-ports/self-fix/results/{console.log,uuid.txt,deploy.log}`. These files may be absent in a fresh checkout.

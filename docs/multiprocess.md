@@ -32,7 +32,10 @@ audited against that runtime's host-support libkernel. Recheck those layouts bef
    a cross-process code-signature query.
 5. Before delivering the plan, the broker registers an exit monitor. The child receives owned strings, scalar attributes,
    ordered actions, XPC FD objects, a shared child-status file, and a wake-pipe reader. It restores descriptors and process
-   state, resolves the executable within RuntimeRoot, and maps it alongside `usr/lib/dyld_sim`.
+   state, resolves the executable within RuntimeRoot, and maps it alongside `usr/lib/dyld_sim`. Simulator guests first perform a
+   one-shot thread exception to the native host, allowing it to retain a kernel-created movable task-control right. The child
+   restores its prior thread exception handler before simulator initialization. Native Metal roles skip this exchange; see
+   [task-port capture and authorization](process-inspection.md#managed-task-ports).
 6. The native child retains one raw Mach send right to the broker and passes its numeric name in `LSB_BROKER_PORT`, replacing
    any inherited value. A READY exchange reports preparation success or its errno. After releasing native XPC objects, the child
    checks its thread count, performs the fresh-TSD handoff, and enters dyld_sim. The default retains the native cache with hardware
@@ -319,6 +322,31 @@ plus `WNOHANG` and `wait()`. It preserves the raw status for `WIFEXITED`, `WEXIT
 returns `ECHILD`; `WNOHANG` returns 0 without changing the status output when a matching child is still live. Blocking waits use
 the pipe only as a hint and rescan every 100 ms, so another waiter draining it cannot lose an exit. Waiting performs no XPC and
 starts no worker thread. Nonblocking reaping uses lock-free operations and is exercised from a signal handler.
+
+### Managed process-source polling cost
+
+`Guest/ProcessEvents.c` emulates managed `DISPATCH_SOURCE_TYPE_PROC` using a separate 10 ms timer per source, with 1 ms leeway.
+An idle child still schedules polling callbacks. On 2026-10-28, an authorized read-only task-port probe counted **28** active
+sources in guest launchd PID 2290: a nominal **2,800 callbacks/second**, before dispatch coalescing. Native `ps` measured
+15.6–17.0% CPU and 0.56 seconds of additional CPU time over approximately three seconds. The user observed about 20% in CocoaTop.
+
+A three-second native `sample` showed timer draining, many workers stopped at native `start_wqthread` (`0x1ebcb78b8`), and the
+shim's exception server handling/replying to workqueue redirections. Native symbol lookup and the shim's live `nativeEntry`
+confirmed that address; guest `start_wqthread` was `0x16aae0a74`. Most worker samples were blocked, so these sample counts are
+not CPU attribution percentages. The evidence suggests polling wakeups amplified by the per-reuse exception bridge, rather
+than a busy receive loop. Repeated rejected Spotlight launches also appeared in the internal launchd log and may add load.
+No polling interval or behavior was changed during this investigation, and no A/B experiment has yet isolated each contribution.
+
+The session used iPhone16,2 / native 26.1 (23B50), guest 26.0 (23A343), host PID 2286 and the final task-port shim UUID
+`F9AA9316-EA57-35BB-97A6-3EC5B6F1E810`. Cache base/UUID were unchanged from the
+[task-port device checkpoint](process-inspection.md#task-port-and-self-inspection-device-evidence-2026-10-28). No debugger was attached.
+Ignored evidence is under `tmp/task-ports/launchd-cpu`, with the read-only probe output in
+`tmp/task-ports/self-fix/results/console.log`; these files are not setup prerequisites.
+
+A shared scanner could preserve the current 10 ms latency while reducing independent timer wakeups. A fully event-driven
+replacement must coordinate with `ChildWait.c`, which also drains the wake pipe: two uncoordinated readers can steal each
+other's notification, while leaving bytes unread makes a dispatch read source spin. Preserve multiple observers, exec-before-exit
+ordering, reaped exit delivery and cancellation/pinned-ticket lifetime when changing this path.
 
 The current limits are:
 

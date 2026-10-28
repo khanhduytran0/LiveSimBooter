@@ -93,6 +93,12 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_TRANSPORT_TESTING \
     Tests/ProcessInspectionTransportTests.c ProcessSupport/SpawnTransport.c ProcessSupport/SpawnPlan.c -o "$test_directory/ProcessInspectionTransport"
 "$test_directory/ProcessInspectionTransport"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_TRANSPORT_TESTING \
+    Tests/TaskPortTransportTests.c ProcessSupport/SpawnPlan.c -o "$test_directory/TaskPortTransport"
+"$test_directory/TaskPortTransport"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/TaskPortCaptureTests.c ProcessSupport/TaskPortCapture.c -o "$test_directory/TaskPortCapture"
+"$test_directory/TaskPortCapture"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ProcessDebuggerTests.c -o "$test_directory/ProcessDebugger"
 "$test_directory/ProcessDebugger"

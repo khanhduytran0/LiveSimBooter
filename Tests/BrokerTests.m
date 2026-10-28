@@ -13,6 +13,7 @@
 #include <sys/wait.h>
 #include <sys/sysctl.h>
 #include "../Host/GuestEntitlementsConversion.h"
+#include "../ProcessSupport/TaskPortCapture.h"
 #import "../Host/DeviceConfiguration.h"
 static LSBGuestDeviceType *testConfiguredDeviceType(void);
 static void testSaveDeviceType(LSBGuestDeviceType *);
@@ -25,6 +26,10 @@ static int testReadMachOCodeDirectoryHash(int, unsigned char [20]);
 static kern_return_t testTaskInfo(task_name_t, task_flavor_t, task_info_t, mach_msg_type_number_t *);
 static kern_return_t testBootstrapLookup(mach_port_t, const char *, mach_port_t *);
 static int testPeerDebuggerQuery(mach_port_t, const audit_token_t *, uint32_t, struct kinfo_proc *);
+static int testTaskCaptureCreate(LSBTaskPortCaptureOffer *);
+static int testTaskCaptureReceive(const LSBTaskPortCaptureOffer *, const audit_token_t *, mach_port_t *);
+#define LSBTaskPortCaptureCreate testTaskCaptureCreate
+#define LSBTaskPortCaptureReceive testTaskCaptureReceive
 #define LSBPeerDebuggerQuery testPeerDebuggerQuery
 #define LSBCopyXMLFromDEREntitlements testCopyXMLFromDEREntitlements
 #define LSBReadMachOCodeDirectoryHash testReadMachOCodeDirectoryHash
@@ -35,6 +40,8 @@ static int testPeerDebuggerQuery(mach_port_t, const audit_token_t *, uint32_t, s
 #define handleMessage brokerHandleMessage
 #include "../Host/Broker.m"
 #undef handleMessage
+#undef LSBTaskPortCaptureCreate
+#undef LSBTaskPortCaptureReceive
 #undef LSBPeerDebuggerQuery
 #undef task_info
 #undef bootstrap_look_up
@@ -126,6 +133,29 @@ static LSBPeerProcessIdentity identityReply;
 static audit_token_t testTaskAudit;
 static BOOL useRealTaskInfo, preserveCheckInIdentity, mismatchTaskAudit;
 static kern_return_t taskInfoError;
+static BOOL automaticTaskCapture = YES;
+static int taskCaptureCreateError, taskCaptureReceiveError, taskReplySendError;
+static unsigned taskCaptureCreates, taskCaptureReceives;
+static mach_port_t processTaskReply;
+static audit_token_t processTaskReplyAudit;
+static int testTaskCaptureCreate(LSBTaskPortCaptureOffer *offer) {
+    memset(offer, 0, sizeof(*offer));
+    ++taskCaptureCreates;
+    if (taskCaptureCreateError) return taskCaptureCreateError;
+    assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &offer->port));
+    assert(!mach_port_insert_right(mach_task_self(), offer->port, offer->port, MACH_MSG_TYPE_MAKE_SEND));
+    memset(offer->nonce, 0xa5, sizeof(offer->nonce));
+    return 0;
+}
+static int testTaskCaptureReceive(const LSBTaskPortCaptureOffer *offer, const audit_token_t *expected, mach_port_t *task) {
+    assert(offer && MACH_PORT_VALID(offer->port) && expected->val[5] && expected->val[7]);
+    ++taskCaptureReceives;
+    *task = MACH_PORT_NULL;
+    if (taskCaptureReceiveError) return taskCaptureReceiveError;
+    *task = mach_task_self();
+    assert(!mach_port_mod_refs(mach_task_self(), *task, MACH_PORT_RIGHT_SEND, 1));
+    return 0;
+}
 static unsigned debuggerQueryCalls;
 static int debuggerQueryError;
 static void (^debuggerQueryHook)(void);
@@ -169,13 +199,22 @@ static void handleMessage(LSBReceivedMessage *message) {
         memcpy(message->peerIdentity.shortInfo, &message->audit.val[5], sizeof(uint32_t));
     }
     if (message->kind == LSB_REQUEST_COPY_PROCESS_IDENTITY || message->kind == LSB_REQUEST_RESOLVE_NATIVE_CHILD_PID ||
-        message->kind == LSB_REQUEST_COPY_DEBUGGER_INFO) {
+        message->kind == LSB_REQUEST_COPY_DEBUGGER_INFO || message->kind == LSB_REQUEST_COPY_PROCESS_TASK) {
         LSBJob *sender = nil;
         for (LSBJob *job in jobs) if (job.pid == (pid_t)message->audit.val[5] && job.pidVersion == message->audit.val[7]) { sender = job; break; }
-        BOOL logical = message->kind == LSB_REQUEST_COPY_PROCESS_IDENTITY && sender.simulatorLaunchd;
-        for (LSBJob *job in jobs) if (logical ? job.guestPID == message->targetPID && job.parentIdentifier == sender.identifier : job.pid == message->targetPID) {
+        BOOL logical = message->kind == LSB_REQUEST_COPY_PROCESS_TASK ||
+            (message->kind == LSB_REQUEST_COPY_PROCESS_IDENTITY && sender.simulatorLaunchd);
+        for (LSBJob *job in jobs) if (logical ? job.guestPID == message->targetPID &&
+            (message->kind == LSB_REQUEST_COPY_PROCESS_TASK || job.parentIdentifier == sender.identifier) : job.pid == message->targetPID) {
             testTaskAudit = job.audit; break;
         }
+    }
+    if (automaticTaskCapture && message->kind == LSB_REQUEST_READY) {
+        LSBJob *job = findJob(message->requestID);
+        audit_token_t expected = job.audit;
+        if (job && job.phase == JobDispatched && job.executionRole == LSB_EXECUTION_SIMULATOR && job.taskCaptureError == ENOENT &&
+            MACH_PORT_VALID(job.taskCapture.port) && !memcmp(&expected, &message->audit, sizeof(expected)))
+            receiveGuestTaskPort(job.identifier);
     }
     brokerHandleMessage(message);
 }
@@ -347,7 +386,8 @@ int LSBTransportReceive(mach_port_t port, LSBReceivedMessage *message) { (void)p
 int LSBTransportReply(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *root,
                       const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS]) {
     assert(message && message->object && replyCount < sizeof(replies) / sizeof(replies[0]));
-    int sendError = message->kind == LSB_REQUEST_READY ? readySendError : message->kind == LSB_REQUEST_REBOOT_USERSPACE ? rebootSendError : 0;
+    int sendError = message->kind == LSB_REQUEST_READY ? readySendError : message->kind == LSB_REQUEST_REBOOT_USERSPACE ? rebootSendError :
+        message->kind == LSB_REQUEST_COPY_PROCESS_TASK ? taskReplySendError : 0;
     if (plan) {
         assert(root && !strcmp(root, runtimeRoot.fileSystemRepresentation) && fds);
         for (unsigned i = 0; i < plan->fdCount; ++i) assert(fcntl(fds[i], F_GETFD) >= 0);
@@ -368,6 +408,19 @@ int LSBTransportReplyEntitlements(LSBReceivedMessage *message, int error, const 
     return LSBTransportReply(message, error, 0, 0, NULL, NULL, NULL);
 }
 static NSData *processListReply;
+int LSBTransportReplyProcessTask(LSBReceivedMessage *message, int error, mach_port_t task, const audit_token_t *audit) {
+    assert(message->kind == LSB_REQUEST_COPY_PROCESS_TASK);
+    assert(error ? !audit && !MACH_PORT_VALID(task) : audit && audit->val[5] && audit->val[7] && MACH_PORT_VALID(task));
+    if (MACH_PORT_VALID(processTaskReply)) mach_port_deallocate(mach_task_self(), processTaskReply);
+    processTaskReply = MACH_PORT_NULL;
+    memset(&processTaskReplyAudit, 0, sizeof(processTaskReplyAudit));
+    if (!error && !taskReplySendError) {
+        processTaskReply = task;
+        processTaskReplyAudit = *audit;
+        assert(!mach_port_mod_refs(mach_task_self(), task, MACH_PORT_RIGHT_SEND, 1));
+    }
+    return LSBTransportReply(message, error, error ? 0 : message->targetPID, 0, NULL, NULL, NULL);
+}
 int LSBTransportReplyDebuggerInfo(LSBReceivedMessage *message, int error, const struct kinfo_proc *info) {
     assert(message->kind == LSB_REQUEST_COPY_DEBUGGER_INFO && (error ? info == NULL : info && info->kp_proc.p_pid == message->targetPID));
     memset(&debuggerInfoReply, 0, sizeof(debuggerInfoReply));
@@ -413,6 +466,15 @@ int LSBTransportReplyBootstrapWithMetadata(LSBReceivedMessage *message, int erro
                                            const LSBBootstrapMetadata *metadata) {
     assert(metadata && metadata->guestPID > 0 && metadata->parentPID >= 0 && metadata->ports);
     assert(metadata->nativeProductionStatus == (metadata->executionRole == LSB_EXECUTION_SIMULATOR ? testNativeProductionStatus : LSB_NATIVE_PRODUCTION_UNKNOWN));
+    if (metadata->executionRole == LSB_EXECUTION_SIMULATOR) {
+        LSBJob *job = findJob(requestID);
+        assert(job.taskCaptureSource && metadata->taskCapture.port == job.taskCapture.port && MACH_PORT_VALID(metadata->taskCapture.port));
+        LSBTaskPortCaptureOffer offer = job.taskCapture;
+        assert(!memcmp(metadata->taskCapture.nonce, offer.nonce, sizeof(offer.nonce)));
+    } else {
+        const unsigned char zero[LSB_TASK_CAPTURE_NONCE_BYTES] = {0};
+        assert(!MACH_PORT_VALID(metadata->taskCapture.port) && !memcmp(metadata->taskCapture.nonce, zero, sizeof(zero)));
+    }
     if (checkInReplyHook) checkInReplyHook();
     int result;
     if (metadata->launchdTankPort)
@@ -460,6 +522,7 @@ static void resetBroker(void) {
     adoptionRetrySource = nil;
     pendingAdoptions = [NSMutableArray new];
     for (LSBJob *job in jobs) {
+        stopGuestTaskCapture(job);
         if (job.exitMonitor) dispatch_source_cancel(job.exitMonitor);
         job.exitMonitor = nil;
         if (job.launchdSource) dispatch_source_cancel(job.launchdSource);
@@ -496,6 +559,12 @@ static void resetBroker(void) {
     LSBPeerProcessIdentityDispose(&identityReply);
     useRealTaskInfo = preserveCheckInIdentity = mismatchTaskAudit = NO;
     taskInfoError = KERN_SUCCESS;
+    automaticTaskCapture = YES;
+    taskCaptureCreateError = taskCaptureReceiveError = taskReplySendError = 0;
+    taskCaptureCreates = taskCaptureReceives = 0;
+    if (MACH_PORT_VALID(processTaskReply)) mach_port_deallocate(mach_task_self(), processTaskReply);
+    processTaskReply = MACH_PORT_NULL;
+    memset(&processTaskReplyAudit, 0, sizeof(processTaskReplyAudit));
     debuggerQueryCalls = 0;
     debuggerQueryError = 0;
     debuggerQueryHook = nil;
@@ -548,6 +617,10 @@ static LSBReceivedMessage *messageFor(uint32_t kind, pid_t pid, uint32_t generat
     message->requestID = requestID;
     message->audit.val[5] = (unsigned)pid;
     message->audit.val[7] = generation;
+    if (kind == LSB_REQUEST_READY) {
+        LSBJob *job = findJob(requestID);
+        if (job && job.pid == pid && job.pidVersion == generation) message->audit = job.audit;
+    }
     if (kind == LSB_REQUEST_CHECKIN) {
         assert(task_name_for_pid(mach_task_self(), getpid(), &message->peerIdentity.taskName) == KERN_SUCCESS);
         message->peerIdentity.audit = message->audit;
@@ -775,6 +848,7 @@ static void testNativeProbeRoleIsHostOnly(void) {
         assert(replies[replyCount - 1].error == EACCES && !planReplies());
         handleMessage(messageFor(LSB_REQUEST_CHECKIN, getpid(), 3, 0));
         assert(replies[replyCount - 1].executionRole == LSB_EXECUTION_NATIVE_METAL_PROBE && !replies[replyCount - 1].launchdTank);
+        assert(!taskCaptureCreates && !taskCaptureReceives && !MACH_PORT_VALID(startingJob.taskCapture.port));
         LSBReceivedMessage *ready = messageFor(LSB_REQUEST_READY, getpid(), 3, identifier);
         ready->error = failed ? ENOENT : 0;
         handleMessage(ready);
@@ -3093,7 +3167,8 @@ static RecordedReply *requestProcessList(audit_token_t caller) {
 static void testProcessListEntitlementsAndAuthentication(void) {
     resetBroker();
     for (id value in @[@YES, @NO, @1, @0, @"true", @[], @{}]) {
-        NSData *plist = [NSPropertyListSerialization dataWithPropertyList:@{@"proc_info-allow": value, @"com.apple.druid": value}
+        NSData *plist = [NSPropertyListSerialization dataWithPropertyList:@{@"proc_info-allow": value, @"com.apple.druid": value,
+                                                                           @"task_for_pid-allow": value}
                                                                   format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
         uint32_t size = (uint32_t)plist.length + 8;
         const unsigned char header[] = {0xfa, 0xde, 0x71, 0x71, size >> 24, size >> 16, size >> 8, size};
@@ -3103,6 +3178,7 @@ static void testProcessListEntitlementsAndAuthentication(void) {
         NSDictionary *entitlements = guestEntitlementsDictionary(blob);
         assert(entitlements && booleanGuestEntitlement(entitlements, @"proc_info-allow") == expected);
         assert(booleanGuestEntitlement(entitlements, @"com.apple.druid") == expected);
+        assert(booleanGuestEntitlement(entitlements, @"task_for_pid-allow") == expected);
         assert(!booleanGuestEntitlement(entitlements, @"missing"));
         ((unsigned char *)blob.mutableBytes)[3] ^= 1;
         assert(!guestEntitlementsDictionary(blob)); // A valid plist cannot authorize anything with the wrong signing-blob header.
@@ -3193,6 +3269,190 @@ static LSBJob *debuggerJob(pid_t nativePID, pid_t guestPID, unsigned generation,
     job.peerIdentity = identity;
     job.peerIdentityError = 0;
     return job;
+}
+
+static void giveTestTaskPort(LSBJob *job) {
+    assert(!MACH_PORT_VALID(job.taskPort));
+    job.taskPort = mach_task_self();
+    assert(!mach_port_mod_refs(mach_task_self(), job.taskPort, MACH_PORT_RIGHT_SEND, 1));
+    job.taskCaptureError = 0;
+}
+
+static RecordedReply *requestProcessTask(audit_token_t caller, pid_t target) {
+    if (MACH_PORT_VALID(processTaskReply)) mach_port_deallocate(mach_task_self(), processTaskReply);
+    processTaskReply = MACH_PORT_NULL;
+    LSBReceivedMessage *request = messageFor(LSB_REQUEST_COPY_PROCESS_TASK, caller.val[5], caller.val[7], 0);
+    request->audit = caller;
+    request->targetPID = target;
+    unsigned object = ((TestMessageObject *)request->object)->identifier;
+    handleMessage(request);
+    RecordedReply *reply = replyFor(object);
+    assert(reply && (reply->error || reply->sendError ? !MACH_PORT_VALID(processTaskReply) : MACH_PORT_VALID(processTaskReply)));
+    return reply;
+}
+
+static void testProcessTaskAuthenticationAndOwnership(void) {
+    resetBroker();
+    LSBJob *caller = debuggerJob(8500, 8400, 9500, "/Applications/CocoaTop.app/CocoaTop");
+    LSBJob *target = debuggerJob(8600, 8401, 9501, "/bin/df");
+    giveTestTaskPort(target);
+    mach_port_t task = target.taskPort;
+    mach_port_urefs_t initial = sendReferences(task);
+    assert(requestProcessTask(caller.audit, target.guestPID)->error == EPERM && sendReferences(task) == initial);
+    caller.guestProcessInfoAllowed = YES;
+    assert(requestProcessTask(caller.audit, target.guestPID)->error == EPERM); // List authorization is not task-control authorization.
+    caller.guestTaskForPIDAllowed = YES;
+    RecordedReply *reply = requestProcessTask(caller.audit, target.guestPID);
+    audit_token_t targetAudit = target.audit;
+    assert(!reply->error && reply->pid == target.guestPID && processTaskReply == task && sendReferences(task) == initial + 1);
+    assert(!memcmp(&processTaskReplyAudit, &targetAudit, sizeof(targetAudit)));
+    for (unsigned word = 0; word < 8; ++word) {
+        audit_token_t forged = caller.audit; forged.val[word] ^= 1;
+        assert(requestProcessTask(forged, target.guestPID)->error == EACCES && sendReferences(task) == initial);
+    }
+    for (unsigned condition = 0; condition < 5; ++condition) {
+        caller.retiredForExec = condition == 0; caller.finishing = condition == 1;
+        caller.phase = condition == 2 ? JobDispatched : JobRunning;
+        caller.executionRole = condition == 3 ? LSB_EXECUTION_NATIVE_METAL_PROBE :
+            condition == 4 ? LSB_EXECUTION_NATIVE_METAL_SERVICE : LSB_EXECUTION_SIMULATOR;
+        assert(requestProcessTask(caller.audit, target.guestPID)->error == EACCES);
+    }
+    caller.retiredForExec = caller.finishing = NO; caller.phase = JobRunning; caller.executionRole = LSB_EXECUTION_SIMULATOR;
+    assert(requestProcessTask(caller.audit, 0)->error == EINVAL && requestProcessTask(caller.audit, -1)->error == EINVAL);
+    assert(requestProcessTask(caller.audit, target.pid)->error == ESRCH); // Native PID is never an alias for this logical-target API.
+    assert(requestProcessTask(caller.audit, 999999)->error == ESRCH);
+    for (unsigned condition = 0; condition < 6; ++condition) {
+        target.retiredForExec = condition == 0; target.finishing = condition == 1;
+        target.phase = condition == 2 ? JobDispatched : JobRunning;
+        target.executionRole = condition == 3 ? LSB_EXECUTION_NATIVE_METAL_PROBE :
+            condition == 4 ? LSB_EXECUTION_NATIVE_METAL_SERVICE : LSB_EXECUTION_SIMULATOR;
+        target.peerIdentityError = condition == 5 ? EIO : 0;
+        assert(requestProcessTask(caller.audit, target.guestPID)->error == ESRCH);
+    }
+    target.retiredForExec = target.finishing = NO; target.phase = JobRunning;
+    target.executionRole = LSB_EXECUTION_SIMULATOR; target.peerIdentityError = 0;
+    ++target.pidVersion;
+    assert(requestProcessTask(caller.audit, target.guestPID)->error == ESRCH);
+    --target.pidVersion;
+    mismatchTaskAudit = YES;
+    assert(requestProcessTask(caller.audit, target.guestPID)->error == ESRCH);
+    mismatchTaskAudit = NO;
+    taskInfoError = KERN_INVALID_ARGUMENT;
+    assert(requestProcessTask(caller.audit, target.guestPID)->error == ESRCH);
+    taskInfoError = KERN_SUCCESS;
+    LSBJob *duplicate = debuggerJob(8601, target.guestPID, 9502, "/bin/df");
+    giveTestTaskPort(duplicate);
+    assert(requestProcessTask(caller.audit, target.guestPID)->error == ESRCH);
+    finishJob(duplicate, 0);
+    target.taskPort = MACH_PORT_NULL;
+    assert(requestProcessTask(caller.audit, target.guestPID)->error == ENOTSUP);
+    mach_port_t invalid = MACH_PORT_NULL;
+    assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &invalid));
+    assert(!mach_port_insert_right(mach_task_self(), invalid, invalid, MACH_MSG_TYPE_MAKE_SEND));
+    target.taskPort = invalid;
+    assert(requestProcessTask(caller.audit, target.guestPID)->error == ESRCH); // A receive/send endpoint cannot be exported as a task.
+    assert(!mach_port_mod_refs(mach_task_self(), invalid, MACH_PORT_RIGHT_RECEIVE, -1));
+    assert(requestProcessTask(caller.audit, target.guestPID)->error == ESRCH); // Nor can a dead name.
+    assert(!mach_port_deallocate(mach_task_self(), invalid));
+    target.taskPort = task;
+    taskReplySendError = EPIPE;
+    assert(requestProcessTask(caller.audit, target.guestPID)->sendError == EPIPE && sendReferences(task) == initial);
+    taskReplySendError = 0;
+    sessionDraining = YES;
+    assert(requestProcessTask(caller.audit, target.guestPID)->error == ECANCELED);
+    sessionDraining = NO;
+    assert(!requestProcessTask(caller.audit, target.guestPID)->error && sendReferences(task) == initial + 1);
+    finishJob(target, 0);
+    assert(!MACH_PORT_VALID(target.taskPort) && sendReferences(task) == initial); // The successful reply keeps its own reference.
+    assert(requestProcessTask(caller.audit, target.guestPID)->error == ESRCH && sendReferences(task) == initial - 1);
+    resetBroker();
+}
+
+static void testTaskEntitlementSnapshot(void) {
+    resetBroker();
+    char temporary[] = "/tmp/LSBTaskEntitlement.XXXXXX", canonical[PATH_MAX];
+    assert(mkdtemp(temporary) && realpath(temporary, canonical));
+    NSString *directory = @(canonical);
+    runtimeRoot = [directory stringByAppendingPathComponent:@"RuntimeRoot"];
+    NSString *bin = [runtimeRoot stringByAppendingPathComponent:@"bin"], *path = [bin stringByAppendingPathComponent:@"inspect"];
+    NSFileManager *manager = NSFileManager.defaultManager;
+    assert([manager createDirectoryAtPath:bin withIntermediateDirectories:YES attributes:nil error:NULL]);
+    const unsigned char der[] = {0x70, 30, 2, 1, 1, 0xb0, 25, 0x30, 23, 0x0c, 18,
+        't', 'a', 's', 'k', '_', 'f', 'o', 'r', '_', 'p', 'i', 'd', '-', 'a', 'l', 'l', 'o', 'w', 1, 1, 0xff};
+    NSData *grant = [NSData dataWithBytes:der length:sizeof(der)];
+    assert([entitlementImage(grant, YES) writeToFile:path atomically:YES]);
+    LSBJob *allowed = runIdentityJob("/bin/inspect", getpid() + 550, 9550, 1);
+    assert(allowed.guestTaskForPIDAllowed && !allowed.guestProcessInfoAllowed && !allowed.guestEntitlementsError);
+    assert([[@"plain image" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:path atomically:YES]);
+    LSBJob *denied = runIdentityJob("/bin/inspect", getpid() + 551, 9551, 2);
+    assert(!denied.guestTaskForPIDAllowed && denied.guestEntitlementsError);
+    assert(!requestProcessTask(allowed.audit, denied.guestPID)->error); // Grant remains bound to the original image snapshot.
+    assert(requestProcessTask(denied.audit, allowed.guestPID)->error == EPERM);
+    resetBroker();
+    assert([manager removeItemAtPath:directory error:NULL]);
+}
+
+static void testTaskCaptureStartupAndCleanup(void) {
+    enum { Captured, CreateFailure, ReceiveFailure, MissingCapture };
+    for (unsigned test = Captured; test <= MissingCapture; ++test) {
+        resetBroker();
+        automaticTaskCapture = NO;
+        if (test == CreateFailure) taskCaptureCreateError = ENOSPC;
+        int fd;
+        unsigned object;
+        enqueueSpawn(spawnRequest(&fd, &object), nil);
+        LSBJob *job = startingJob;
+        uint64_t identifier = job.identifier;
+        assert(job.taskCaptureError == ENOENT && !MACH_PORT_VALID(job.taskPort));
+        LSBReceivedMessage *checkin = messageFor(LSB_REQUEST_CHECKIN, getpid(), 9600 + test, 0);
+        unsigned checkinObject = ((TestMessageObject *)checkin->object)->identifier;
+        handleMessage(checkin);
+        assert(taskCaptureCreates == 1 && !taskCaptureReceives);
+        if (test == CreateFailure) {
+            assert(replyFor(checkinObject)->error == ENOSPC && !findJob(identifier));
+            assert(!MACH_PORT_VALID(job.taskPort) && !job.taskCaptureSource && !MACH_PORT_VALID(job.taskCapture.port));
+            continue;
+        }
+        assert(job.phase == JobDispatched && job.taskCaptureSource && MACH_PORT_VALID(job.taskCapture.port));
+        mach_port_t endpoint = job.taskCapture.port;
+        assert(hasRight(endpoint, MACH_PORT_TYPE_RECEIVE) && hasRight(endpoint, MACH_PORT_TYPE_SEND));
+        if (test == Captured) for (unsigned word = 0; word < 8; ++word) {
+            LSBReceivedMessage *forged = messageFor(LSB_REQUEST_READY, job.pid, job.pidVersion, identifier);
+            forged->audit.val[word] ^= 1;
+            unsigned forgedObject = ((TestMessageObject *)forged->object)->identifier;
+            handleMessage(forged);
+            assert(replyFor(forgedObject)->error == (word == 5 || word == 7 ? ESRCH : EACCES));
+            assert(job.phase == JobDispatched && job.taskCapture.port == endpoint && job.taskCaptureSource && !taskCaptureReceives);
+        }
+        taskCaptureReceiveError = EAGAIN;
+        receiveGuestTaskPort(identifier);
+        assert(job.taskCaptureError == ENOENT && !MACH_PORT_VALID(job.taskPort) && job.taskCaptureSource && taskCaptureReceives == 1);
+        if (test == ReceiveFailure) {
+            taskCaptureReceiveError = EACCES;
+            receiveGuestTaskPort(identifier);
+            assert(!findJob(identifier) && !MACH_PORT_VALID(job.taskPort));
+        } else {
+            if (test == Captured) {
+                taskCaptureReceiveError = 0;
+                receiveGuestTaskPort(identifier);
+                assert(!job.taskCaptureError && MACH_PORT_VALID(job.taskPort));
+            }
+            handleMessage(messageFor(LSB_REQUEST_READY, getpid(), 9600 + test, identifier));
+            assert(replyFor(object)->error == (test == Captured ? 0 : EPROTO));
+            if (test == Captured) assert(job.phase == JobRunning && MACH_PORT_VALID(job.taskPort));
+            else assert(!findJob(identifier));
+        }
+        assert(!job.taskCaptureSource && !MACH_PORT_VALID(job.taskCapture.port));
+        runMainQueueUntil(^BOOL { return !hasRight(endpoint, MACH_PORT_TYPE_RECEIVE); });
+        assert(!sendReferences(endpoint));
+        if (test == Captured) {
+            mach_port_t task = job.taskPort;
+            mach_port_urefs_t before = sendReferences(task);
+            finishJob(job, 0);
+            assert(!MACH_PORT_VALID(job.taskPort) && sendReferences(task) == before - 1);
+        }
+    }
+    resetBroker();
 }
 
 static RecordedReply *requestDebuggerRegistration(audit_token_t caller, mach_port_t endpoint) {
@@ -4369,6 +4629,9 @@ int main(void) {
         testPeerIdentityKernelValidation();
         testPeerIdentitySnapshotsAndAuthentication();
         testProcessListEntitlementsAndAuthentication();
+        testTaskCaptureStartupAndCleanup();
+        testTaskEntitlementSnapshot();
+        testProcessTaskAuthenticationAndOwnership();
         testCooperativeDebuggerAuthentication();
         testLaunchdChildIdentityAndSignals();
         testLaunchdNativeChildPIDResolution();

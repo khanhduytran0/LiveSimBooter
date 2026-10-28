@@ -148,10 +148,15 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     // Only the authenticated broker bootstrap can select this role; no environment value or executable path is consulted.
     if (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_PROBE) return runNativeProbe(error);
     if (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_SERVICE) return runNativeMetalService(error, planApplied);
+    // The native host receives a kernel-created movable task right through this one-shot thread exception.
+    // Restore the thread's prior handlers before simulator TLS/workqueue initialization; never send mach_task_self() over XPC.
+    if (!error) error = MACH_PORT_VALID(launch.taskCapture.port) ? LSBTaskPortCapturePerform(&launch.taskCapture) : EPROTO;
+    if (MACH_PORT_VALID(launch.taskCapture.port)) mach_port_deallocate(mach_task_self(), launch.taskCapture.port);
+    memset(&launch.taskCapture, 0, sizeof(launch.taskCapture));
     const char *policyEnvironment[LSB_MAX_VECTOR + 1];
     for (unsigned index = 0; index < launch.plan.envc; ++index) policyEnvironment[index] = launch.plan.strings + launch.plan.envp[index];
     policyEnvironment[launch.plan.envc] = NULL;
-    LSBNativeRuntimePolicy nativePolicy;
+    LSBNativeRuntimePolicy nativePolicy = {0};
     if (!error) error = LSBResolveNativeRuntimePolicy(launch.nativeProductionStatus, policyEnvironment, &nativePolicy);
     char executablePath[PATH_MAX], dyldPath[PATH_MAX], insertLibrary[PATH_MAX + 32], brokerEnvironment[64], detail[1024] = {0};
     char capabilitiesEnvironment[PATH_MAX + sizeof("SIMULATOR_CAPABILITIES=")];

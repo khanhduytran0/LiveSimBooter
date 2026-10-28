@@ -7,21 +7,22 @@
 #include "GuestCodeSignature.h"
 #include "NativeRuntimePolicy.h"
 #include "ProcessInspection.h"
+#include "TaskPortCapture.h"
 #include <mach/mach.h>
 #include <sys/sysctl.h>
 
 #define LSB_BROKER_PORT_ENV "LSB_BROKER_PORT"
-#define LSB_TRANSPORT_VERSION 4
+#define LSB_TRANSPORT_VERSION 5
 
 // Bootstrap-only metadata is versioned independently from the outer transport envelope.
-#define LSB_BOOTSTRAP_VERSION 2
+#define LSB_BOOTSTRAP_VERSION 3
 enum LSBExecutionRole { LSB_EXECUTION_SIMULATOR = 0, LSB_EXECUTION_NATIVE_METAL_PROBE = 1, LSB_EXECUTION_NATIVE_METAL_SERVICE = 2 };
 
 enum LSBRequestKind {
     LSB_REQUEST_SPAWN = 1, LSB_REQUEST_CHECKIN = 2, LSB_REQUEST_READY = 3, LSB_REQUEST_KILL = 4, LSB_REQUEST_EXEC = 5,
     LSB_REQUEST_RESOLVE_AUDIT_PID = 6, LSB_REQUEST_COPY_ENTITLEMENTS = 7, LSB_REQUEST_COPY_PROCESS_IDENTITY = 8,
     LSB_REQUEST_RESOLVE_NATIVE_CHILD_PID = 9, LSB_REQUEST_REBOOT_USERSPACE = 10, LSB_REQUEST_LIST_PROCESSES = 11,
-    LSB_REQUEST_REGISTER_DEBUGGER_PORT = 12, LSB_REQUEST_COPY_DEBUGGER_INFO = 13
+    LSB_REQUEST_REGISTER_DEBUGGER_PORT = 12, LSB_REQUEST_COPY_DEBUGGER_INFO = 13, LSB_REQUEST_COPY_PROCESS_TASK = 14
 };
 typedef struct {
     uint64_t requestID;
@@ -30,6 +31,7 @@ typedef struct {
     int32_t error, pid, guestPID, parentPID;
     int statusFD, wakeFD;
     mach_port_t launchdTankPort;
+    LSBTaskPortCaptureOffer taskCapture; // Optional simulator-only offer; owns one send reference after successful CheckIn.
     LSBSpawnPorts ports;
     char runtimeRoot[LSB_PATH_BYTES];
     LSBSpawnPlan plan;
@@ -42,6 +44,7 @@ typedef struct {
     const LSBSpawnPorts *ports;
     uint32_t executionRole; // Chosen by the native broker, never supplied by a guest spawn plan.
     uint32_t nativeProductionStatus;
+    LSBTaskPortCaptureOffer taskCapture; // Borrowed endpoint and nonce supplied only by the native broker.
 } LSBBootstrapMetadata;
 
 typedef struct {
@@ -97,6 +100,9 @@ int LSBTransportActivateDebuggerPort(const audit_token_t *brokerAudit);
 // Exact native managed peer only. Broker restricts this to stock druid and its original Boolean entitlement.
 // Returns a fresh cooperative native self KERN_PROC_PID result, never a cached or fabricated debugger flag.
 int LSBTransportCopyDebuggerInfo(pid_t nativePID, struct kinfo_proc *info);
+// Exact logical PID of a committed simulator guest. Broker requires the caller's original Boolean task_for_pid-allow.
+// Success owns one task send right validated against the reply's complete native audit token; failure clears *task.
+int LSBTransportCopyProcessTask(pid_t guestPID, mach_port_t *task);
 // Simulator launchd only: resolve the complete kernel audit identity of a request sender to its committed stable guest PID.
 // Unmanaged native identities retain their native PID unless they alias a known managed identity. Never changes the audit token.
 // Returns an errno value and clears *pid on failure; rejected or retired identities must not fall back to their native PID.
@@ -126,6 +132,8 @@ int LSBTransportReplyEntitlements(LSBReceivedMessage *message, int error, const 
 // LIST_PROCESSES only; borrows the bounded validated snapshot and releases the request. Errors carry no bytes.
 int LSBTransportReplyProcessList(LSBReceivedMessage *message, int error, const LSBProcessList *list, size_t size);
 int LSBTransportReplyDebuggerInfo(LSBReceivedMessage *message, int error, const struct kinfo_proc *info);
+// COPY_PROCESS_TASK only. Borrows the kernel-captured control right and full native identity; errors carry neither. Releases the request.
+int LSBTransportReplyProcessTask(LSBReceivedMessage *message, int error, mach_port_t task, const audit_token_t *targetAudit);
 // COPY_PROCESS_IDENTITY only. Borrows identity and copies its task-name right; errors carry no identity. Releases the request object.
 int LSBTransportReplyProcessIdentity(LSBReceivedMessage *message, int error, const LSBPeerProcessIdentity *identity);
 // Bootstrap additionally copies a shared status-file FD and nonblocking wake-pipe read FD; caller retains ownership.

@@ -82,8 +82,13 @@ enum { JobQueued, JobStarting, JobDispatched, JobRunning };
 @property (nonatomic, copy) NSData *guestXMLEntitlements;
 @property int guestXMLEntitlementsError;
 @property BOOL guestProcessInfoAllowed;
+@property BOOL guestTaskForPIDAllowed;
 @property BOOL guestDragUIAllowed, debuggerQueryPending, processDebuggerReady;
 @property mach_port_t processDebuggerPort;
+@property mach_port_t taskPort;
+@property LSBTaskPortCaptureOffer taskCapture;
+@property dispatch_source_t taskCaptureSource;
+@property int taskCaptureError;
 @property (nonatomic, copy) NSData *guestCodeDirectoryHash;
 @property int guestCodeDirectoryHashError;
 @property LSBPeerProcessIdentity peerIdentity;
@@ -98,12 +103,15 @@ enum { JobQueued, JobStarting, JobDispatched, JobRunning };
         _guestXMLEntitlementsError = ENOENT;
         _guestCodeDirectoryHashError = ENOENT;
         _peerIdentityError = ENOENT;
+        _taskCaptureError = ENOENT;
     }
     return self;
 }
 - (void)dealloc {
     LSBPeerProcessIdentityDispose(&_peerIdentity);
     if (MACH_PORT_VALID(_processDebuggerPort)) mach_port_deallocate(mach_task_self(), _processDebuggerPort);
+    if (_taskCaptureSource) dispatch_source_cancel(_taskCaptureSource);
+    if (MACH_PORT_VALID(_taskPort)) mach_port_deallocate(mach_task_self(), _taskPort);
     if (_nativeMetalControl) LSBNativeMetalControlUnmap(_nativeMetalControl);
     if (MACH_PORT_VALID(_nativeServicePort)) mach_port_deallocate(mach_task_self(), _nativeServicePort);
     if (_launchdHandshake) { LSBLaunchdHandshakeDispose(_launchdHandshake); free(_launchdHandshake); }
@@ -168,6 +176,7 @@ static int signalTerminal(pid_t foreground, int signalNumber);
 static BOOL launchdOwnsChildIdentity(LSBJob *job);
 static LSBJob *enqueueNativeMetalHelper(BOOL publicAccess, const char *name, int *result);
 static void registerReplacementSpringBoardMetal(LSBJob *active, LSBJob *helper);
+static void finishJob(LSBJob *job, int error);
 
 LSBTerminalSession *LSBHostTerminal(void) { return hostTerminal; }
 LSBGuestDeviceType *LSBHostCurrentDeviceType(void) { return jobs ? sessionDeviceType ?: LSBConfiguredGuestDeviceType() : LSBConfiguredGuestDeviceType(); }
@@ -377,6 +386,7 @@ static BOOL booleanGuestEntitlement(NSDictionary *entitlements, NSString *key) {
 
 static void snapshotGuestEntitlements(LSBJob *job) {
     job.guestProcessInfoAllowed = NO;
+    job.guestTaskForPIDAllowed = NO;
     job.guestDragUIAllowed = NO;
     job.guestEntitlements = nil;
     job.guestXMLEntitlements = nil;
@@ -402,6 +412,7 @@ static void snapshotGuestEntitlements(LSBJob *job) {
         else {
             NSDictionary *entitlements = guestEntitlementsDictionary(job.guestXMLEntitlements);
             job.guestProcessInfoAllowed = booleanGuestEntitlement(entitlements, @"proc_info-allow");
+            job.guestTaskForPIDAllowed = booleanGuestEntitlement(entitlements, @"task_for_pid-allow");
             job.guestDragUIAllowed = booleanGuestEntitlement(entitlements, @"com.apple.druid");
         }
     }
@@ -444,6 +455,12 @@ static int snapshotGuestProcessIdentity(LSBJob *job, LSBReceivedMessage *message
     return 0;
 }
 
+static void stopGuestTaskCapture(LSBJob *job) {
+    if (job.taskCaptureSource) dispatch_source_cancel(job.taskCaptureSource);
+    job.taskCaptureSource = nil;
+    job.taskCapture = (LSBTaskPortCaptureOffer){0};
+}
+
 static void releaseGuestProcessIdentity(LSBJob *job) {
     LSBPeerProcessIdentity snapshot = job.peerIdentity;
     job.peerIdentity = (LSBPeerProcessIdentity){0};
@@ -452,6 +469,55 @@ static void releaseGuestProcessIdentity(LSBJob *job) {
     if (MACH_PORT_VALID(job.processDebuggerPort)) mach_port_deallocate(mach_task_self(), job.processDebuggerPort);
     job.processDebuggerPort = MACH_PORT_NULL;
     job.processDebuggerReady = NO;
+    stopGuestTaskCapture(job);
+    if (MACH_PORT_VALID(job.taskPort)) mach_port_deallocate(mach_task_self(), job.taskPort);
+    job.taskPort = MACH_PORT_NULL;
+    job.taskCaptureError = ESRCH;
+}
+
+static void receiveGuestTaskPort(uint64_t identifier) {
+    LSBJob *job = findJob(identifier);
+    if (!job || job.phase != JobDispatched || job.finishing || job.executionRole != LSB_EXECUTION_SIMULATOR) return;
+    LSBTaskPortCaptureOffer offer = job.taskCapture;
+    audit_token_t expected = job.audit;
+    mach_port_t task = MACH_PORT_NULL;
+    int error = LSBTaskPortCaptureReceive(&offer, &expected, &task);
+    if (error == EAGAIN) return;
+    if (!error && MACH_PORT_VALID(job.taskPort)) error = EALREADY;
+    if (error) {
+        if (MACH_PORT_VALID(task)) mach_port_deallocate(mach_task_self(), task);
+        job.taskCaptureError = error;
+        fprintf(stderr, "[broker] task capture failed request=%llu native=%d error=%d\n", identifier, job.pid, error);
+        finishJob(job, error);
+        return;
+    }
+    job.taskPort = task;
+    job.taskCaptureError = 0;
+    // Keep the endpoint alive until READY confirms that the native child has restored its thread exception handlers.
+}
+
+static int prepareGuestTaskCapture(LSBJob *job) {
+    if (job.executionRole != LSB_EXECUTION_SIMULATOR) return 0;
+    LSBTaskPortCaptureOffer offer = {0};
+    int error = LSBTaskPortCaptureCreate(&offer);
+    if (error) return error;
+    dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, offer.port, 0, dispatch_get_main_queue());
+    if (!source) {
+        mach_port_mod_refs(mach_task_self(), offer.port, MACH_PORT_RIGHT_RECEIVE, -1);
+        mach_port_deallocate(mach_task_self(), offer.port);
+        return ENOMEM;
+    }
+    uint64_t identifier = job.identifier;
+    dispatch_source_set_cancel_handler(source, ^{
+        mach_port_mod_refs(mach_task_self(), offer.port, MACH_PORT_RIGHT_RECEIVE, -1);
+        mach_port_deallocate(mach_task_self(), offer.port);
+    });
+    dispatch_source_set_event_handler(source, ^{ receiveGuestTaskPort(identifier); });
+    job.taskCapture = offer;
+    job.taskCaptureSource = source;
+    job.taskCaptureError = ENOENT;
+    dispatch_resume(source);
+    return 0;
 }
 
 static void logPeerIdentityRequest(pid_t sender, pid_t target, uint32_t version, int error) {
@@ -1441,6 +1507,18 @@ static BOOL debuggerTargetCurrent(LSBJob *job, const audit_token_t *expected) {
     return authenticatedSimulatorJob(job, expected) && !validatePeerTaskIdentity(&identity, expected);
 }
 
+static BOOL capturedTaskCurrent(LSBJob *job, const audit_token_t *expected) {
+    if (!debuggerTargetCurrent(job, expected) || job.taskCaptureError || !MACH_PORT_VALID(job.taskPort)) return NO;
+    mach_port_type_t type = 0;
+    if (mach_port_type(mach_task_self(), job.taskPort, &type) || !(type & MACH_PORT_TYPE_SEND) ||
+        (type & (MACH_PORT_TYPE_RECEIVE | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME | MACH_PORT_TYPE_PORT_SET))) return NO;
+    audit_token_t actual = {{0}};
+    mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
+    // Control capability provenance comes only from the kernel exception receiver, never from CHECKIN's name-only right.
+    return !task_info(job.taskPort, TASK_AUDIT_TOKEN, (task_info_t)&actual, &count) && count == TASK_AUDIT_TOKEN_COUNT &&
+        !memcmp(&actual, expected, sizeof(actual));
+}
+
 static BOOL traceCooperativeDebugger(void) {
     const char *enabled = getenv("LSB_TRACE_PEER_DEBUGGER_STATE");
     if (!enabled || strcmp(enabled, "1") || cooperativeDebuggerLogs >= 128) return NO;
@@ -1514,6 +1592,24 @@ static void handleMessage(LSBReceivedMessage *message) {
     for (LSBJob *job in jobs) if (job.pid == pid && job.pidVersion == generation) { sender = job; break; }
     if (sessionDraining) { replyError(message, ECANCELED); return; }
     switch (message->kind) {
+        case LSB_REQUEST_COPY_PROCESS_TASK: {
+            if (!authenticatedSimulatorJob(sender, &message->audit)) { replyError(message, EACCES); return; }
+            if (!sender.guestTaskForPIDAllowed) { replyError(message, EPERM); return; }
+            if (message->targetPID <= 0) { replyError(message, EINVAL); return; }
+            LSBJob *target = nil;
+            for (LSBJob *job in jobs) if (job.guestPID == message->targetPID && job.phase == JobRunning &&
+                !job.retiredForExec && !job.finishing && job.executionRole == LSB_EXECUTION_SIMULATOR) {
+                if (target) { replyError(message, ESRCH); return; }
+                target = job;
+            }
+            audit_token_t expected = target.audit;
+            int error = !debuggerTargetCurrent(target, &expected) ? ESRCH :
+                target.taskCaptureError || !MACH_PORT_VALID(target.taskPort) ? ENOTSUP :
+                capturedTaskCurrent(target, &expected) ? 0 : ESRCH;
+            LSBTransportReplyProcessTask(message, error, error ? MACH_PORT_NULL : target.taskPort, error ? NULL : &expected);
+            disposeMessage(message);
+            return;
+        }
         case LSB_REQUEST_REGISTER_DEBUGGER_PORT: {
             if (!debuggerTargetCurrent(sender, &message->audit)) { replyDebuggerRegistration(message, EACCES); return; }
             if (message->activateDebuggerPort) {
@@ -1764,9 +1860,11 @@ static void handleMessage(LSBReceivedMessage *message) {
                 }
             }
             LSBChildStatusSetParentPID(job.childStatus, parent ? parent.guestPID : old ? LSBChildStatusGetParentPID(old.childStatus) : getpid());
+            error = prepareGuestTaskCapture(job);
+            if (error) { replyError(message, error); finishJob(job, error); return; }
             LSBBootstrapMetadata metadata = { .guestPID = job.guestPID, .parentPID = LSBChildStatusGetParentPID(job.childStatus),
                 .launchdTankPort = job.simulatorLaunchd ? LSBLaunchdHandshakeTankPort(job.launchdHandshake) : MACH_PORT_NULL,
-                .ports = &job.request->ports, .executionRole = job.executionRole,
+                .ports = &job.request->ports, .executionRole = job.executionRole, .taskCapture = job.taskCapture,
                 .nativeProductionStatus = job.executionRole == LSB_EXECUTION_SIMULATOR ? LSBHostNativeProductionStatus() : LSB_NATIVE_PRODUCTION_UNKNOWN };
             error = LSBTransportReplyBootstrapWithMetadata(message, 0, pid, identifier, runtimeRoot.fileSystemRepresentation,
                 &job.request->plan, job.request->fds, job.statusFD, job.wakeReadFD, &metadata);
@@ -1787,7 +1885,10 @@ static void handleMessage(LSBReceivedMessage *message) {
             int error = message->error;
             audit_token_t expectedAudit = sender.audit;
             BOOL nativeService = sender.executionRole == LSB_EXECUTION_NATIVE_METAL_SERVICE;
-            if (nativeService && memcmp(&message->audit, &expectedAudit, sizeof(expectedAudit))) { replyError(message, EACCES); return; }
+            if (memcmp(&message->audit, &expectedAudit, sizeof(expectedAudit))) { replyError(message, EACCES); return; }
+            if (!error && sender.executionRole == LSB_EXECUTION_SIMULATOR &&
+                (sender.taskCaptureError || !MACH_PORT_VALID(sender.taskPort))) error = EPROTO;
+            stopGuestTaskCapture(sender);
             if (MACH_PORT_VALID(message->nativeServicePort) && (!nativeService || error)) error = EPROTO;
             if (!error && nativeService && !MACH_PORT_VALID(message->nativeServicePort)) error = EPROTO;
             if (!error && nativeService) {

@@ -8,18 +8,95 @@
 static int testSysctl(int *, u_int, void *, size_t *, void *, size_t);
 static int testRusage(int, int, rusage_info_t *);
 static kern_return_t testTaskForPID(mach_port_name_t, int, mach_port_name_t *);
+static kern_return_t testPortModRefs(ipc_space_t, mach_port_name_t, mach_port_right_t, mach_port_delta_t);
 #define sysctl testSysctl
 #define proc_pid_rusage testRusage
 #define task_for_pid testTaskForPID
+#define mach_port_mod_refs testPortModRefs
 #define LSB_PROCESS_INSPECTION_TESTING
 #include "../Guest/ProcessInspection.c"
 #undef sysctl
 #undef proc_pid_rusage
 #undef task_for_pid
+#undef mach_port_mod_refs
 
 static unsigned nativeCalls, listCalls;
 static int nativeError, listError, lastMIB[4], lastRusagePID, lastTaskPID;
 static unsigned rusageCalls, taskCalls;
+static unsigned taskRequests;
+static int taskError, lastTaskRequest;
+static mach_port_t testTask;
+static vm_address_t discardTaskOutput;
+static vm_address_t discardSelfTaskOutput;
+static kern_return_t retainTaskError;
+static kern_return_t testPortModRefs(ipc_space_t space, mach_port_name_t name, mach_port_right_t right, mach_port_delta_t delta) {
+    if (retainTaskError) return retainTaskError;
+    kern_return_t result = mach_port_mod_refs(space, name, right, delta);
+    if (!result && discardSelfTaskOutput) {
+        assert(!vm_deallocate(mach_task_self(), discardSelfTaskOutput, vm_page_size));
+        discardSelfTaskOutput = 0;
+    }
+    return result;
+}
+static void testSelfTask(pid_t pid) {
+    mach_port_t task = MACH_PORT_NULL;
+    mach_port_urefs_t before = 0, after = 0;
+    assert(!mach_port_get_refs(mach_task_self(), mach_task_self(), MACH_PORT_RIGHT_SEND, &before));
+    unsigned native = taskCalls, broker = taskRequests;
+    errno = EDOM;
+    assert(!inspectionTaskForPID(mach_task_self(), pid, &task) && task == mach_task_self() && errno == EDOM);
+    assert(!mach_port_get_refs(mach_task_self(), task, MACH_PORT_RIGHT_SEND, &after) && after == before + 1);
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    assert(!task_info(task, MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) && info.resident_size > 0);
+    assert(!mach_port_deallocate(mach_task_self(), task));
+    assert(!mach_port_get_refs(mach_task_self(), mach_task_self(), MACH_PORT_RIGHT_SEND, &after) && after == before);
+    assert(inspectionTaskForPID(mach_task_self(), pid, NULL) == KERN_INVALID_ADDRESS && errno == EDOM);
+    assert(inspectionTaskForPID(mach_task_self(), pid, (void *)1) == KERN_INVALID_ADDRESS && errno == EDOM);
+    retainTaskError = KERN_RESOURCE_SHORTAGE; task = 123;
+    assert(inspectionTaskForPID(mach_task_self(), pid, &task) == KERN_RESOURCE_SHORTAGE && !task && errno == EDOM);
+    retainTaskError = 0;
+    assert(!vm_allocate(mach_task_self(), &discardSelfTaskOutput, vm_page_size, VM_FLAGS_ANYWHERE));
+    assert(inspectionTaskForPID(mach_task_self(), pid, (void *)discardSelfTaskOutput) == KERN_INVALID_ADDRESS && !discardSelfTaskOutput);
+    assert(!mach_port_get_refs(mach_task_self(), mach_task_self(), MACH_PORT_RIGHT_SEND, &after) && after == before && errno == EDOM);
+    assert(taskCalls == native && taskRequests == broker); // Native task_for_pid denial is irrelevant; this stays inside its own task.
+}
+int LSBTransportCopyProcessTask(pid_t pid, mach_port_t *task) {
+    ++taskRequests; lastTaskRequest = pid; *task = MACH_PORT_NULL; errno = EBUSY;
+    if (taskError) return taskError;
+    assert(!mach_port_mod_refs(mach_task_self(), testTask, MACH_PORT_RIGHT_SEND, 1));
+    *task = testTask;
+    if (discardTaskOutput) {
+        assert(!vm_deallocate(mach_task_self(), discardTaskOutput, vm_page_size));
+        discardTaskOutput = 0;
+    }
+    return 0;
+}
+static void testTaskQueries(void) {
+    assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &testTask));
+    assert(!mach_port_insert_right(mach_task_self(), testTask, testTask, MACH_MSG_TYPE_MAKE_SEND));
+    mach_port_t task = MACH_PORT_NULL;
+    errno = EDOM;
+    assert(!inspectionTaskForPID(mach_task_self(), 22, &task) && task == testTask && lastTaskRequest == 22 && errno == EDOM);
+    mach_port_urefs_t refs = 0;
+    assert(!mach_port_get_refs(mach_task_self(), testTask, MACH_PORT_RIGHT_SEND, &refs) && refs == 2);
+    assert(!mach_port_deallocate(mach_task_self(), task));
+    const int errors[] = {EPERM, EACCES, ESRCH, EINVAL, ENOTSUP, ETIMEDOUT};
+    const kern_return_t expected[] = {KERN_PROTECTION_FAILURE, KERN_PROTECTION_FAILURE, KERN_INVALID_ARGUMENT,
+                                     KERN_INVALID_ARGUMENT, KERN_NOT_SUPPORTED, KERN_FAILURE};
+    for (unsigned i = 0; i < sizeof(errors) / sizeof(*errors); ++i) {
+        taskError = errors[i]; task = 123;
+        assert(inspectionTaskForPID(mach_task_self(), 22, &task) == expected[i] && !task && errno == EDOM);
+    }
+    taskError = 0;
+    unsigned requests = taskRequests;
+    assert(inspectionTaskForPID(mach_task_self(), 22, NULL) == KERN_INVALID_ADDRESS);
+    assert(inspectionTaskForPID(mach_task_self(), 22, (void *)1) == KERN_INVALID_ADDRESS && taskRequests == requests);
+    assert(!vm_allocate(mach_task_self(), &discardTaskOutput, vm_page_size, VM_FLAGS_ANYWHERE));
+    assert(inspectionTaskForPID(mach_task_self(), 22, (void *)discardTaskOutput) == KERN_INVALID_ADDRESS && !discardTaskOutput && errno == EDOM);
+    assert(!mach_port_get_refs(mach_task_self(), testTask, MACH_PORT_RIGHT_SEND, &refs) && refs == 1);
+    assert(taskCalls == 1); // Authorization failure and copyout failure never fall through to the native PID namespace.
+}
 static bool debuggerEnabled;
 static int debuggerError;
 static unsigned debuggerCalls;
@@ -108,6 +185,8 @@ int main(void) {
     assert(!inspectionTaskForPID(mach_task_self(), 22, &task) && taskCalls == 1 && lastTaskPID == 22 && task == 123);
     assert(inspectionSysctl(maximum, 2, &value, &length, NULL, 0) == -1 && errno == EBUSY && nativeCalls == 1 && !listCalls);
     atomic_store(&inspectionReady, true);
+    testSelfTask(21); testSelfTask(31);
+    testTaskQueries(); // task_for_pid authorization does not require a successful KERN_PROC_ALL query first.
     listError = EPERM;
     assert(inspectionSysctl(maximum, 2, &value, &length, NULL, 0) == -1 && errno == EPERM && nativeCalls == 1);
     assert(inspectionSysctl(all, 4, NULL, &length, NULL, 0) == -1 && errno == EPERM && nativeCalls == 1);
@@ -183,13 +262,16 @@ int main(void) {
     assert(!inspectionRusage(21, 2, NULL) && rusageCalls == 2 && lastRusagePID == 31);
     assert(!inspectionRusage(31, 2, NULL) && rusageCalls == 3 && lastRusagePID == 31);
     errno = EDOM; task = 123;
+    taskError = ENOTSUP;
     assert(inspectionTaskForPID(mach_task_self(), 22, &task) == KERN_NOT_SUPPORTED && !task && taskCalls == 1 && errno == EDOM);
     task = 123;
+    taskError = ESRCH;
     assert(inspectionTaskForPID(mach_task_self(), 999, &task) == KERN_INVALID_ARGUMENT && !task && taskCalls == 1);
     assert(inspectionTaskForPID(mach_task_self(), 22, (void *)1) == KERN_INVALID_ADDRESS && taskCalls == 1);
-    assert(!inspectionTaskForPID(mach_task_self(), 21, &task) && taskCalls == 2 && lastTaskPID == 31 && task == 123);
+    testSelfTask(21); testSelfTask(31);
     // A replacement's native self PID can be recycled from another live job's stable guest PID.
     processSnapshot->records[1].guestPID = 31;
+    taskError = ENOTSUP;
     forwarded = nativeCalls;
     assert(!LSBInspectionUnsupportedPID(21) && LSBInspectionUnsupportedPID(31) == ENOTSUP);
     self[3] = 31;
@@ -197,10 +279,12 @@ int main(void) {
     arguments[2] = 31;
     assert(inspectionSysctl(arguments, 3, info, &length, NULL, 0) == -1 && errno == ENOTSUP && nativeCalls == forwarded);
     assert(inspectionRusage(31, 2, NULL) == -1 && errno == ENOTSUP && rusageCalls == 3);
-    assert(inspectionTaskForPID(mach_task_self(), 31, &task) == KERN_NOT_SUPPORTED && !task && taskCalls == 2);
+    assert(inspectionTaskForPID(mach_task_self(), 31, &task) == KERN_NOT_SUPPORTED && !task && taskCalls == 1);
+    assert(lastTaskRequest == 31); // The known logical peer wins over the native-self alias and is resolved by the broker.
     assert(LSBInspectionPIDPath(31, path, sizeof(path), &pathResult) && pathResult == physicalLength && !strcmp(path, physicalDF));
     assert(!inspectionRusage(21, 2, NULL) && rusageCalls == 4 && lastRusagePID == 31);
-    assert(!inspectionTaskForPID(mach_task_self(), 21, &task) && taskCalls == 3 && lastTaskPID == 31);
+    testSelfTask(21);
+    assert(!inspectionTaskForPID(MACH_PORT_NULL, 21, &task) && taskCalls == 2 && lastTaskPID == 31 && task == 123);
     nativeError = EACCES;
     assert(inspectionSysctl(all, 4, info, &length, &value, sizeof(value)) == -1 && listCalls == calls);
     debuggerEnabled = true; debuggerError = ETIMEDOUT; self[3] = 42;
@@ -214,6 +298,8 @@ int main(void) {
     self[3] = 21; nativeError = 0;
     assert(!inspectionSysctl(self, 4, info, &length, NULL, 0) && lastMIB[3] == 31 && debuggerCalls == 3);
     free(processSnapshot);
+    assert(!mach_port_deallocate(mach_task_self(), testTask));
+    assert(!mach_port_mod_refs(mach_task_self(), testTask, MACH_PORT_RIGHT_RECEIVE, -1));
     assert(!rmdir(temporary));
     puts("ProcessInspectionTests: bounded guest list, logical identities, real self translation, native forwarding and output faults passed");
     return 0;

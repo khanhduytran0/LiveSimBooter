@@ -12,6 +12,10 @@
 #ifdef LSB_INSPECTION_INTERPOSE_FIXTURE
 pid_t LSBNativePID(void) { return getpid(); }
 pid_t LSBGuestPID(void) { return getpid() + 100000; }
+int LSBTransportCopyProcessTask(pid_t pid, mach_port_t *task) {
+    *task = MACH_PORT_NULL;
+    return pid == getpid() + 200000 ? ENOTSUP : ESRCH;
+}
 int LSBTransportListProcesses(LSBProcessList **list, size_t *size) {
     static unsigned requests;
     *list = NULL; *size = 0;
@@ -57,14 +61,16 @@ int main(void) {
     assert(task_for_pid(mach_task_self(), getpid() + 200000, &task) == KERN_NOT_SUPPORTED && !task);
     task = 123;
     assert(task_for_pid(mach_task_self(), getpid() + 400000, &task) == KERN_INVALID_ARGUMENT && !task);
-    mach_port_name_t nativeTask = MACH_PORT_NULL;
-    kern_return_t nativeResult = task_for_pid(mach_task_self(), getpid(), &nativeTask);
-    task = MACH_PORT_NULL;
-    assert(task_for_pid(mach_task_self(), getpid() + 100000, &task) == nativeResult);
-    if (!nativeResult) {
-        assert(MACH_PORT_VALID(task) && MACH_PORT_VALID(nativeTask));
-        mach_port_deallocate(mach_task_self(), task);
-        mach_port_deallocate(mach_task_self(), nativeTask);
+    mach_port_urefs_t before = 0, after = 0;
+    assert(!mach_port_get_refs(mach_task_self(), mach_task_self(), MACH_PORT_RIGHT_SEND, &before));
+    for (unsigned i = 0; i < 10; ++i) {
+        errno = EDOM; task = MACH_PORT_NULL;
+        assert(!task_for_pid(mach_task_self(), getpid() + (i % 2 ? 100000 : 0), &task) && task == mach_task_self() && errno == EDOM);
+        assert(!mach_port_get_refs(mach_task_self(), task, MACH_PORT_RIGHT_SEND, &after) && after == before + 1);
+        mach_task_basic_info_data_t info; mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+        assert(!task_info(task, MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) && info.resident_size > 0);
+        assert(!mach_port_deallocate(mach_task_self(), task));
+        assert(!mach_port_get_refs(mach_task_self(), mach_task_self(), MACH_PORT_RIGHT_SEND, &after) && after == before);
     }
     puts("ProcessInspectionInterpose: real self/debugger queries, peer logical-PID guards, self task/rusage and native forwarding passed");
     return 0;

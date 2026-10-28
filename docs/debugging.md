@@ -1,12 +1,15 @@
 # Device debugging
 
-The commands below match the working command-line procedure on 2026-10-24. Run them from the repository root with Xcode's
-command-line tools selected. Unlock the iPhone and keep it unlocked for launch/attach. Use the current device identifier
-from `xcrun devicectl list devices`; the tested device UDID was `00008150-0006505C1428401C`.
+The command-line procedure below grew from device tests beginning on 2026-10-24; historical evidence is labeled with its date.
+Run from the repository root with Xcode's command-line tools selected. Unlock the iPhone and keep it unlocked for launch/attach.
+Use the current device identifier from `xcrun devicectl list devices` and the signed artifacts prepared by [agent setup](agent-setup.md).
 
 ```sh
-DEVICE=00008150-0006505C1428401C
-APP=tmp/device-build/Build/Products/Debug-iphoneos/LiveSimBooter.app
+DEVICE='CURRENT_COREDEVICE_IDENTIFIER'
+APP='/absolute/path/to/packaged/LiveSimBooter.app'
+LSB_SELECTED_APP_GROUP='ACTUAL_EXPANDED_STORE_GROUP_IDENTIFIER'
+LSB_SIGNED_DYLD='/absolute/path/to/signed/dyld_sim'
+LSB_SIGNED_CACHE='/absolute/path/to/signed/dyld_sim_shared_cache_arm64'
 mkdir -p tmp/device-log
 ```
 
@@ -21,28 +24,33 @@ It is separate from Extended Virtual Addressing; verify the intended VM range un
 
 Install a normally signed development build of the host app. Compilation without signing is useful for checks but does
 not produce an installable device build. Keep the local executable and dSYM matching the installed app for source debugging.
+Both native targets must have the store-group entitlements/profiles described in [setup](agent-setup.md). Discover the selected
+group before transferring; `LSB_SELECTED_APP_GROUP` is its actual signed identifier, not a container UUID. Stop the host and all
+guests before replacing mapped code. The examples below copy into prepared inactive directories under `LSB/iOS/23A343`:
 
 ```sh
 xcrun devicectl device install app --device "$DEVICE" "$APP" --json-output tmp/device-log/install.json
 
-xcrun devicectl device copy to --device "$DEVICE" --source tmp/cache-base-tools/dyld_sim \
-  --destination Documents/RuntimeRoot/usr/lib/dyld_sim \
-  --domain-type appDataContainer --domain-identifier com.kdt.LiveSimBooter --json-output tmp/device-log/dyld-copy.json
+xcrun devicectl device copy to --device "$DEVICE" --source "$LSB_SIGNED_DYLD" \
+  --destination LSB/iOS/23A343/RuntimeRoot.incoming/usr/lib/dyld_sim \
+  --domain-type appGroupDataContainer --domain-identifier "$LSB_SELECTED_APP_GROUP" --json-output tmp/device-log/dyld-copy.json
 
-xcrun devicectl device copy to --device "$DEVICE" --source tmp/cache-base-tools/signed/dyld_sim_shared_cache_arm64 \
-  --destination Documents/RuntimeRoot/System/Library/Caches/com.apple.dyld/dyld_sim_shared_cache_arm64 \
-  --domain-type appDataContainer --domain-identifier com.kdt.LiveSimBooter --timeout 120 --json-output tmp/device-log/cache-copy.json
+xcrun devicectl device copy to --device "$DEVICE" --source "$LSB_SIGNED_CACHE" \
+  --destination LSB/iOS/23A343/RuntimeRoot.incoming/System/Library/Caches/com.apple.dyld/dyld_sim_shared_cache_arm64 \
+  --domain-type appGroupDataContainer --domain-identifier "$LSB_SELECTED_APP_GROUP" --timeout 3600 --json-output tmp/device-log/cache-copy.json
 ```
 
-Transfer by app data-container domain instead of hardcoding a container UUID; reinstalling can change it.
-Stop the app and preserve the current files before replacing them. The [shared-cache notes](shared-cache.md) list the existing backups.
+Transfer by the selected App Group domain instead of hardcoding a container UUID; reinstalling can change it. These two files
+alone do not form a complete replacement runtime. Preserve the current runtime and publish the intended complete replacement
+using [the inactive-transfer procedure](migration.md#transfer-to-inactive-directories). There is no Documents migration.
 File transfer does not establish signature acceptance; capture the next launch.
 
 ## Capture AMFI and TXM
 
 ### USB SSH and incremental transfers
 
-The current iOS 26.1 phone exposes SSH on device port 2222. Forward it over USB with a loopback-only listener:
+The historical iOS 26.1 trial used SSH on device port 2222 and this loopback-only USB forward. Discover the current phone and
+SSH account/port using [the migration runbook](migration.md) before reusing its command shape:
 
 ```sh
 iproxy -l -u 00008130-00021D122680011C 2223:2222
@@ -53,14 +61,18 @@ phone have protocol-29-compatible openrsync. The 2026-10-26 trial deployed the p
 verified its SHA-256; a checksum synchronization of the exact 1,826-file signed SpringBoard payload had no remaining
 file differences. The local source tree must contain the signed executable, not its original unsigned input.
 
-For a new payload, select an inactive directory inside the app group's `Library`, then use:
+For a new payload, select an inactive directory inside the selected group's `LSB/iOS/23A343` directory, then use the verified
+SSH connection. This example uses placeholders for that connection and physical storage directory:
 
 ```sh
-rsync -rlpc --partial --itemize-changes -e 'ssh -p 2223' local-payload/ root@127.0.0.1:/verified/app-group/Library/TransferTrial/incoming/
+LSB_DEVICE_STORAGE="$LSB_DEVICE_GROUP/LSB/iOS/23A343"
+rsync -rlpt --partial --itemize-changes -e "ssh -p $LSB_SSH_PORT" local-payload/ \
+  "$LSB_SSH_DEST:$LSB_DEVICE_STORAGE/RuntimeRoot.incoming/"
 ```
 
-The trailing slash copies the directory contents. Keep existing RuntimeRoot files until transfer and manifest hash
-verification finish, then activate with the relevant guest processes stopped. Do not add `--delete` to a partial runtime
+The trailing slash copies the directory contents. Keep existing RuntimeRoot files until the transfer succeeds, then activate
+with the relevant guest processes stopped. Current transfers skip a post-copy checksum pass; validate signed inputs locally.
+Do not add `--delete`, `--checksum`, or `--inplace` to a partial runtime
 payload. A cache already transferred to the phone can be activated by a local rename; it need not be downloaded and uploaded again.
 Evidence is in `tmp/lsd-services/rsync-usb-shim-deploy.log` and `rsync-usb-springboard-final.log`.
 

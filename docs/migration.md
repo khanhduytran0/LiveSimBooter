@@ -1,13 +1,19 @@
 # Move a simulator runtime to another iPhone
 
 This runbook complements [agent setup](agent-setup.md). Keep the guest pinned to iOS Simulator 26.0 / 23A343 even when the physical
-phone changes. As of 2026-10-26, the full local stage and finalization passed: 494,754 entries, 163 app-registration candidates,
+phone changes. Current storage is `<selected SideStore or AltStore App Group>/LSB/iOS/23A343/{RuntimeRoot,data}`.
+There is no automatic migration from Documents, an older App Group, or a File Provider backup. The manual procedure below covers
+both changing phones and restoring an existing runtime into the new storage location.
+
+## Historical migration evidence
+
+As of 2026-10-26, the full local stage and finalization passed: 494,754 entries, 163 app-registration candidates,
 and all applicable signing/section-preservation checks, with four recorded dependency gaps. USB rsync of the full runtime and
 prepared extras completed, and the new runtime was activated on the destination iPhone 17. The runtime transfer covered
 15,099,025,144 bytes; `RuntimeRoot.before-full-20261026` retains the previous root. No post-copy checksum pass was performed,
 following the user's request. There is no in-app installer or automatic device-to-device migration.
 
-The current host/shim default retains the native cache and redirects its workqueue entry with a hardware breakpoint.
+The production-device host/shim policy retains the native cache and redirects its workqueue entry with a hardware breakpoint.
 This passed concurrent dispatch work, timers, and launchd spawning df without LLDB. After applying and signing the pinned
 cache/helper metadata-name patch, the iPhone18,2 running iOS 27.0 / 24A435 reached a home screen with app icons, confirmed by
 the user. lsd started and 647 guest metadata files were created. The migration initially omitted SimulatorHID; the plugin has
@@ -36,9 +42,9 @@ before workqueue creation, but recorded no handled exception and exited with wai
 `CODESIGNING / InvalidPage` at the same address. Breakpoint-versus-fetch priority and actual workqueue inheritance on this
 device remain unseparated; the control alone does not establish a working handoff.
 
-The failed experiment removed the native cache. The current default enables both `LSB_RETAIN_HOST_CACHE` and
-`LSB_WORKQUEUE_HARDWARE_BREAKPOINT`; unset values mean enabled. Set both explicitly to `0` only for a legacy diagnostic, using
-the `DEVICECTL_CHILD_` prefix when launching through CoreDevice. Arming can follow native registration, but must precede worker
+The failed experiment removed the native cache. Production/unknown devices enable retention and hardware bridging.
+Detachment now requires an exact native non-production MobileGestalt result supplied by the host at check-in; environment
+overrides cannot grant it. See [handoff policy](runtime-handoff.md). Arming can follow native registration, but must precede worker
 creation; the owned slot must persist for reused workers. See [the launchd trial](launchd.md#ios-27-hardware-breakpoint-trial)
 and [retained-cache results](launchd.md#retained-native-cache-with-hardware-redirection).
 
@@ -54,7 +60,7 @@ app build, and simulator device type. The default simulated iPhone 15 Pro Max pr
 Keep one working source runtime and its mutable state until the new device passes verification.
 
 Identify the destination with `xcrun devicectl list devices`. Install the correctly signed native app first. Both app and extension
-profiles must include this device, their distinct identifiers, the same App Group, and Increased Memory Limit. Preserve the native
+profiles must include this device, their distinct identifiers, both expanded store App Groups, and Increased Memory Limit. Preserve the native
 Metal backend under `LiveProcess.appex/Frameworks/NativeMetal`; these three libraries do not belong in `RuntimeRoot`.
 
 Set task-local values; do not commit actual device identifiers, container UUIDs, keys, or credentials:
@@ -62,13 +68,16 @@ Set task-local values; do not commit actual device identifiers, container UUIDs,
 ```sh
 LSB_DEVICE='CURRENT_COREDEVICE_IDENTIFIER'
 LSB_USB_UDID='CURRENT_USBMUX_DEVICE_UDID'
-LSB_APP_GROUP='YOUR_REGISTERED_APP_GROUP'
+LSB_TEAM='YOUR_TEAM_ID'
+LSB_TEAM_SUFFIX=".$LSB_TEAM" # Debug; Release defaults to an empty suffix.
+LSB_APP_GROUP_SIDESTORE="group.com.SideStore.SideStore$LSB_TEAM_SUFFIX"
+LSB_APP_GROUP_ALTSTORE="group.com.rileytestut.AltStore$LSB_TEAM_SUFFIX"
 LSB_SSH_USER='YOUR_NATIVE_DEVICE_SSH_USER'
 LSB_SSH_PORT='YOUR_LOCAL_FORWARD_PORT'
 LSB_DEVICE_SSH_PORT='YOUR_NATIVE_DEVICE_SSH_PORT'
 LSB_SSH_DEST="$LSB_SSH_USER@127.0.0.1"
 LSB_RUNTIME_STAGE='/absolute/path/to/completed/stage/RuntimeRoot'
-LSB_DATA_STAGE='/absolute/path/to/reviewed/SimulatorData'
+LSB_DATA_STAGE='/absolute/path/to/reviewed/data' # An older stopped SimulatorData root is also a valid source.
 ```
 
 The native-device SSH service is externally provided. It is separate from an optional sshdog server running inside the simulator.
@@ -84,21 +93,107 @@ connection before transferring. Do not create a second forward if a verified one
 
 ## Discover the actual App Group
 
-The App Group identifier is stable; its filesystem UUID is not. CoreDevice can inspect the installed group without assuming a path:
+The expanded App Group identifiers are stable; their filesystem UUIDs are not. Both targets use these Xcode settings:
+
+```ini
+APP_GROUP_SIDESTORE = group.com.SideStore.SideStore$(DEVELOPMENT_TEAM_SUFFIX)
+APP_GROUP_ALTSTORE = group.com.rileytestut.AltStore$(DEVELOPMENT_TEAM_SUFFIX)
+```
+
+Debug uses `DEVELOPMENT_TEAM_SUFFIX=.$(DEVELOPMENT_TEAM)` and Release uses an empty suffix. The shared C helper reads actual
+signed group entitlements at runtime, including suffix changes made when a store re-signs the app. Check the actual expanded values
+in build settings, both final signed executables, and both embedded profiles. They must agree with the installed store's groups.
+Adjust the shell variables above to those final identifiers before running commands. CoreDevice can inspect
+each entitled group without assuming a physical path:
 
 ```sh
-xcrun devicectl device info files --device "$LSB_DEVICE" --domain-type appGroupDataContainer \
-  --domain-identifier "$LSB_APP_GROUP" --no-recurse
+for LSB_GROUP_ID in "$LSB_APP_GROUP_SIDESTORE" "$LSB_APP_GROUP_ALTSTORE"; do
+  xcrun devicectl device info files --device "$LSB_DEVICE" --domain-type appGroupDataContainer \
+    --domain-identifier "$LSB_GROUP_ID" --no-recurse
+done
 ```
+
+The host considers only groups accessible with its current entitlements. Select in this order:
+
+1. A group containing an existing `LSB` directory.
+2. Otherwise, a group containing the store's `Apps` directory.
+3. Otherwise, the first accessible group, SideStore before AltStore.
+
+SideStore also wins ties within the first two steps. An existing `LSB` directory wins even if the other group has `Apps`.
+Avoid leaving an empty `LSB` marker in the wrong group before choosing the destination. Store files under the selected
+group's `LSB/iOS/23A343` subdirectory; leave the store's `Apps` and other files alone. These markers and the storage path components must
+be actual directories, not symlinks. The selection is fixed for the host process lifetime; quit it before changing the layout.
 
 Obtain the canonical physical group path from the host's `[broker] RuntimeRoot=...` startup record, or inspect container metadata
 through the already authorized native SSH connection. The latter must match `MCMMetadataIdentifier` exactly to the configured
-group; require one result. Do not guess from directory timestamps or copy a UUID from an older run. If metadata access is unavailable,
-use the host/CoreDevice route rather than changing device permissions.
+group identifier; require one result for each identifier being resolved. Do not guess from directory timestamps or copy a UUID
+from an older run. If metadata access is unavailable, use the host/CoreDevice route rather than changing device permissions.
 
-Set `LSB_DEVICE_GROUP` to the discovered directory containing `RuntimeRoot` and `SimulatorData`. List its existing contents and
-available storage. A fresh App Group may initially contain only `Library`. The host migrates `Documents/RuntimeRoot` only when
-the group has no `RuntimeRoot`; it does not merge a later Documents copy into an existing runtime.
+Set `LSB_SELECTED_APP_GROUP` to the selected identifier and `LSB_DEVICE_GROUP` to its discovered physical directory. Set
+`LSB_DEVICE_STORAGE="$LSB_DEVICE_GROUP/LSB/iOS/23A343"`; this is the directory containing `RuntimeRoot` and `data`.
+List both groups' existing contents and available storage before copying.
+Only build 23A343 is selected. The directory hierarchy does not provide a runtime-version picker or permission to substitute another build.
+
+The shared group is intended to retain these files while its owning SideStore or AltStore installation remains installed and
+entitled to that same group. Removing every owner, changing signing teams/group identifiers, or deleting the store's data can
+still lose access or storage. Keep an independent backup; using a store group is not an unconditional uninstall guarantee.
+
+## Move an existing runtime into store storage
+
+The `LSB/iOS/23A343/{RuntimeRoot,data}` build was installed on the iPhone16,2 destination on 2026-10-28. Integrated tests,
+separate guest-shim/helper builds, the signed iPhoneOS build, and local signature checks passed. Both native signed executables
+carry both store groups and Increased Memory Limit. Host UUID: `FE13AAD0-FC4F-3CA3-9CCB-9006030987AA`;
+extension UUID: `49324F7C-32BF-39A9-A045-EEE115AC3EF6`. Entitlement discovery uses `xpc_copy_entitlement_for_self`.
+The subsequent native production-policy build is recorded below.
+After the user restored both roots manually, the four updated guest binaries were staged to inactive paths and activated with
+rollback copies. No cache rebuild or runtime/data migration was performed. No post-copy checksum pass or debugger was used.
+Both phones reached SpringBoard: the iPhone18,2 used retained-cache mode, while the development iPhone16,2 required detachment
+because its native mapping overlaps the guest reservation. That development phone has custom boot arguments and relaxed TXM;
+this result does not imply general iOS 26 detach support. Fish ran df and read display settings from the renamed data root on
+the iPhone16,2 diagnostic run. Initial normal terminal launches reported ENOTTY; subsequent launches worked, and final normal
+helper verification is recorded separately below. Local build, signing, deployment, and test evidence is under ignored
+`tmp/runtime-layout/`; it is not a fresh-setup dependency.
+
+The final iPhone16,2 / iOS 26.1 / 23B50 cold boot used host UUID `BBF2B0D4-D115-3845-839B-F6C69DA3C8E2`,
+extension UUID `402EED62-9D38-3DB1-AA66-A41FDBC00E3F`, and shim UUID `D0EAF2B8-0BB2-36BA-921B-E37BB5EB9168`.
+The native host returned exact `CFBoolean false` for `EffectiveProductionStatusAp`. With no cache-mode overrides, both launchd
+scopes resolved to detach/software mode. The normal terminal helper reached its Fish prompt, spawned df with status 0, and read
+HUD/touch settings with status 0. A screenshot confirms SpringBoard. The initial ENOTTY was not reproduced in this final run;
+no speculative PTY retry was added. Host PID 904 and guest launchd PID 908 belong only to this recorded run, not future setup commands.
+The unchanged guest cache is 23A343, base `0x110000000`, UUID `73ED978A-FD25-3166-A57A-34E21BB7E5B8`.
+Temporary diagnostic helpers were replaced, and no debugger was attached. Bounded native logs contained no AMFI signature
+rejection for these launches. Policy/build/deployment and normal-helper evidence is in ignored `tmp/runtime-policy/results/`.
+
+Stop the old and destination LiveSimBooter hosts and their guests/native helpers before moving code or mutable state. Do not
+uninstall the old app to discover whether a group survives. Preserve the complete old `RuntimeRoot` and matching `SimulatorData`
+outside any group that will be removed; a reviewed File Provider backup or local copy can serve as the source.
+
+After installing the new build and discovering its selected group, prepare this layout manually:
+
+```text
+<selected store App Group>/
+  Apps/                         # Store-owned, if present; do not modify.
+  LSB/
+    iOS/
+      23A343/
+        RuntimeRoot/
+        data/
+```
+
+Copy the existing `RuntimeRoot` into `LSB/iOS/23A343/RuntimeRoot.incoming`, and the old `SimulatorData` contents into sibling
+`data.incoming`. Publish them as `RuntimeRoot` and `data` only after the transfers succeed. This is an explicit rename of the
+mutable root; do not create `data/SimulatorData`. If the source already uses `data`, copy that root instead. Backup wrappers such
+as `LiveSimBooter` or `Sim26` are not runtime search locations: select their two actual roots rather than nesting the wrapper.
+The app neither moves files nor merges runtimes. Keep the original backup until boot, app launch, input, and terminal checks pass.
+
+The directory rename also requires current guest code. Rebuild and sign `usr/lib/libLiveSimSpawn.dylib` and the three
+`usr/libexec` helpers `terminal-fish`, `display-settings`, and `launchctl-control` using the setup guide, then replace them in the
+inactive `RuntimeRoot` before booting. Older copies validate the old `SimulatorData` basename; updating only the native host
+would leave terminal, settings, control, and file-lock compatibility out of sync. The cache does not need rebuilding for this rename.
+
+Review physical paths in generated configuration after the move. Existing guest data is not automatically rewritten for a new
+container UUID. Regenerate supported configuration deliberately and preserve a stopped rollback pair; do not perform a blanket
+replacement in binaries or databases.
 
 ## Finish a portable local payload
 
@@ -131,15 +226,16 @@ A local hard link can attach an already signed immutable cache without consuming
 same filesystem. After linking, do not rewrite, re-sign, chmod, or chown either path: they share an inode. Normal rsync copies the
 file contents to the device. Retain the original signature/layout receipt; this is not a new signing operation.
 
-`RuntimeRoot` and `SimulatorData` are separate transfer roots:
+`RuntimeRoot` and `data` are separate transfer roots:
 
 - `RuntimeRoot` holds code, cache, bundles, resources, and generated job definitions.
-- `SimulatorData` holds mutable databases, preferences, logs, guest control state, and optional SSH configuration. Choose deliberately
+- `data` holds mutable databases, preferences, logs, guest control state, and optional SSH configuration. Choose deliberately
   between a fresh data root, a stopped snapshot from the old setup, and retaining an existing destination data root. Do not merge live
   databases or overwrite destination state as an incidental consequence of copying code.
 
-Regenerate configuration containing physical paths for the new App Group. In particular, [sshdog staging](sshdog.md) uses
-`Tools/stage-sshdog.py --device-group ...` to create its launch job, Fish hook, and key configuration. Supply the intended public
+Regenerate configuration containing physical paths for the new `LSB/iOS/23A343` storage directory. In particular, [sshdog staging](sshdog.md) uses
+`Tools/stage-sshdog.py --device-group "$LSB_DEVICE_GROUP"` to create its launch job, Fish hook, and key configuration. That option
+takes the actual group directory and appends `LSB/iOS/23A343` itself; do not pass `LSB_DEVICE_STORAGE` to it. Supply the intended public
 authorization keys and host key explicitly; preserve their restrictive modes. Review generated plists/JSON/Fish hooks for the old
 container UUID. Do not blanket-replace text inside binaries or databases. Job executable/log paths should remain guest paths except
 where a documented adapter requires a physical host path.
@@ -153,12 +249,14 @@ With the verified USB connection still running, a typical pair of transfers is:
 
 ```sh
 LSB_DEVICE_GROUP='/private/var/mobile/Containers/Shared/AppGroup/DISCOVERED_UUID'
+LSB_DEVICE_STORAGE="$LSB_DEVICE_GROUP/LSB/iOS/23A343"
 LSB_RSYNC_SSH="ssh -p $LSB_SSH_PORT"
+ssh -p "$LSB_SSH_PORT" "$LSB_SSH_DEST" "mkdir -p '$LSB_DEVICE_STORAGE'"
 rsync -rlpt --partial -e "$LSB_RSYNC_SSH" "$LSB_RUNTIME_STAGE/" \
-  "$LSB_SSH_DEST:$LSB_DEVICE_GROUP/RuntimeRoot.incoming/"
+  "$LSB_SSH_DEST:$LSB_DEVICE_STORAGE/RuntimeRoot.incoming/"
 # Only when a reviewed data stage is intended for this destination:
 rsync -rlpt --partial -e "$LSB_RSYNC_SSH" "$LSB_DATA_STAGE/" \
-  "$LSB_SSH_DEST:$LSB_DEVICE_GROUP/SimulatorData.incoming/"
+  "$LSB_SSH_DEST:$LSB_DEVICE_STORAGE/data.incoming/"
 ```
 
 The trailing slash copies each root's contents. Use `--dry-run --itemize-changes` first when destination contents are uncertain.
@@ -170,17 +268,17 @@ After both intended transfers exit successfully, inspect their exit codes, requi
 Files uploaded by a privileged SSH account must be readable by the native app, and mutable data must be writable by that app's
 device account. Preserve private-key permissions. Do not apply a blanket world-writable mode or alter the host app bundle.
 
-Publish with reviewed same-filesystem renames while every affected process is stopped: preserve an existing `RuntimeRoot` under
+Publish within `LSB_DEVICE_STORAGE` with reviewed same-filesystem renames while every affected process is stopped: preserve an existing `RuntimeRoot` under
 a unique rollback name, then rename `RuntimeRoot.incoming` to `RuntimeRoot`. If replacing data, preserve its existing root separately
-and publish the matching inactive data root. There is no atomic transaction spanning both renames; do not launch between them.
+and rename `data.incoming` to `data`. There is no atomic transaction spanning both root renames; do not launch between them.
 If keeping destination data, leave it in place. On a fresh destination with no staged data, let the host create its required data
 directories and copy only explicitly prepared configuration afterward.
 
 ## Boot, register, and retain rollback
 
 Launch `/bin/df` first using [the setup smoke-test command](agent-setup.md#transfer-and-boot). It requires the newly discovered
-`LSB_DEVICE_GROUP`: pass `DEVICECTL_CHILD_SIMULATOR_ROOT="$LSB_DEVICE_GROUP/RuntimeRoot"` and
-`DEVICECTL_CHILD_SIMULATOR_SHARED_RESOURCES_DIRECTORY="$LSB_DEVICE_GROUP/SimulatorData"` to CoreDevice. Direct mode does not inject
+`LSB_DEVICE_STORAGE`: pass `DEVICECTL_CHILD_SIMULATOR_ROOT="$LSB_DEVICE_STORAGE/RuntimeRoot"` and
+`DEVICECTL_CHILD_SIMULATOR_SHARED_RESOURCES_DIRECTORY="$LSB_DEVICE_STORAGE/data"` to CoreDevice. Direct mode does not inject
 those variables, and omitting them can trigger stock libsystem_featureflags' missing-root trap. Graphical mode already supplies them.
 The destination test reproduced that trap without the variables, then printed the filesystem table and exited 0 with them using
 both the previous working host and the latest default-off guard build. The migrated runtime therefore has a passing `df` baseline;

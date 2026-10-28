@@ -12,7 +12,10 @@ to that build; a different iOS 26.x or iOS 27 runtime is not an interchangeable 
 
 There is no in-app runtime installer. Supply the original runtime, signing identity, matching provisioning profiles,
 and device access, then use the tracked setup/build/sign/copy steps. Generated binaries and runtime files stay outside Git.
-[Device migration](docs/migration.md) covers transfer, App Group discovery, and rollback.
+Runtime and mutable state live at `LSB/iOS/23A343/{RuntimeRoot,data}` inside the selected SideStore or AltStore App Group.
+This layout selects the pinned build; there is no runtime-version picker. Both native targets need the same
+two group entitlements. [Device migration](docs/migration.md) covers selection, manual moves from older locations, and rollback;
+there is no automatic migration. Keep the owning store installed and entitled to that group to retain shared storage when uninstalling this app.
 
 ## Running
 
@@ -24,8 +27,8 @@ Silent background audio is optional and disabled by default.
 
 Explicit guest arguments, such as `--launchd-services` or `/bin/df`, retain automatic startup for development tests.
 Guest `launchctl` can manage individual jobs and request a simulator userspace reboot; see [guest control](docs/guest-control.md).
-The default guest handoff retains the native shared cache and redirects workqueue entry through a hardware breakpoint.
-Native-cache detachment remains a diagnostic mode, not the normal setup.
+Production devices retain the native shared cache and redirect workqueue entry through a hardware breakpoint.
+Cache detachment is restricted to devices reporting non-production status; see [handoff policy](docs/runtime-handoff.md).
 
 ## Status and limits
 

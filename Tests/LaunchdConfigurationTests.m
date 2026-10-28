@@ -1,5 +1,8 @@
+#include "../ProcessSupport/RuntimeLayout.h"
+#include "../ProcessSupport/NativeRuntimePolicy.h"
 #import <Foundation/Foundation.h>
 #include "../Host/LaunchdConfiguration.h"
+#include "../Host/NativeProductionStatus.h"
 #import "../Host/DeviceType.h"
 #include "../ProcessSupport/ChildStatus.h"
 #include <assert.h>
@@ -11,6 +14,9 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+static uint32_t nativeProductionStatus = LSB_NATIVE_DEVELOPMENT;
+uint32_t LSBHostNativeProductionStatus(void) { return nativeProductionStatus; }
 
 static void initialize(LSBReceivedMessage *message) {
     memset(message, 0, sizeof(*message));
@@ -162,6 +168,33 @@ static void testLegacyDetachmentMode(LSBReceivedMessage *message, NSString *root
         for (NSString *scope in @[@"Self", @"Child"]) assert([bootstrap[scope][key] isEqualToString:@"0"]);
     }
     dispose(message);
+}
+
+static void testProductionPolicy(LSBReceivedMessage *message, NSString *root, NSString *configPath) {
+    const char *detach[] = {LSB_RETAIN_HOST_CACHE_ENV "=0", NULL};
+    const char *retain[] = {LSB_RETAIN_HOST_CACHE_ENV "=1", NULL};
+    for (uint32_t status = LSB_NATIVE_PRODUCTION_UNKNOWN; status <= LSB_NATIVE_DEVELOPMENT; ++status) {
+        nativeProductionStatus = status;
+        assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, NULL));
+        NSDictionary *bootstrap = readPlist(configPath)[@"Bootstrap"];
+        for (NSString *scope in @[@"Self", @"Child"]) for (NSString *key in @[@LSB_RETAIN_HOST_CACHE_ENV, @LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV])
+            assert([bootstrap[scope][key] isEqual:status == LSB_NATIVE_DEVELOPMENT ? @"0" : @"1"]);
+        dispose(message);
+        NSData *previous = [NSData dataWithContentsOfFile:configPath];
+        int error = LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, detach);
+        if (status == LSB_NATIVE_DEVELOPMENT) { assert(!error); dispose(message); }
+        else {
+            assert(error == EPERM);
+            assertUnchanged(message);
+            assert([[NSData dataWithContentsOfFile:configPath] isEqual:previous]);
+        }
+        assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, retain));
+        bootstrap = readPlist(configPath)[@"Bootstrap"];
+        for (NSString *scope in @[@"Self", @"Child"]) for (NSString *key in @[@LSB_RETAIN_HOST_CACHE_ENV, @LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV])
+            assert([bootstrap[scope][key] isEqual:@"1"]);
+        dispose(message);
+    }
+    nativeProductionStatus = LSB_NATIVE_DEVELOPMENT;
 }
 
 static void testDFMode(LSBReceivedMessage *message, NSString *root, NSString *dataPath, NSString *configPath, const char *const inherited[]) {
@@ -820,11 +853,12 @@ int main(void) {
         char temporary[] = "/tmp/LiveSimBooter-launchd-config.XXXXXX", canonical[PATH_MAX];
         assert(mkdtemp(temporary) && realpath(temporary, canonical));
         NSString *group = [NSString stringWithUTF8String:canonical];
-        NSString *root = [group stringByAppendingPathComponent:@"RuntimeRoot"];
-        NSString *dataPath = [group stringByAppendingPathComponent:@"SimulatorData"];
+        NSString *build = [group stringByAppendingPathComponent:@LSB_STORAGE_BUILD_RELATIVE_PATH];
+        NSString *root = [build stringByAppendingPathComponent:@LSB_RUNTIME_DIRECTORY];
+        NSString *dataPath = [build stringByAppendingPathComponent:@LSB_DATA_DIRECTORY];
         NSString *logPath = [dataPath stringByAppendingPathComponent:@"Library/Logs/LiveSimBooter-launchd.log"];
         NSString *capabilitiesPath = [root stringByAppendingPathComponent:@"Library/Developer/CoreSimulator/DeviceType/capabilities.plist"];
-        assert(!mkdir(root.fileSystemRepresentation, 0700));
+        assert([NSFileManager.defaultManager createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:NULL]);
         assert(![NSFileManager.defaultManager fileExistsAtPath:capabilitiesPath]);
         const char *inherited[] = {"LSB_DEBUG_STOP_BEFORE_HANDOFF=1", "KEEP=value=with=equals", "HOME=/wrong", "PATH=/wrong",
             "XPC_SIMULATOR_LAUNCHD_NAME=wrong", "XPC_SIMULATOR_HOLDING_TANK_HACK=999", "XPC_SIMULATOR_HOLDING_TANK_FD_HACK=7",
@@ -911,10 +945,13 @@ int main(void) {
         assert([[NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL] isEqualToString:@"stdout\nstderr\nagain\n"]);
         testDeviceProfile(message, root, configPath);
         testDFMode(message, root, dataPath, configPath, inherited);
-        testRuntimeBooleanEnvironment(message, root, configPath, "LSB_WORKQUEUE_HARDWARE_BREAKPOINT", YES);
-        testRuntimeBooleanEnvironment(message, root, configPath, "LSB_RETAIN_HOST_CACHE", YES);
+        LSBNativeRuntimePolicy policy;
+        assert(!LSBResolveNativeRuntimePolicy(nativeProductionStatus, NULL, &policy));
+        testRuntimeBooleanEnvironment(message, root, configPath, LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV, policy.hardwareWorkqueue);
+        testRuntimeBooleanEnvironment(message, root, configPath, LSB_RETAIN_HOST_CACHE_ENV, policy.retainHostCache);
         testRuntimeBooleanEnvironment(message, root, configPath, "LSB_TRACE_HANDOFF", NO);
         testLegacyDetachmentMode(message, root, configPath);
+        testProductionPolicy(message, root, configPath);
         testAdditionalJobs(message, root, dataPath, configPath);
 
         // Invalid/oversized plans never publish partial strings or descriptors and do not replace the existing configuration.

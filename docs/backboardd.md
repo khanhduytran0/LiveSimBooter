@@ -127,7 +127,8 @@ Evidence: `activate.log`, `lldb-launchd.txt`, `console-df-fresh.log`, and `lldb-
 
 `--launchd-backboardd` creates an isolated RunAtLoad job from the stock 23A343 `/usr/libexec/backboardd`. The generated plist
 imports the stock job's 21 MachServices entries, uses `KeepAlive = false` and `EnableTransactions = false`, and omits scheduler
-and identity attributes that the broker does not implement. It writes to `SimulatorData/Library/Logs/backboardd.log`.
+and identity attributes that the broker does not implement. It writes to `data/Library/Logs/backboardd.log` under the selected
+group's `LSB/iOS/23A343` directory; the historical trials below used the old `SimulatorData` root name.
 The stock executable's `LC_MAIN` offset is `0xb828`; its UUID is `385892A3-EF4B-362A-BAFF-02FE702C41DD`.
 The current configuration also loads the matching `com.apple.cfprefsd.xpc.daemon` job and atomically enables
 `BKDigitizerVisualizeTouches` in the isolated simulator preferences. See [cfprefsd staging and validation](cfprefsd.md).
@@ -180,7 +181,7 @@ installed Xcode locations. Staging evidence is in `tmp/backboardd/hid-plugin/man
 Each prepared simulator boot supplies `SIMULATOR_BOOT_TIME` to launchd and its children, replacing any inherited stale value.
 It follows CoreSimulator 1171.7's `createLaunchdJobWithBinpref:...` implementation: the current Unix timestamp truncated to
 unsigned integer seconds and formatted with `%lu`. SimulatorHID reads that string as its boot generation and persists it
-with dynamic HID services in `SimulatorData/var/run/SimHIDDynamicServices.plist`. Without it, the first successful built-in
+with dynamic HID services in `data/var/run/SimHIDDynamicServices.plist`. Without it, the first successful built-in
 digitizer creation reached `ScreenTouchService.PurpleMain`, then raised an exception while inserting a nil generation into
 the persistence dictionary. Supplying the normal boot environment addresses this prerequisite; no custom SimulatorHID
 library patch is needed. Evidence: `tmp/metal-native/guest-cfprefsd-indigo.log` and

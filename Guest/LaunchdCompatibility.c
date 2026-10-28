@@ -100,7 +100,7 @@ static int launchdStatePath(const char *path, char translated[PATH_MAX], const c
     if (rootLength == PATH_MAX || suffixLength == PATH_MAX) return ENAMETOOLONG;
     if (dotComponent(root) || dotComponent(suffix)) return EINVAL;
     while (rootLength > 1 && root[rootLength - 1] == '/') --rootLength;
-    // The native host supplies a canonical SimulatorData directory. Reject an accidentally missing container path.
+    // The native host supplies the canonical build's data directory. Reject an accidentally missing container path.
     if (rootLength == 1) return EINVAL;
     size_t replacementLength = sizeof(replacement) - 1;
     if (rootLength + replacementLength + suffixLength >= PATH_MAX) return ENAMETOOLONG;

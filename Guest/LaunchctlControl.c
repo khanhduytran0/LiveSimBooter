@@ -12,6 +12,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "../ProcessSupport/RuntimeLayout.h"
 
 extern char **environ;
 extern unsigned dyld_get_active_platform(void);
@@ -146,9 +147,9 @@ static int openControlDirectory(char path[PATH_MAX]) {
     if (dyld_get_active_platform() != 7 || !root || root[0] != '/' || !data || data[0] != '/' ||
         !realpath(root, canonicalRoot) || stat(canonicalRoot, &metadata) || !S_ISDIR(metadata.st_mode) || !realpath(data, canonical)) return -1;
     char *component = strrchr(canonicalRoot, '/');
-    if (!component || strcmp(component, "/RuntimeRoot")) return -1;
+    if (!component || strcmp(component, "/" LSB_RUNTIME_DIRECTORY)) return -1;
     *component = '\0';
-    int length = snprintf(expected, sizeof(expected), "%s/SimulatorData", canonicalRoot);
+    int length = snprintf(expected, sizeof(expected), "%s/" LSB_DATA_DIRECTORY, canonicalRoot);
     if (length <= 0 || (size_t)length >= sizeof(expected) || strcmp(expected, canonical)) return -1;
     length = snprintf(path, PATH_MAX, "%s/var/run/launchctl-control", canonical);
     if (length <= 0 || length >= PATH_MAX) return -1;
@@ -169,7 +170,7 @@ int main(void) {
     char path[PATH_MAX];
     int directory = openControlDirectory(path);
     if (directory < 0) {
-        fprintf(stderr, "[launchctl-control] requires simulator platform and sibling RuntimeRoot/SimulatorData directories\n");
+        fprintf(stderr, "[launchctl-control] requires simulator platform and sibling " LSB_RUNTIME_DIRECTORY "/" LSB_DATA_DIRECTORY " directories\n");
         return 1;
     }
     int lock = openat(directory, "worker.lock", O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);

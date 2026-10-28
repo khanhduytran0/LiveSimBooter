@@ -1,6 +1,7 @@
 # Shared-memory storage measurements
 
-The current notification and FrontBoard workspace adapters use ordinary files in `SimulatorData/tmp`. Their shared
+The current notification and FrontBoard workspace adapters use ordinary files in `data/tmp` under the selected group's
+`LSB/iOS/23A343` directory. The measurements below predate the rename from `SimulatorData`. The files' shared
 mapping changes can reach storage. The existing App Group native POSIX SHM probe is documented in
 [the launchd notes](launchd.md#frontboard-scene-reconnection-storage); it is not yet the production backing store.
 FrontBoard's `FBW1`/`FBW2` buffers contain workspace connection state, not framebuffer pixels. Display frames use IOSurface.

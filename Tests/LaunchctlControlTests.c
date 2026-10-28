@@ -88,10 +88,41 @@ static void requestTests(void) {
     assert(!unlinkat(directory, "active", 0) && !close(directory) && !rmdir(directoryPath));
 }
 
+static void directoryTests(void) {
+    char temporary[] = "/tmp/LiveSimBooter-launchctl-paths.XXXXXX", base[PATH_MAX];
+    assert(mkdtemp(temporary) && realpath(temporary, base));
+    int parent = open(base, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(parent >= 0 && !mkdirat(parent, "RuntimeRoot", 0700) && !mkdirat(parent, "data", 0700));
+    assert(!mkdirat(parent, "data/var", 0700) && !mkdirat(parent, "data/var/run", 0700));
+    assert(!mkdirat(parent, "SimulatorData", 0700) && !mkdirat(parent, "RuntimeRoot-other", 0700));
+    char root[PATH_MAX], data[PATH_MAX], previous[PATH_MAX], wrongRoot[PATH_MAX], result[PATH_MAX], expected[PATH_MAX];
+    assert(snprintf(root, sizeof(root), "%s/RuntimeRoot", base) < (int)sizeof(root));
+    assert(snprintf(data, sizeof(data), "%s/data", base) < (int)sizeof(data));
+    assert(snprintf(previous, sizeof(previous), "%s/SimulatorData", base) < (int)sizeof(previous));
+    assert(snprintf(wrongRoot, sizeof(wrongRoot), "%s/RuntimeRoot-other", base) < (int)sizeof(wrongRoot));
+    assert(snprintf(expected, sizeof(expected), "%s/data/var/run/launchctl-control", base) < (int)sizeof(expected));
+    assert(!setenv("DYLD_ROOT_PATH", root, 1) && !setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", previous, 1));
+    assert(openControlDirectory(result) == -1); // The previous directory spelling is not an implicit migration.
+    assert(!setenv("DYLD_ROOT_PATH", wrongRoot, 1) && !setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", data, 1));
+    assert(openControlDirectory(result) == -1);
+    assert(!setenv("DYLD_ROOT_PATH", root, 1));
+    int directory = openControlDirectory(result);
+    assert(directory >= 0 && !strcmp(result, expected));
+    struct stat opened, named;
+    assert(!fstat(directory, &opened) && !stat(expected, &named));
+    assert(opened.st_dev == named.st_dev && opened.st_ino == named.st_ino && !close(directory));
+    assert(!unlinkat(parent, "data/var/run/launchctl-control", AT_REMOVEDIR));
+    assert(!unlinkat(parent, "data/var/run", AT_REMOVEDIR) && !unlinkat(parent, "data/var", AT_REMOVEDIR));
+    assert(!unlinkat(parent, "data", AT_REMOVEDIR) && !unlinkat(parent, "RuntimeRoot", AT_REMOVEDIR));
+    assert(!unlinkat(parent, "SimulatorData", AT_REMOVEDIR) && !unlinkat(parent, "RuntimeRoot-other", AT_REMOVEDIR));
+    assert(!close(parent) && !rmdir(base));
+}
+
 int main(void) {
     parseTests();
     deadlineTests();
     requestTests();
+    directoryTests();
     puts("LaunchctlControl tests passed");
     return 0;
 }

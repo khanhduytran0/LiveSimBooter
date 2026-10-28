@@ -24,7 +24,7 @@
 extern char **environ;
 extern int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *, mach_port_t *, uint32_t);
 static unsigned openDescriptorCount(void);
-enum { MalformedPortsCount = 10, MalformedIdentityCount = 12, MalformedRoleCount = 11, MalformedRoleRequestCount = 8,
+enum { MalformedPortsCount = 10, MalformedIdentityCount = 12, MalformedRoleCount = 18, MalformedRoleRequestCount = 24,
        MalformedBootstrapCount = 14 + MalformedPortsCount + MalformedIdentityCount + MalformedRoleCount,
        MalformedKillCount = 14, MalformedAuditCount = 16, MalformedEntitlementCount = 25, PortRoundTripCount = 7,
        MalformedRebootCount = 30, RebootReplyCount = 23 };
@@ -169,16 +169,17 @@ static void testMalformedPorts(const LSBSpawnPlan *plan, int fd, mach_port_t sen
 static void testRoleRequestInjection(const LSBSpawnPlan *plan, int fd, unsigned variant) {
     static const uint32_t kinds[] = { LSB_REQUEST_SPAWN, LSB_REQUEST_EXEC, LSB_REQUEST_CHECKIN,
         LSB_REQUEST_READY, LSB_REQUEST_KILL, LSB_REQUEST_RESOLVE_AUDIT_PID, LSB_REQUEST_COPY_ENTITLEMENTS, LSB_REQUEST_COPY_PROCESS_IDENTITY };
-    assert(variant < sizeof(kinds) / sizeof(kinds[0]));
+    assert(variant < MalformedRoleRequestCount);
+    uint32_t kind = kinds[variant % (sizeof(kinds) / sizeof(kinds[0]))];
     mach_port_t port;
     assert(!LSBTestCopyBrokerPort(&port));
     xpc_object_t pipe = xpc_pipe_create_from_port(port, 0), request = xpc_dictionary_create(NULL, NULL, 0);
     assert(pipe && request);
     xpc_dictionary_set_uint64(request, "version", LSB_TRANSPORT_VERSION);
-    xpc_dictionary_set_uint64(request, "kind", kinds[variant]);
-    xpc_dictionary_set_uint64(request, "request-id", kinds[variant] == LSB_REQUEST_READY ? 77 : 0);
+    xpc_dictionary_set_uint64(request, "kind", kind);
+    xpc_dictionary_set_uint64(request, "request-id", kind == LSB_REQUEST_READY ? 77 : 0);
     xpc_dictionary_set_int64(request, "error", 0);
-    if (kinds[variant] == LSB_REQUEST_SPAWN || kinds[variant] == LSB_REQUEST_EXEC) {
+    if (kind == LSB_REQUEST_SPAWN || kind == LSB_REQUEST_EXEC) {
         xpc_dictionary_set_data(request, "plan", plan, sizeof(*plan));
         xpc_object_t array = xpc_array_create(NULL, 0), descriptor = xpc_fd_create(fd);
         assert(array && descriptor);
@@ -187,18 +188,19 @@ static void testRoleRequestInjection(const LSBSpawnPlan *plan, int fd, unsigned 
         xpc_release(descriptor);
         xpc_release(array);
     }
-    if (kinds[variant] == LSB_REQUEST_KILL) {
+    if (kind == LSB_REQUEST_KILL) {
         xpc_dictionary_set_int64(request, "target-pid", 4242);
         xpc_dictionary_set_int64(request, "signal", 0);
     }
-    if (kinds[variant] == LSB_REQUEST_RESOLVE_AUDIT_PID || kinds[variant] == LSB_REQUEST_COPY_ENTITLEMENTS) {
+    if (kind == LSB_REQUEST_RESOLVE_AUDIT_PID || kind == LSB_REQUEST_COPY_ENTITLEMENTS) {
         audit_token_t audit = {{0, 0, 0, 0, 0, 4242, 0, 1}};
         xpc_dictionary_set_data(request, "target-audit", &audit, sizeof(audit));
     }
-    if (kinds[variant] == LSB_REQUEST_COPY_ENTITLEMENTS) xpc_dictionary_set_uint64(request, "operation", 16);
-    if (kinds[variant] == LSB_REQUEST_COPY_PROCESS_IDENTITY) xpc_dictionary_set_int64(request, "target-pid", 4242);
-    if (variant % 2) xpc_dictionary_set_uint64(request, "bootstrap-version", LSB_BOOTSTRAP_VERSION);
-    else xpc_dictionary_set_uint64(request, "execution-role", LSB_EXECUTION_NATIVE_METAL_PROBE);
+    if (kind == LSB_REQUEST_COPY_ENTITLEMENTS) xpc_dictionary_set_uint64(request, "operation", 16);
+    if (kind == LSB_REQUEST_COPY_PROCESS_IDENTITY) xpc_dictionary_set_int64(request, "target-pid", 4242);
+    if (variant / 8 == 0) xpc_dictionary_set_uint64(request, "bootstrap-version", LSB_BOOTSTRAP_VERSION);
+    else if (variant / 8 == 1) xpc_dictionary_set_uint64(request, "execution-role", LSB_EXECUTION_NATIVE_METAL_PROBE);
+    else xpc_dictionary_set_uint64(request, "native-production-status", LSB_NATIVE_DEVELOPMENT);
     xpc_object_t reply = NULL;
     assert(!xpc_pipe_routine(pipe, request, &reply));
     assert(reply && xpc_dictionary_get_int64(reply, "error") == EPROTO);
@@ -286,6 +288,7 @@ static void registeredPortsClient(const LSBSpawnPlan *plan, const int fds[LSB_MA
         assert(reply.guestPID == (variant % 2 ? variant == 5 ? INT_MAX : 1234 + (int)variant : 4242));
         assert(reply.parentPID == (variant == 6 || variant % 2 ? variant == 1 ? 0 : 4567 : getppid()));
         assert(reply.executionRole == (variant == 6 ? LSB_EXECUTION_NATIVE_METAL_PROBE : LSB_EXECUTION_SIMULATOR));
+        assert(reply.nativeProductionStatus == (variant == 1 ? LSB_NATIVE_DEVELOPMENT : variant == 3 ? LSB_NATIVE_PRODUCTION : LSB_NATIVE_PRODUCTION_UNKNOWN));
         assert(reply.launchdTankPort == (variant == 1 ? second : MACH_PORT_NULL));
         unsigned firstCopies = ports.bootstrapPort == first, secondCopies = ports.bootstrapPort == second;
         firstCopies += reply.launchdTankPort == first;
@@ -1017,6 +1020,7 @@ static int client(void) {
     for (unsigned variant = 0; variant < MalformedBootstrapCount; ++variant) {
         unsigned before = openDescriptorCount();
         assert(LSBTransportCheckIn(&reply, received) == EPROTO);
+        assert(reply.nativeProductionStatus == LSB_NATIVE_PRODUCTION_UNKNOWN);
         assert(reply.statusFD == -1 && reply.wakeFD == -1 && reply.launchdTankPort == MACH_PORT_NULL);
         assert(!reply.ports.count && !reply.ports.registeredPresent && !reply.ports.bootstrapPresent && !reply.ports.bootstrapPort);
         for (unsigned i = 0; i < LSB_MAX_REGISTERED_PORTS; ++i) assert(reply.ports.registered[i] == MACH_PORT_NULL);
@@ -1112,6 +1116,9 @@ static void replyMalformedBootstrap(LSBReceivedMessage *message, const LSBSpawnP
     xpc_object_t reply = xpc_dictionary_create_reply((xpc_object_t)message->object);
     assert(reply);
     xpc_dictionary_set_uint64(reply, "version", LSB_TRANSPORT_VERSION);
+    xpc_dictionary_set_uint64(reply, "bootstrap-version", LSB_BOOTSTRAP_VERSION);
+    xpc_dictionary_set_uint64(reply, "execution-role", LSB_EXECUTION_SIMULATOR);
+    xpc_dictionary_set_uint64(reply, "native-production-status", LSB_NATIVE_PRODUCTION);
     xpc_dictionary_set_uint64(reply, "request-id", 77);
     xpc_dictionary_set_int64(reply, "error", 0);
     xpc_dictionary_set_int64(reply, "pid", 4242);
@@ -1174,6 +1181,16 @@ static void replyMalformedBootstrap(LSBReceivedMessage *message, const LSBSpawnP
                 xpc_dictionary_set_value(reply, "launchd-tank-port", NULL);
                 xpc_dictionary_set_int64(reply, "guest-pid", 4243);
                 break;
+            case 11: xpc_dictionary_set_value(reply, "native-production-status", NULL); break;
+            case 12: xpc_dictionary_set_string(reply, "native-production-status", "2"); break;
+            case 13: xpc_dictionary_set_int64(reply, "native-production-status", LSB_NATIVE_DEVELOPMENT); break;
+            case 14: xpc_dictionary_set_bool(reply, "native-production-status", false); break;
+            case 15: xpc_dictionary_set_uint64(reply, "native-production-status", LSB_NATIVE_DEVELOPMENT + 1); break;
+            case 16: xpc_dictionary_set_uint64(reply, "native-production-status", UINT64_MAX); break;
+            case 17:
+                xpc_dictionary_set_uint64(reply, "bootstrap-version", 1);
+                xpc_dictionary_set_value(reply, "native-production-status", NULL);
+                break;
             default: assert(false);
         }
     }
@@ -1230,7 +1247,8 @@ static void registeredPortsHost(mach_port_t broker, const BootstrapFDs *bootstra
             LSBBootstrapMetadata metadata = {.guestPID = variant == 6 ? 4242 : variant == 5 ? INT_MAX : 1234 + (int)variant,
                 .parentPID = variant == 1 ? 0 : 4567, .ports = &pending.ports,
                 .launchdTankPort = variant == 1 ? pending.ports.bootstrapPort : MACH_PORT_NULL,
-                .executionRole = variant == 6 ? LSB_EXECUTION_NATIVE_METAL_PROBE : LSB_EXECUTION_SIMULATOR};
+                .executionRole = variant == 6 ? LSB_EXECUTION_NATIVE_METAL_PROBE : LSB_EXECUTION_SIMULATOR,
+                .nativeProductionStatus = variant == 1 ? LSB_NATIVE_DEVELOPMENT : variant == 3 ? LSB_NATIVE_PRODUCTION : LSB_NATIVE_PRODUCTION_UNKNOWN};
             assert(!LSBTransportReplyBootstrapWithMetadata(&message, 0, 4242, 80 + variant, "/tmp/RuntimeRoot", &pending.plan,
                                                            pending.fds, bootstrap->status, bootstrap->wake[0], &metadata));
         } else assert(!LSBTransportReplyBootstrapWithPorts(&message, 0, 4242, 80 + variant, "/tmp/RuntimeRoot", &pending.plan,
@@ -1426,7 +1444,7 @@ static int host(const char *executable) {
 }
 
 int main(int argc, char **argv) {
-    _Static_assert(LSB_TRANSPORT_VERSION == 2 && LSB_BOOTSTRAP_VERSION == 1, "reboot changes only the outer transport version");
+    _Static_assert(LSB_TRANSPORT_VERSION == 2 && LSB_BOOTSTRAP_VERSION == 2, "native production status versions bootstrap metadata independently");
     // Bound a failed regression test without adding a signal handler to the production transport.
     alarm(20);
     return argc == 2 && !strcmp(argv[1], "--client") ? client() : host(argv[0]);

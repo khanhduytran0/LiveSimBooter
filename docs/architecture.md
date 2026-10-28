@@ -28,10 +28,17 @@ before handoff. READY acknowledges preparation, not successful guest execution. 
 
 ## Runtime storage and loading
 
-The configured App Group contains sibling `RuntimeRoot` and `SimulatorData` directories. RuntimeRoot holds supplied code
-and resources; SimulatorData holds mutable guest state. Both native targets require matching App Group provisioning.
-The broker resolves the actual container and canonicalizes its path. On first runtime start, an old Documents/RuntimeRoot
-is moved only if the group destination is absent; existing runtimes are not merged or overwritten.
+The selected SideStore or AltStore App Group contains `LSB/iOS/23A343/RuntimeRoot` and `LSB/iOS/23A343/data`.
+RuntimeRoot holds supplied code and resources; data holds mutable guest state. Both native targets require matching
+store-group provisioning. A shared C helper reads actual signed group entitlements before guest handoff, including a suffix
+changed by store re-signing. The host prefers an accessible group containing `LSB`, otherwise one containing `Apps`,
+with SideStore before AltStore for ties or an empty setup. All native consumers share that process-lifetime selection.
+Only the pinned 23A343 runtime is selected; there is no runtime-version picker.
+
+The broker resolves the actual container and canonicalizes the runtime path; the child receives it in the authenticated launch plan.
+Its native service name is `<selected actual store group>.LiveSimBooter.spawn`. There is no automatic storage migration or merge.
+Restore the two roots manually with the host and guests stopped; see [migration](migration.md). Keeping another entitled owner
+of the selected group installed can preserve shared storage when this app is removed, but an independent backup is still needed.
 
 The loader maps `RuntimeRoot/usr/lib/dyld_sim` alongside the selected executable. It accepts thin arm64 images and arm64
 slices of universal files, validates segments and zero-fill, registers embedded signatures using `F_ADDFILESIGS_RETURN`,
@@ -64,12 +71,13 @@ App-owned main-pthread/TSD storage is initialized for the simulator rather than 
 dyld_sim prepares dependencies and returns `start_sim`, which runs the guest's `LC_MAIN` path. Successful handoff never
 returns through native cleanup; unexpected wrapper return uses a raw exit. See [handoff details](runtime-handoff.md).
 
-**The current default retains the native cache.** Native pthread registration cannot simply be replaced by the simulator's
+**Production/unknown devices retain the native cache.** Native pthread registration cannot simply be replaced by the simulator's
 second registration. Explicit guest pthread creation redirects a never-run suspended thread; workqueue entry uses an inherited
 hardware execution breakpoint to reach the simulator entry. The breakpoint remains installed for new and reused workers.
-Native-cache detachment is an opt-in diagnostic with different failure modes. The current behavior and evidence are in
+Only a cached native non-production MobileGestalt result allows detachment; guest environment values cannot grant it.
+The [handoff policy](runtime-handoff.md) describes the authenticated check-in metadata. The current behavior and evidence are in
 [retained-cache workqueue redirection](launchd.md#retained-native-cache-with-hardware-redirection); older detach experiments
-in the handoff notes do not describe the default.
+in the handoff notes are not evidence of production-device support.
 
 The dyld helper callbacks use app-local BSD syscalls, Mach traps, memory/string operations and synchronization support.
 They do not call native libc/pthread against simulator TLS. The bridge targets dyld's needs rather than general host libc:
@@ -100,7 +108,7 @@ Fish tab attaches to launchd's fixed terminal-fish job, which replaces itself wi
 selected termios/ioctl behavior, not a native PTY. Settings uses a fixed guest worker for HUD/touch preferences; background
 audio is an explicit opt-in. See [terminal](fake-pty.md), [display settings](display-settings.md) and [guest control](guest-control.md).
 An accepted guest userspace reboot drains the old processes and creates new services in the same host while preserving
-SimulatorData and tabs; an ordinary exit or crash does not request a restart.
+the data root and tabs; an ordinary exit or crash does not request a restart.
 
 ## Debugging and implementation references
 

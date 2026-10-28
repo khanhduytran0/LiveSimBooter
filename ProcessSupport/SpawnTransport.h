@@ -5,13 +5,14 @@
 #include "SpawnPorts.h"
 #include "PeerProcessIdentity.h"
 #include "GuestCodeSignature.h"
+#include "NativeRuntimePolicy.h"
 #include <mach/mach.h>
 
 #define LSB_BROKER_PORT_ENV "LSB_BROKER_PORT"
 #define LSB_TRANSPORT_VERSION 2
 
 // Bootstrap-only metadata is versioned independently from the outer transport envelope.
-#define LSB_BOOTSTRAP_VERSION 1
+#define LSB_BOOTSTRAP_VERSION 2
 enum LSBExecutionRole { LSB_EXECUTION_SIMULATOR = 0, LSB_EXECUTION_NATIVE_METAL_PROBE = 1, LSB_EXECUTION_NATIVE_METAL_SERVICE = 2 };
 
 enum LSBRequestKind {
@@ -22,6 +23,7 @@ enum LSBRequestKind {
 typedef struct {
     uint64_t requestID;
     uint32_t executionRole;
+    uint32_t nativeProductionStatus; // Authenticated native host classification, never supplied through a guest spawn plan.
     int32_t error, pid, guestPID, parentPID;
     int statusFD, wakeFD;
     mach_port_t launchdTankPort;
@@ -36,6 +38,7 @@ typedef struct {
     mach_port_t launchdTankPort;
     const LSBSpawnPorts *ports;
     uint32_t executionRole; // Chosen by the native broker, never supplied by a guest spawn plan.
+    uint32_t nativeProductionStatus;
 } LSBBootstrapMetadata;
 
 typedef struct {

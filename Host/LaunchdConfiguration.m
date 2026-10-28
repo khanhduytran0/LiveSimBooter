@@ -1,3 +1,6 @@
+#include "../ProcessSupport/RuntimeLayout.h"
+#include "../ProcessSupport/NativeRuntimePolicy.h"
+#include "NativeProductionStatus.h"
 #import <Foundation/Foundation.h>
 #import "DeviceType.h"
 #include <CommonCrypto/CommonDigest.h>
@@ -333,8 +336,8 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
         if (stat(canonical, &status)) return errno;
         if (!S_ISDIR(status.st_mode)) return ENOTDIR;
         NSString *root = [NSFileManager.defaultManager stringWithFileSystemRepresentation:canonical length:strlen(canonical)];
-        NSString *group = root.stringByDeletingLastPathComponent;
-        NSString *dataPath = [group stringByAppendingPathComponent:@"SimulatorData"];
+        NSString *build = root.stringByDeletingLastPathComponent;
+        NSString *dataPath = [build stringByAppendingPathComponent:@LSB_DATA_DIRECTORY];
         NSString *configPath = [dataPath stringByAppendingPathComponent:@"var/run/LiveSimBooter-launchd-bootstrap.plist"];
         NSString *logPath = [dataPath stringByAppendingPathComponent:@"Library/Logs/LiveSimBooter-launchd.log"];
         int selectionError = 0;
@@ -400,16 +403,14 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
                 break; // Match getenv's first occurrence; controlledEnvironment removes all inherited duplicates.
             }
         }
-        for (NSString *key in @[@"LSB_WORKQUEUE_HARDWARE_BREAKPOINT", @"LSB_RETAIN_HOST_CACHE", @"LSB_TRACE_HANDOFF"]) {
-            const char *name = key.UTF8String;
-            size_t length = strlen(name);
-            runtimeEnvironment[key] = [key isEqualToString:@"LSB_TRACE_HANDOFF"] ? @"0" : @"1";
-            for (const char *const *entry = inheritedEnv; entry && *entry; ++entry) {
-                if (strncmp(*entry, name, length) || (*entry)[length] != '=') continue;
-                // The launchd config replaces inherited environment. Keep the first exact boolean in both self and descendants.
-                runtimeEnvironment[key] = !strcmp(*entry + length + 1, "1") ? @"1" : @"0";
-                break;
-            }
+        LSBNativeRuntimePolicy nativePolicy;
+        int policyError = LSBResolveNativeRuntimePolicy(LSBHostNativeProductionStatus(), inheritedEnv, &nativePolicy);
+        if (policyError) return policyError;
+        for (NSString *key in @[@LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV, @LSB_RETAIN_HOST_CACHE_ENV, @"LSB_TRACE_HANDOFF"]) {
+            bool defaultValue = [key isEqualToString:@LSB_RETAIN_HOST_CACHE_ENV] ? nativePolicy.retainHostCache :
+                [key isEqualToString:@LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV] ? nativePolicy.hardwareWorkqueue : false;
+            // launchd replaces inherited environment. Persist the native policy and first exact override in both bootstrap scopes.
+            runtimeEnvironment[key] = LSBRuntimeBooleanEnvironment(inheritedEnv, key.UTF8String, defaultValue) ? @"1" : @"0";
         }
         const char *stopChildren = getenv("LSB_DEBUG_STOP_CHILDREN");
         if (stopChildren && !strcmp(stopChildren, "1")) runtimeEnvironment[@"LSB_DEBUG_STOP_BEFORE_HANDOFF"] = @"1";
@@ -523,8 +524,8 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
         if (!error) error = LSBValidateSpawnPlan(plan);
         int directories[9] = {-1, -1, -1, -1, -1, -1, -1, -1, -1}, fds[3] = {-1, -1, -1};
         NSData *touchPreferences = nil;
-        if (!error && (directories[0] = open(group.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0) error = errno;
-        const char *names[] = {"SimulatorData", "tmp", "var", "run", "Library", "Logs"};
+        if (!error && (directories[0] = open(build.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0) error = errno;
+        const char *names[] = {LSB_DATA_DIRECTORY, "tmp", "var", "run", "Library", "Logs"};
         const unsigned parents[] = {0, 1, 1, 3, 1, 5};
         for (unsigned i = 0; !error && i < 6; ++i) {
             directories[i + 1] = openDirectory(directories[parents[i]], names[i]);

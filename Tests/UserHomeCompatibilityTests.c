@@ -9,7 +9,7 @@
 #include <string.h>
 #include <unistd.h>
 
-static const char dataHome[] = "/private/var/mobile/Containers/Shared/AppGroup/test/SimulatorData";
+static const char dataHome[] = "/private/var/mobile/Containers/Shared/AppGroup/test/LSB/iOS/23A343/data";
 static const char *nativeHome;
 static uid_t nativeUID;
 static int nativeError;

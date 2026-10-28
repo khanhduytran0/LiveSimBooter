@@ -74,8 +74,9 @@ def stage(options):
     if not relative.parts or output.exists():
         raise ValueError("output must be a new staging directory; existing keys/configuration are never overwritten")
     group = PurePosixPath(options.device_group)
-    if not group.is_absolute() or group == PurePosixPath("/") or ".." in group.parts or group.name in {"RuntimeRoot", "SimulatorData"}:
-        raise ValueError("device-group must be the physical App Group directory containing RuntimeRoot and SimulatorData")
+    nested_names = {"LSB", "iOS", "23A343", "RuntimeRoot", "data", "LiveSimBooter", "SimulatorData"}
+    if not group.is_absolute() or group == PurePosixPath("/") or ".." in group.parts or group.name in nested_names:
+        raise ValueError("device-group must be the selected physical store App Group directory, above LSB")
     if not 1 <= options.port <= 32767:
         raise ValueError("sshdog v1.1 uses a signed 16-bit port; choose 1..32767")
     if options.ssh_host and any(character.isspace() or character in "@,[]" for character in options.ssh_host):
@@ -91,8 +92,9 @@ def stage(options):
     subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(binary)], check=True)
     authorized = validate_authorized_keys(options.authorized_keys)
     public = host_public_key(options.host_key)
-    root = group / "RuntimeRoot"
-    data = group / "SimulatorData"
+    storage = group / "LSB/iOS/23A343"
+    root = storage / "RuntimeRoot"
+    data = storage / "data"
     program = "/usr/local/libexec/sshdog"
     log = "/private/var/mobile/Library/Logs/" + LABEL + ".log"
     configuration = {
@@ -109,19 +111,19 @@ def stage(options):
     shutil.copyfile(binary, destination)
     destination.chmod(0o755)
     write_file(output / ("RuntimeRoot/System/Library/LaunchDaemons/" + LABEL + ".plist"), plistlib.dumps(configuration), 0o644)
-    config = output / "SimulatorData/Library/sshdog/config"
+    config = output / "data/Library/sshdog/config"
     config.mkdir(parents=True, mode=0o700)
     write_file(config / "authorized_keys", authorized, 0o600)
     write_file(config / "port", (str(options.port) + "\n").encode(), 0o644)
     write_file(config / "ssh_host_rsa_key", options.host_key.read_bytes(), 0o600)
     write_file(config / "ssh_host_rsa_key.pub", public, 0o644)
-    write_file(output / "SimulatorData/Library/sshdog/xdg/fish/config.fish",
+    write_file(output / "data/Library/sshdog/xdg/fish/config.fish",
                b"status job-control none\nset -g fish_use_posix_spawn 1\n", 0o644)
     if options.ssh_host:
         entry = "[{}]:{} ".format(options.ssh_host, options.port).encode() + public
         write_file(output / "client/known_hosts", entry, 0o644)
     runtime_files = sorted(str(path.relative_to(output / "RuntimeRoot")) for path in (output / "RuntimeRoot").rglob("*") if path.is_file())
-    data_files = sorted(str(path.relative_to(output / "SimulatorData")) for path in (output / "SimulatorData").rglob("*") if path.is_file())
+    data_files = sorted(str(path.relative_to(output / "data")) for path in (output / "data").rglob("*") if path.is_file())
     manifest = {"reference_release": RELEASE, "reference_asset": ASSET, "original_release_sha256": RELEASE_SHA256,
                 "signed_binary_input": str(binary), "signed_binary_input_sha256": input_sha256,
                 "runtime_root": str(root), "data_root": str(data), "job_label": LABEL, "port": options.port,
@@ -136,7 +138,7 @@ def main():
     parser.add_argument("--binary", type=Path, required=True, help="sshdog already signed using Tools/sign-sim-executable.py")
     parser.add_argument("--authorized-keys", type=Path, required=True, help="one or more bare OpenSSH public-key lines")
     parser.add_argument("--host-key", type=Path, required=True, help="persistent, unencrypted RSA PEM host key")
-    parser.add_argument("--device-group", required=True, help="physical App Group directory on the phone")
+    parser.add_argument("--device-group", required=True, help="selected store App Group directory on the phone; storage is its LSB/iOS/23A343 subdirectory")
     parser.add_argument("--output", type=Path, required=True, help="new stage under ignored tmp/")
     parser.add_argument("--port", type=int, default=2223)
     parser.add_argument("--ssh-host", help="optional hostname/address for client/known_hosts; no user@ prefix")

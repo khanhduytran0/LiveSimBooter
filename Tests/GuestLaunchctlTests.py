@@ -18,7 +18,7 @@ class QueueTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="LiveSimBooter-control-")
         self.root = Path(self.temporary.name).resolve()
         (self.root / "RuntimeRoot").mkdir()
-        self.data = self.root / "SimulatorData"
+        self.data = self.root / "data"
         self.queue = self.data / "var/run/launchctl-control"
         self.queue.mkdir(parents=True)
         self.identifier = "a" * 32

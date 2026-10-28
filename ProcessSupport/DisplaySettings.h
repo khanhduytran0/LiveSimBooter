@@ -40,7 +40,7 @@ int LSBDSettingsValidateRequest(const LSBDSettingsRequest *request, const uint8_
 int LSBDSettingsValidateResponse(const LSBDSettingsResponse *response, const LSBDSettingsRequest *request);
 int LSBDSettingsValidateReady(const LSBDSettingsReady *ready);
 void LSBDSettingsResultName(const uint8_t request[16], char output[40]);
-// Opens only an owned, private directory below canonical sibling RuntimeRoot/SimulatorData. Returns errno, not -1.
+// Opens only an owned, private directory below canonical sibling RuntimeRoot/data. Returns errno, not -1.
 int LSBDSettingsOpenDirectory(const char *dataRoot, bool create, int *directory);
 // Exact-size, owned, single-link regular files only. Atomic creation never replaces an existing request/result.
 int LSBDSettingsReadFile(int directory, const char *name, void *bytes, size_t size);

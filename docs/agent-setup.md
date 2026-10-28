@@ -18,7 +18,7 @@ The runtime must include its original `Contents/Resources/update_dyld_sim_shared
 images or a newer runtime are not substitutes for the pinned originals. The cache tool verifies their hashes.
 
 The device needs pairing/Developer Mode and a development signing identity/profile valid for that device. Both the app and
-LiveProcess extension require the same App Group and `com.apple.developer.kernel.increased-memory-limit` in their **profiles
+LiveProcess extension require the same two store App Groups and `com.apple.developer.kernel.increased-memory-limit` in their **profiles
 and signed executables**. A capability written only into the entitlements file is insufficient. Xcode's extension UI may not
 offer Increased Memory Limit; arrange valid provisioning for the extension identifier before installing. This guide does not
 edit a device provisioning database or assume custom profile-validation behavior.
@@ -38,7 +38,9 @@ LSB_SIGNING_IDENTITY='YOUR_40_HEX_CERTIFICATE_SHA1'
 LSB_TEAM='YOUR_TEAM_ID'
 LSB_BUNDLE_ID='your.registered.LiveSimBooter'
 LSB_EXTENSION_ID='your.registered.LiveSimBooter.LiveProcess'
-LSB_APP_GROUP='group.your.registered.LiveSimBooter'
+LSB_TEAM_SUFFIX=".$LSB_TEAM" # Debug; Release defaults to an empty suffix.
+LSB_APP_GROUP_SIDESTORE="group.com.SideStore.SideStore$LSB_TEAM_SUFFIX"
+LSB_APP_GROUP_ALTSTORE="group.com.rileytestut.AltStore$LSB_TEAM_SUFFIX"
 LSB_DEVICE='YOUR_CURRENT_COREDEVICE_IDENTIFIER'
 LSB_CAPABILITIES='/Library/Developer/CoreSimulator/Profiles/DeviceTypes/iPhone 15 Pro Max.simdevicetype/Contents/Resources/capabilities.plist'
 mkdir -p "$LSB_WORK"
@@ -56,10 +58,33 @@ Configure these source settings consistently, using identifiers registered to yo
 | Team and app identifier | Both configurations of the `LiveSimBooter` Xcode target |
 | Team and extension identifier | Both configurations of the `LiveProcess` Xcode target |
 | Extension discovery identifier | `LSB_EXTENSION_IDENTIFIER` in `ProcessSupport/SpawnPlan.h` |
-| Shared App Group | `LSB_APP_GROUP` in `ProcessSupport/SpawnPlan.h` and both `*.entitlements` files |
+| Shared App Groups | `APP_GROUP_SIDESTORE`, `APP_GROUP_ALTSTORE`, and `DEVELOPMENT_TEAM_SUFFIX` Xcode settings; both targets' `*.entitlements` files |
 | Provisioned capabilities | Both targets' signed entitlements and embedded provisioning profiles |
 
-`LSB_BROKER_SERVICE` derives from the App Group. Do not globally override `PRODUCT_BUNDLE_IDENTIFIER` on an xcodebuild command:
+The store group build settings are:
+
+```ini
+APP_GROUP_SIDESTORE = group.com.SideStore.SideStore$(DEVELOPMENT_TEAM_SUFFIX)
+APP_GROUP_ALTSTORE = group.com.rileytestut.AltStore$(DEVELOPMENT_TEAM_SUFFIX)
+```
+
+Debug sets `DEVELOPMENT_TEAM_SUFFIX=.$(DEVELOPMENT_TEAM)`; Release leaves it empty, matching LiveContainer's store-signing setup.
+Use the exact expanded identifiers authorized by the installed store and both native targets' profiles; the suffix must not duplicate
+a dot or team ID. The runtime reads the actual signed `com.apple.security.application-groups` entitlement through a shared C helper,
+so a store's re-signing step can change the suffix without leaving an Info.plist value stale. Confirm the final signed groups on both
+the app and extension, along with their profiles. Merely matching a store's name grants no
+container access. Keep that store installed with access to the selected group if its ownership is intended to preserve runtime
+storage across uninstalling LiveSimBooter; this is not an independent backup or a guarantee after removing all group owners.
+
+The host selects an accessible group containing an `LSB` directory first, otherwise one containing the store's `Apps`
+directory. SideStore precedes AltStore when both qualify or neither contains either directory. It stores the two roots at
+`<selected group>/LSB/iOS/23A343/RuntimeRoot` and `<selected group>/LSB/iOS/23A343/data`. Only the pinned 23A343 build is selected;
+there is no runtime-version picker. There is no automatic move from Documents or an older group: follow the
+[manual move](migration.md#move-an-existing-runtime-into-store-storage), including renaming old `SimulatorData` to `data`, before booting.
+The native broker uses `<selected actual store group>.LiveSimBooter.spawn`; the C child tries its entitled store groups and receives
+the selected runtime path from the broker.
+
+Do not globally override `PRODUCT_BUNDLE_IDENTIFIER` on an xcodebuild command:
 the enclosing app and extension need different identifiers. Internal guest job labels containing `com.kdt.LiveSimBooter`
 are protocol labels, not the app's signing identity; do not blanket-replace them. Rebuild host, extension, and shim together
 after changing shared constants. No personal certificate hash, device name, unlock code, or container UUID belongs in a commit.
@@ -299,7 +324,7 @@ and app resources together. Copying only the cache does not supply these assets.
 
 The stager preserves regular-file modes and contained symlinks, but does not recreate empty directories, directory ownership/modes,
 or extended attributes. The readable stock `private/var` tree contains empty seed directories rather than resources; its
-`db/modelmanagerd` directory was not readable during inspection. Mutable guest state belongs in the separate `SimulatorData` root.
+`db/modelmanagerd` directory was not readable during inspection. Mutable guest state belongs in the separate `data` root.
 Wait for a successful exit and `stage-manifest.json` before finalizing or transferring: app registration JSON and symlinks are
 published at the end. The tool does not resume a partially completed output directory.
 
@@ -358,15 +383,15 @@ codesign -d --entitlements :- "$LSB_STAGED_APP/PlugIns/LiveProcess.appex"
 ```
 
 Check both embedded profiles as well, using `security cms -D -i .../embedded.mobileprovision`; their team, app identifiers,
-App Group, device authorization, development debugging permission, and requested memory capability must match the signatures.
+both expanded App Groups, device authorization, development debugging permission, and requested memory capability must match the signatures.
 Do not re-sign the extension with the app's identifier. Native backend libraries receive no application entitlements.
 The backend packaging step is required for graphics and is not an automatic Xcode build phase.
 See [NativeMetal/README.md](../NativeMetal/README.md) for the host/guest library distinction.
 
 Keep the experimental native stack-exclusion segment disabled for the baseline package. On the destination iPhone 17, that
 wide variant still failed the simulator-cache reservation with `mmap` returning `EACCES`, even after releasing the reservation.
-`LSB_ENABLE_NATIVE_STACK_RESERVATION=NO` is the default; the wide reservation requires explicit opt-in. The current baseline
-retains the native cache and redirects its registered workqueue entry through the guest's hardware-breakpoint bridge.
+`LSB_ENABLE_NATIVE_STACK_RESERVATION=NO` is the default; the wide reservation requires explicit opt-in. Production/unknown devices
+retain the native cache and redirect its registered workqueue entry through the guest's hardware-breakpoint bridge.
 Rebuild both native app and guest shim for these defaults. On the iOS 27 phone, this passed dispatch workloads and launchd
 spawning df without LLDB, then reached backboardd framebuffer presentation. After the cache/helper metadata-name patch,
 lsd started and the user confirmed a home screen with app icons. Restoring the omitted SimulatorHID plugin restored input,
@@ -385,18 +410,19 @@ Install the staged app using the current device identifier, with the phone unloc
 xcrun devicectl device install app --device "$LSB_DEVICE" "$LSB_STAGED_APP" --json-output "$LSB_WORK/install.json"
 ```
 
-For a **fresh App Group without RuntimeRoot**, copy through the app's data container and let the first runtime start move it:
+Discover both entitled groups and select the destination using the [storage selection rules](migration.md#discover-the-actual-app-group).
+Set `LSB_SELECTED_APP_GROUP` to its expanded identifier. For a **fresh storage directory**, copy directly into that group:
 
 ```sh
 xcrun devicectl device copy to --device "$LSB_DEVICE" --source "$LSB_WORK/runtime/RuntimeRoot" \
-  --destination Documents/RuntimeRoot --domain-type appDataContainer --domain-identifier "$LSB_BUNDLE_ID" \
+  --destination LSB/iOS/23A343/RuntimeRoot --domain-type appGroupDataContainer --domain-identifier "$LSB_SELECTED_APP_GROUP" \
   --timeout 3600 --json-output "$LSB_WORK/runtime-copy.json"
 ```
 
-This migration happens only if the group's RuntimeRoot does not already exist. It never merges a Documents copy into an existing
-group runtime. For an existing setup, stop the host and all guests first, discover the current App Group container, preserve its
-active RuntimeRoot, and publish the replacement there. Current CoreDevice also exposes `appGroupDataContainer`; check its domain
-identifier for your installed group. Avoid memorized UUIDs, and preserve sibling `SimulatorData`, which contains mutable guest state.
+Prepare the `LSB/iOS/23A343` parent directories if the transfer tool requires them. The app does not migrate Documents or an old group.
+For an existing setup, stop the host and all guests first, preserve the active runtime, and publish into the selected group's
+`LSB/iOS/23A343` directory using the inactive-transfer workflow below. Avoid memorized UUIDs and preserve sibling `data`,
+which contains mutable guest state. Do not place runtime files in the store's `Apps` directory.
 
 If native SSH is already available, an incremental inactive transfer can use `rsync -rlp --partial` over the configured Wi-Fi
 or loopback-only USB SSH connection. Do not add `--delete` or `--checksum` to a partial transfer. Keep the source and destination
@@ -404,28 +430,31 @@ trailing-slash semantics explicit, activate only after the command succeeds, and
 require a post-copy checksum pass; local patch/signing validation is still required. SSH setup itself is outside this repository.
 
 First discover the destination's canonical App Group directory as described in [migration](migration.md#discover-the-actual-app-group),
-then set `LSB_DEVICE_GROUP` to that actual path. Direct executable mode does not inject the two simulator root variables that
-graphical launchd mode supplies. Pass them explicitly for the small-executable smoke test; otherwise stock libsystem_featureflags
+then set `LSB_DEVICE_GROUP` to that actual path and `LSB_DEVICE_STORAGE` to its `LSB/iOS/23A343` subdirectory. Direct executable mode
+does not inject the two simulator root variables that graphical launchd mode supplies. Pass them explicitly for the small-executable smoke test; otherwise stock libsystem_featureflags
 can trap because `SIMULATOR_ROOT` is absent:
 
 ```sh
 LSB_DEVICE_GROUP='/private/var/mobile/Containers/Shared/AppGroup/YOUR_DISCOVERED_UUID'
-DEVICECTL_CHILD_SIMULATOR_ROOT="$LSB_DEVICE_GROUP/RuntimeRoot" \
-DEVICECTL_CHILD_SIMULATOR_SHARED_RESOURCES_DIRECTORY="$LSB_DEVICE_GROUP/SimulatorData" \
+LSB_DEVICE_STORAGE="$LSB_DEVICE_GROUP/LSB/iOS/23A343"
+DEVICECTL_CHILD_SIMULATOR_ROOT="$LSB_DEVICE_STORAGE/RuntimeRoot" \
+DEVICECTL_CHILD_SIMULATOR_SHARED_RESOURCES_DIRECTORY="$LSB_DEVICE_STORAGE/data" \
 xcrun devicectl device process launch --device "$LSB_DEVICE" --terminate-existing --console \
   --json-output "$LSB_WORK/df-launch.json" -- "$LSB_BUNDLE_ID" /bin/df > "$LSB_WORK/df-console.log" 2>&1
 ```
 
-On the destination iPhone 17, both the previous working host and the latest default-off guard build printed the filesystem table
+In the earlier iPhone 17 migration, both the previous working host and the then-latest default-off guard build printed the filesystem table
 and reported `df` exit status 0 with these two variables supplied. Omitting them reproduced the missing-root feature-flags trap.
-This confirms the migrated direct-executable baseline; normal graphical startup still needs independent verification.
+Repeat that check after restoring files to the selected store group; copy success does not establish guest execution.
 
 On the tested iOS 27/24A435 device, removing the native cache caused a code-signing fault when a kernel workqueue entered
 the previously registered native `start_wqthread`. Retaining the native cache with hardware redirection passed real workqueue
-tasks and launchd spawning df without LLDB and is now the default. Omitted `LSB_RETAIN_HOST_CACHE` and
-`LSB_WORKQUEUE_HARDWARE_BREAKPOINT` settings both mean enabled; launchd propagates them to descendants. For an explicit legacy
-diagnostic only, set **both** `DEVICECTL_CHILD_LSB_RETAIN_HOST_CACHE=0` and
-`DEVICECTL_CHILD_LSB_WORKQUEUE_HARDWARE_BREAKPOINT=0`. Set `DEVICECTL_CHILD_LSB_DEBUG_STOP_CHILDREN=0` and
+tasks and launchd spawning df without LLDB. The native host now caches MobileGestalt `EffectiveProductionStatusAp` and sends
+it through authenticated child check-in. Only an exact Boolean false enables development cache detachment; production/unknown
+keeps retention and hardware bridging, and rejects an explicit detach request. The tested iPhone 15 has custom boot arguments
+and relaxed TXM enforcement; its detach success is not evidence that stock iOS 26 permits this. Developer Mode alone is not
+this status. Explicit `LSB_RETAIN_HOST_CACHE=1` remains available on a development device. See [handoff policy](runtime-handoff.md).
+Set `DEVICECTL_CHILD_LSB_DEBUG_STOP_CHILDREN=0` and
 `DEVICECTL_CHILD_LSB_DEBUG_STOP_BEFORE_HANDOFF=0` for an unattended test. The handoff rejects a guest cache
 reservation overlapping the current native cache; do not assume a historical ASLR address. Keeping the existing native
 mapping does not copy its whole cache into each process. See [retained-cache evidence](launchd.md#retained-native-cache-with-hardware-redirection).
@@ -474,14 +503,15 @@ After the worker starts, configure your actual SSH endpoint and group path, then
 LSB_SSH_DEST='YOUR_SSH_USER@YOUR_DEVICE_HOST'
 LSB_SSH_PORT='YOUR_SSH_PORT'
 LSB_DEVICE_GROUP='/private/var/mobile/Containers/Shared/AppGroup/YOUR_DISCOVERED_UUID'
+LSB_DEVICE_STORAGE="$LSB_DEVICE_GROUP/LSB/iOS/23A343"
 python3 Tools/guest-launchctl.py --host "$LSB_SSH_DEST" --port "$LSB_SSH_PORT" \
-  --data-root "$LSB_DEVICE_GROUP/SimulatorData" --output-dir "$LSB_WORK/guest-control" -- print user/501
+  --data-root "$LSB_DEVICE_STORAGE/data" --output-dir "$LSB_WORK/guest-control" -- print user/501
 python3 Tools/guest-launchctl.py --host "$LSB_SSH_DEST" --port "$LSB_SSH_PORT" \
-  --data-root "$LSB_DEVICE_GROUP/SimulatorData" --output-dir "$LSB_WORK/guest-control" -- bootstrap user/501 \
-  "$LSB_DEVICE_GROUP/RuntimeRoot/usr/share/LiveSimBooter/app-registration.plist"
+  --data-root "$LSB_DEVICE_STORAGE/data" --output-dir "$LSB_WORK/guest-control" -- bootstrap user/501 \
+  "$LSB_DEVICE_STORAGE/RuntimeRoot/usr/share/LiveSimBooter/app-registration.plist"
 ```
 
-Collect `SimulatorData/Library/Logs/com.kdt.LiveSimBooter.app-registration.log` and its exit status. Do not resubmit an uncertain
+Collect `data/Library/Logs/com.kdt.LiveSimBooter.app-registration.log` and its exit status. Do not resubmit an uncertain
 launchctl operation: retrieve its original request ID as described in [guest-control.md](guest-control.md).
 
 ## Verify and record the result

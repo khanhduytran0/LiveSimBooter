@@ -3,6 +3,8 @@
 Start with [agent-assisted setup](agent-setup.md) for a fresh checkout: pinned iOS 26.0/23A343 inputs, tracked staging tools,
 local signing configuration, native packaging, transfer, and device verification. Repository working rules are in [AGENTS.md](../AGENTS.md).
 Use [the device migration runbook](migration.md) for USB transfer, App Group discovery, separate runtime/data roots, and rollback.
+Current storage is `<selected store App Group>/LSB/iOS/23A343/{RuntimeRoot,data}`. Older dated experiments may call the mutable
+root `SimulatorData` or place roots directly inside a group or Documents; those paths are historical, not current copy destinations.
 
 These notes record experiments since 2026-10-25. The tested 23A343 guest reaches SpringBoard with app icons and opens
 Contacts on iPhone18,2 / iOS 27.0 build 24A435. Touches, the simulator keyboard, the launchd-owned Fish terminal, native Metal

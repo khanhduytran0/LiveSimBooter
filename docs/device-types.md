@@ -3,7 +3,7 @@
 The native **Settings → Simulator Device** picker selects a fixed device profile. Selecting a row is a draft; **Apply**
 commits it. Before Start, Apply saves the selection for the next boot. During a graphical session, Apply closes its running
 guest apps, drains the host's owned guest and native-helper processes, installs the selected capabilities, and starts a fresh
-simulator session. `SimulatorData` is preserved. The native IOSurface, Fish, and Settings tabs remain in place.
+simulator session. The `data` root is preserved. The native IOSurface, Fish, and Settings tabs remain in place.
 
 The default remains **iPhone 15 Pro Max**. The simulated device is independent of the physical host iPhone.
 

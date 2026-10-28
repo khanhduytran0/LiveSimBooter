@@ -5,6 +5,7 @@
 #include "NativeProbeLoader.h"
 #include "ExecutablePath.h"
 #include "ProcessDisplayName.h"
+#include "NativeRuntimePolicy.h"
 #include "../NativeMetal/Backend.h"
 #include <errno.h>
 #include <dlfcn.h>
@@ -147,6 +148,11 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     // Only the authenticated broker bootstrap can select this role; no environment value or executable path is consulted.
     if (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_PROBE) return runNativeProbe(error);
     if (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_SERVICE) return runNativeMetalService(error, planApplied);
+    const char *policyEnvironment[LSB_MAX_VECTOR + 1];
+    for (unsigned index = 0; index < launch.plan.envc; ++index) policyEnvironment[index] = launch.plan.strings + launch.plan.envp[index];
+    policyEnvironment[launch.plan.envc] = NULL;
+    LSBNativeRuntimePolicy nativePolicy;
+    if (!error) error = LSBResolveNativeRuntimePolicy(launch.nativeProductionStatus, policyEnvironment, &nativePolicy);
     char executablePath[PATH_MAX], dyldPath[PATH_MAX], insertLibrary[PATH_MAX + 32], brokerEnvironment[64], detail[1024] = {0};
     char capabilitiesEnvironment[PATH_MAX + sizeof("SIMULATOR_CAPABILITIES=")];
     char statusEnvironment[64], wakeEnvironment[64];
@@ -212,7 +218,7 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
         closeStatus();
         fprintf(stderr, "[LiveProcess] Native worker appeared before handoff: %s\n", strerror(error)); return 1;
     }
-    const char *arguments[LSB_MAX_VECTOR + 1], *environment[LSB_MAX_VECTOR + 13];
+    const char *arguments[LSB_MAX_VECTOR + 1], *environment[LSB_MAX_VECTOR + 15];
     for (unsigned i = 0; i < launch.plan.argc; ++i) arguments[i] = launch.plan.strings + launch.plan.argv[i];
     arguments[launch.plan.argc] = NULL;
     unsigned count = 0;
@@ -254,6 +260,14 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     environment[count++] = guestPIDEnvironment;
     environment[count++] = parentPIDEnvironment;
     environment[count] = NULL;
+    // Direct probes and children with a replacement environment also need the native policy before simulator initialization.
+    int policyError = LSBAppendNativeRuntimePolicy(environment, &count, sizeof(environment) / sizeof(*environment), nativePolicy);
+    if (policyError) {
+        mach_port_deallocate(mach_task_self(), brokerPort);
+        closeStatus();
+        fprintf(stderr, "[LiveProcess] Could not apply native runtime defaults: %s\n", strerror(policyError));
+        return 1;
+    }
     if (LSBTraceHandoffRequested(environment))
         fprintf(stderr, "[LiveProcess] pid=%d entering %s with %u arguments\n", getpid(), executablePath, launch.plan.argc);
     if (stopBeforeHandoff) {

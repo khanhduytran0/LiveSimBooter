@@ -34,9 +34,9 @@ xcrun devicectl device process launch --device 00008130-00021D122680011C --termi
   -- com.kdt.LiveSimBooter /bin/spawn-probe --repeat 2 --verify-statuses
 ```
 
-The launchd helper sets `TERM=xterm-256color`, `HOME` and `CFFIXED_USER_HOME` to the owned `SimulatorData` directory, changes
+The launchd helper sets `TERM=xterm-256color`, `HOME` and `CFFIXED_USER_HOME` to the owned `data` directory, changes
 into that directory, and uses the physical RuntimeRoot `bin`, `usr/bin`, `usr/sbin` and `sbin` directories in `PATH`. It checks
-the simulator platform, attached terminal descriptors and canonical sibling RuntimeRoot/SimulatorData paths before SETEXEC.
+the simulator platform, attached terminal descriptors and canonical sibling `RuntimeRoot`/`data` paths under `LSB/iOS/23A343` before SETEXEC.
 The explicit `--terminal` diagnostic retains its earlier `RuntimeRoot/home/mobile` home and `bin:usr/bin` path setup.
 Explicit shell arguments choose their own job-control policy; the provided Fish arguments disable it. This is not a general
 `chroot` implementation. The loader leaves `DYLD_PRINT_*` diagnostics off unless supplied explicitly.

@@ -1,4 +1,5 @@
 #include "../Host/SessionControlQueue.h"
+#include "../ProcessSupport/RuntimeLayout.h"
 
 #include <assert.h>
 #include <dirent.h>
@@ -14,7 +15,7 @@
 #include <unistd.h>
 
 typedef struct {
-    char base[PATH_MAX], data[PATH_MAX], queue[PATH_MAX];
+    char container[PATH_MAX], base[PATH_MAX], data[PATH_MAX], queue[PATH_MAX];
     int root, directory;
 } Fixture;
 
@@ -44,14 +45,26 @@ static Fixture fixture(bool queue) {
     Fixture value = {.root = -1, .directory = -1};
     char temporary[] = "/tmp/lsb-control-queue.XXXXXX";
     assert(mkdtemp(temporary));
-    assert(realpath(temporary, value.base));
-    path(value.data, value.base, "SimulatorData");
+    assert(realpath(temporary, value.container));
+    path(value.base, value.container, LSB_STORAGE_BUILD_RELATIVE_PATH);
+    int parent = open(value.container, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    assert(parent >= 0);
+    const char *components[] = {LSB_STORAGE_DIRECTORY, LSB_RUNTIME_PLATFORM, LSB_RUNTIME_BUILD};
+    for (unsigned index = 0; index < sizeof(components) / sizeof(*components); ++index) {
+        assert(!mkdirat(parent, components[index], 0700));
+        int next = openat(parent, components[index], O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        assert(next >= 0);
+        close(parent);
+        parent = next;
+    }
+    close(parent);
+    path(value.data, value.base, LSB_DATA_DIRECTORY);
     path(value.queue, value.data, "var/run/launchctl-control");
     value.root = open(value.base, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
     assert(value.root >= 0);
     if (queue) {
-        assert(!mkdirat(value.root, "SimulatorData", 0700));
-        int data = openat(value.root, "SimulatorData", O_RDONLY | O_DIRECTORY);
+        assert(!mkdirat(value.root, LSB_DATA_DIRECTORY, 0700));
+        int data = openat(value.root, LSB_DATA_DIRECTORY, O_RDONLY | O_DIRECTORY);
         assert(data >= 0 && !mkdirat(data, "var", 0700));
         int var = openat(data, "var", O_RDONLY | O_DIRECTORY);
         assert(var >= 0 && !mkdirat(var, "run", 0700));
@@ -67,7 +80,7 @@ static Fixture fixture(bool queue) {
 static void finish(Fixture *value) {
     if (value->directory >= 0) close(value->directory);
     close(value->root);
-    removeDirectory(AT_FDCWD, value->base);
+    removeDirectory(AT_FDCWD, value->container);
 }
 
 static void writeFile(int directory, const char *name, const void *bytes, size_t size) {
@@ -126,17 +139,17 @@ static void makeClientLock(int directory) {
 static void testMissingAndValidation(void) {
     Fixture value = fixture(false);
     assert(!quarantine(&value));
-    assert(!exists(value.root, "SimulatorData"));
-    assert(!mkdirat(value.root, "SimulatorData", 0700));
+    assert(!exists(value.root, LSB_DATA_DIRECTORY));
+    assert(!mkdirat(value.root, LSB_DATA_DIRECTORY, 0700));
     assert(!quarantine(&value));
-    assert(!exists(value.root, "SimulatorData/var"));
-    assert(!mkdirat(value.root, "SimulatorData/var", 0700));
+    assert(!exists(value.root, LSB_DATA_DIRECTORY "/var"));
+    assert(!mkdirat(value.root, LSB_DATA_DIRECTORY "/var", 0700));
     assert(!quarantine(&value));
-    assert(!exists(value.root, "SimulatorData/var/run"));
-    assert(!mkdirat(value.root, "SimulatorData/var/run", 0700));
+    assert(!exists(value.root, LSB_DATA_DIRECTORY "/var/run"));
+    assert(!mkdirat(value.root, LSB_DATA_DIRECTORY "/var/run", 0700));
     assert(!quarantine(&value));
-    assert(!exists(value.root, "SimulatorData/var/run/launchctl-control"));
-    const char *invalid[] = {NULL, "", "/", "SimulatorData", "/tmp/SimulatorData/", "/tmp/SimulatorData-other", value.base};
+    assert(!exists(value.root, LSB_DATA_DIRECTORY "/var/run/launchctl-control"));
+    const char *invalid[] = {NULL, "", "/", LSB_DATA_DIRECTORY, "/tmp/" LSB_DATA_DIRECTORY "/", "/tmp/" LSB_DATA_DIRECTORY "-other", value.base};
     for (unsigned i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
         errno = ENOSPC;
         assert(LSBQuarantineSessionControlQueue(invalid[i]) == EINVAL && errno == ENOSPC);
@@ -144,7 +157,7 @@ static void testMissingAndValidation(void) {
     char alias[PATH_MAX];
     path(alias, value.base, "alias");
     assert(!symlink(value.base, alias));
-    path(alias, value.base, "alias/SimulatorData");
+    path(alias, value.base, "alias/" LSB_DATA_DIRECTORY);
     assert(LSBQuarantineSessionControlQueue(alias) == EINVAL);
     finish(&value);
 }

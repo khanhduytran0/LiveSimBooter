@@ -1,3 +1,4 @@
+#include "../ProcessSupport/RuntimeLayout.h"
 #import <Foundation/Foundation.h>
 #import "../Host/GuestDisplaySettings.h"
 #include "../ProcessSupport/DisplaySettings.h"
@@ -37,9 +38,10 @@ int main(void) {
         char base[] = "/tmp/LiveSimBooter-settings-model.XXXXXX";
         assert(mkdtemp(base));
         NSString *group = [[NSString stringWithUTF8String:base] stringByResolvingSymlinksInPath];
-        NSString *data = [group stringByAppendingPathComponent:@"SimulatorData"];
-        assert(!mkdir(data.fileSystemRepresentation, 0700));
-        assert(!mkdir([group stringByAppendingPathComponent:@"RuntimeRoot"].fileSystemRepresentation, 0700));
+        NSString *build = [group stringByAppendingPathComponent:@LSB_STORAGE_BUILD_RELATIVE_PATH];
+        NSString *data = [build stringByAppendingPathComponent:@LSB_DATA_DIRECTORY];
+        assert([NSFileManager.defaultManager createDirectoryAtPath:data withIntermediateDirectories:YES attributes:nil error:NULL]);
+        assert(!mkdir([build stringByAppendingPathComponent:@LSB_RUNTIME_DIRECTORY].fileSystemRepresentation, 0700));
         LSBGuestDisplaySettings *model = [[LSBGuestDisplaySettings alloc] initWithDataRoot:[NSURL fileURLWithPath:data] timeout:0.15];
         assert(model.hudMode == -1 && model.touches == -1 && !model.pending && !model.outcomeUnknown);
         [model refresh]; finished(model);

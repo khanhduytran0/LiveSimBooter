@@ -1,4 +1,5 @@
 #include "DisplaySettings.h"
+#include "RuntimeLayout.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -81,8 +82,8 @@ int LSBDSettingsOpenDirectory(const char *dataRoot, bool create, int *directory)
     if (!dataRoot || dataRoot[0] != '/') return EINVAL;
     if (!realpath(dataRoot, canonical)) return errno;
     char *leaf = strrchr(canonical, '/');
-    if (!leaf || strcmp(leaf, "/SimulatorData")) return EINVAL;
-    int length = snprintf(sibling, sizeof(sibling), "%.*s/RuntimeRoot", (int)(leaf - canonical), canonical);
+    if (!leaf || strcmp(leaf, "/" LSB_DATA_DIRECTORY)) return EINVAL;
+    int length = snprintf(sibling, sizeof(sibling), "%.*s/" LSB_RUNTIME_DIRECTORY, (int)(leaf - canonical), canonical);
     if (length <= 0 || (size_t)length >= sizeof(sibling)) return ENAMETOOLONG;
     int fd = open(sibling, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return errno;

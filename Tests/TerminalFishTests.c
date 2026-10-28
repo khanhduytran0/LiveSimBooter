@@ -46,7 +46,7 @@ int main(void) {
     char temporary[] = "/tmp/LiveSimBooter-terminal-fish.XXXXXX", base[PATH_MAX], cwd[PATH_MAX];
     assert(getcwd(cwd, sizeof(cwd)) && mkdtemp(temporary) && realpath(temporary, base));
     assert(snprintf(expectedRoot, sizeof(expectedRoot), "%s/RuntimeRoot", base) > 0);
-    assert(snprintf(expectedData, sizeof(expectedData), "%s/SimulatorData", base) > 0);
+    assert(snprintf(expectedData, sizeof(expectedData), "%s/data", base) > 0);
     assert(!mkdir(expectedRoot, 0700) && !mkdir(expectedData, 0700));
     assert(!setenv("DYLD_ROOT_PATH", expectedRoot, 1) && !setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", expectedData, 1));
     assert(!setenv(LSB_FAKE_PTY_ENV, "/test/attached-terminal", 1));
@@ -61,6 +61,10 @@ int main(void) {
     assert(!setenv(LSB_FAKE_PTY_ENV, "/test/attached-terminal", 1));
     assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", base, 1));
     assert(terminalFishMain() == 1 && !replacementCalls);
+    char previousData[PATH_MAX];
+    assert(snprintf(previousData, sizeof(previousData), "%s/SimulatorData", base) > 0 && !mkdir(previousData, 0700));
+    assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", previousData, 1));
+    assert(terminalFishMain() == 1 && !replacementCalls && !rmdir(previousData));
     assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", expectedData, 1));
     assert(terminalFishMain() == 127 && replacementCalls == 1);
     assert(!chdir(cwd) && !rmdir(expectedData) && !rmdir(expectedRoot) && !rmdir(base));

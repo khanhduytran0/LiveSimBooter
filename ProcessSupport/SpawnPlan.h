@@ -5,8 +5,6 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#define LSB_APP_GROUP "group.com.kdt.LiveSimBooter"
-#define LSB_BROKER_SERVICE LSB_APP_GROUP ".spawn"
 #define LSB_EXTENSION_IDENTIFIER "com.kdt.LiveSimBooter.LiveProcess"
 #define LSB_PLAN_VERSION 1
 #define LSB_MAX_VECTOR 256

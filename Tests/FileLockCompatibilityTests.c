@@ -59,7 +59,7 @@ static int descriptorPath(int fd, int command, void *argument) {
 #undef fsetxattr
 #undef fgetxattr
 
-static char base[PATH_MAX], data[PATH_MAX], other[PATH_MAX], file[PATH_MAX], outside[PATH_MAX];
+static char base[PATH_MAX], runtime[PATH_MAX], data[PATH_MAX], other[PATH_MAX], file[PATH_MAX], outside[PATH_MAX];
 
 static void join(char output[PATH_MAX], const char *prefix, const char *suffix) {
     int count = snprintf(output, PATH_MAX, "%s/%s", prefix, suffix);
@@ -102,17 +102,33 @@ static void testScope(int fd, int outsideFD) {
         prepare(fd, false);
     }
     char path[PATH_MAX];
-    const char *invalid[] = {NULL, "", "/", "relative", "/missing/SimulatorData", base, other};
+    const char *invalid[] = {NULL, "", "/", "relative", "/missing/data", base, other};
     for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
         configureFileLockScope("1", invalid[i]);
         prepare(fd, false);
     }
-    const char *suffixes[] = {".", "../SimulatorData", "/"};
+    const char *suffixes[] = {".", "../data", "/"};
     for (unsigned i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
         join(path, data, suffixes[i]);
         configureFileLockScope("1", path);
         prepare(fd, false);
     }
+    // A generic data directory alone is not sufficient: the paired runtime must be a real, owned directory.
+    assert(!rmdir(runtime));
+    configureFileLockScope("1", data);
+    prepare(fd, false);
+    assert(!symlink(other, runtime));
+    configureFileLockScope("1", data);
+    prepare(fd, false);
+    assert(!unlink(runtime));
+    int notDirectory = createFile(runtime);
+    configureFileLockScope("1", data);
+    prepare(fd, false);
+    assert(!close(notDirectory) && !unlink(runtime) && !mkdir(runtime, 0700));
+    wrongOwner = true;
+    configureFileLockScope("1", data);
+    prepare(fd, false);
+    wrongOwner = false;
     configureFileLockScope("1", data);
     prepare(fd, true);
     assert(attributeWrites == 1);
@@ -264,8 +280,8 @@ int main(void) {
     char candidate[PATH_MAX];
     join(candidate, getenv("TMPDIR") ?: "/tmp", "LiveSimBooter-file-lock.XXXXXX");
     assert(mkdtemp(candidate) && realpath(candidate, base));
-    join(data, base, "SimulatorData"); join(other, base, "SimulatorData-other");
-    assert(!mkdir(data, 0700) && !mkdir(other, 0700));
+    join(data, base, "data"); join(other, base, "data-other"); join(runtime, base, "RuntimeRoot");
+    assert(!mkdir(data, 0700) && !mkdir(other, 0700) && !mkdir(runtime, 0700));
     join(file, data, "worker.lock"); join(outside, other, "worker.lock");
     int fd = createFile(file), outsideFD = createFile(outside);
     testScope(fd, outsideFD);
@@ -274,7 +290,7 @@ int main(void) {
     testFCntl(fd);
     testRecordLockVariants(fd);
     assert(!close(fd) && !close(outsideFD));
-    assert(!unlink(file) && !unlink(outside) && !rmdir(data) && !rmdir(other) && !rmdir(base));
+    assert(!unlink(file) && !unlink(outside) && !rmdir(data) && !rmdir(other) && !rmdir(runtime) && !rmdir(base));
     puts("FileLockCompatibility: canonical scope, descriptor identity, existing policy, native locks and arm64 fcntl ABI passed");
     return 0;
 }

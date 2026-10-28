@@ -16,7 +16,8 @@ DeviceSupport binary, rather than the simulator RunningBoard image. WebKit's
 uses the same attribute with a single byte `0xff`.
 
 `Guest/FileLockCompatibility.c` provides an opt-in guest adapter, enabled by `LSB_SIMULATE_FILE_LOCK_SUSPENSION=1`.
-It captures the canonical, owned `SIMULATOR_SHARED_RESOURCES_DIRECTORY`, whose final component must be `SimulatorData`.
+It captures the canonical, owned `SIMULATOR_SHARED_RESOURCES_DIRECTORY`, whose final component is now `data` under the pinned
+`LSB/iOS/23A343` storage root. The crash evidence above predates this storage rename.
 Before an acquiring `flock` or record-lock operation, it checks the actual descriptor: an owned regular file with one
 hard link, a canonical `F_GETPATH` below that directory, and matching descriptor/path device and inode. This resolves
 the `/var` and `/private/var` aliases and rejects symlinks escaping the root, sibling prefix matches, and unrelated files.

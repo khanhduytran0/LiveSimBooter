@@ -3,10 +3,21 @@ set -eu
 cd "$(dirname "$0")/.."
 test_directory=$(mktemp -d /tmp/LiveSimBooter-tests.XXXXXX)
 trap 'rm -rf "$test_directory"' EXIT HUP INT TERM
-for test_name in HostStartupPolicy UserspaceReboot; do
+for test_name in HostStartupPolicy UserspaceReboot NativeRuntimePolicy; do
     xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 "Tests/${test_name}Tests.c" -o "$test_directory/$test_name"
     "$test_directory/$test_name"
 done
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/NativeProductionStatusTests.c -framework CoreFoundation -o "$test_directory/NativeProductionStatus"
+"$test_directory/NativeProductionStatus"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    -DLSB_TEST_STORE_BROKER_DISCOVERY Tests/StoreAppGroupsTests.c ProcessSupport/StoreAppGroups.c \
+    ProcessSupport/SpawnTransport.c ProcessSupport/SpawnPlan.c -o "$test_directory/StoreAppGroups"
+"$test_directory/StoreAppGroups"
+xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
+    Tests/RuntimeStorageTests.m Host/RuntimeStorage.m ProcessSupport/StoreAppGroups.c \
+    -framework Foundation -o "$test_directory/RuntimeStorage"
+"$test_directory/RuntimeStorage"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/SessionControlQueueTests.c Host/SessionControlQueue.c -o "$test_directory/SessionControlQueue"
 "$test_directory/SessionControlQueue"
@@ -186,11 +197,11 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib 
     Guest/FileLockCompatibility.c -o "$test_directory/libFileLockCompatibility.dylib"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_FILE_LOCK_INTERPOSE_TESTING \
     Tests/FileLockCompatibilityTests.c -o "$test_directory/FileLockCompatibilityInterpose"
-mkdir -p "$test_directory/file-lock-interpose/SimulatorData"
+mkdir -p "$test_directory/file-lock-interpose/data" "$test_directory/file-lock-interpose/RuntimeRoot"
 for file_lock_enabled in 1 0; do
-    LSB_SIMULATE_FILE_LOCK_SUSPENSION="$file_lock_enabled" SIMULATOR_SHARED_RESOURCES_DIRECTORY="$test_directory/file-lock-interpose/SimulatorData" \
+    LSB_SIMULATE_FILE_LOCK_SUSPENSION="$file_lock_enabled" SIMULATOR_SHARED_RESOURCES_DIRECTORY="$test_directory/file-lock-interpose/data" \
         DYLD_INSERT_LIBRARIES="$test_directory/libFileLockCompatibility.dylib" \
-        "$test_directory/FileLockCompatibilityInterpose" "$test_directory/file-lock-interpose/SimulatorData"
+        "$test_directory/FileLockCompatibilityInterpose" "$test_directory/file-lock-interpose/data"
 done
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/NotificationSharedMemoryTests.c -o "$test_directory/NotificationSharedMemory"
@@ -258,10 +269,10 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_SYSTEM
     Tests/SystemPowerCompatibilityTests.c -framework IOKit -framework CoreFoundation -o "$test_directory/SystemPowerCompatibilityInterpose"
 DYLD_INSERT_LIBRARIES="$test_directory/libSystemPowerCompatibility.dylib" "$test_directory/SystemPowerCompatibilityInterpose"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/BootstrapRoleTests.c ProcessSupport/SpawnPlan.c -o "$test_directory/BootstrapRole"
+    Tests/BootstrapRoleTests.c ProcessSupport/SpawnPlan.c ProcessSupport/StoreAppGroups.c -o "$test_directory/BootstrapRole"
 "$test_directory/BootstrapRole"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/NativeServiceTransportTests.c ProcessSupport/SpawnPlan.c -o "$test_directory/NativeServiceTransport"
+    Tests/NativeServiceTransportTests.c ProcessSupport/SpawnPlan.c ProcessSupport/StoreAppGroups.c -o "$test_directory/NativeServiceTransport"
 "$test_directory/NativeServiceTransport"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/NativeMetalControlTests.c ProcessSupport/NativeMetalControl.c -o "$test_directory/NativeMetalControl"
@@ -295,7 +306,8 @@ DYLD_INSERT_LIBRARIES="$test_directory/libXPCWireCompatibility.dylib" XPC_FLAGS=
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 -IProcessSupport -IHost \
     Tests/BrokerTests.m Host/SessionControlQueue.c Host/TerminalSession.m Host/LaunchdConfiguration.m ProcessSupport/LaunchdHandshake.c ProcessSupport/LaunchdProbe.c \
     Host/IndigoHIDServer.m Host/FramebufferServer.m Host/IOSurfaceServer.m ProcessSupport/LaunchdEndpoint.c \
-    Host/GuestEntitlementsConversion.m Host/DeviceType.m Host/DeviceConfiguration.m ProcessSupport/GuestEntitlements.c \
+    Host/GuestEntitlementsConversion.m Host/DeviceType.m Host/DeviceConfiguration.m Host/RuntimeStorage.m ProcessSupport/StoreAppGroups.c \
+    ProcessSupport/GuestEntitlements.c \
     ProcessSupport/FakePTY.c ProcessSupport/SpawnPlan.c ProcessSupport/ChildStatus.c ProcessSupport/NativeMetalControl.c \
     -framework Foundation -framework IOSurface -o "$test_directory/Broker"
 "$test_directory/Broker"
@@ -370,7 +382,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
 "$test_directory/DisplaySettingsWorker"
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
     Tests/GuestDisplaySettingsTests.m Host/GuestDisplaySettings.m ProcessSupport/DisplaySettings.c \
-    -framework Foundation -o "$test_directory/GuestDisplaySettings"
+    Host/RuntimeStorage.m ProcessSupport/StoreAppGroups.c -framework Foundation -o "$test_directory/GuestDisplaySettings"
 "$test_directory/GuestDisplaySettings"
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
     Tests/ExtensionLauncherTests.m -framework Foundation -o "$test_directory/ExtensionLauncher"

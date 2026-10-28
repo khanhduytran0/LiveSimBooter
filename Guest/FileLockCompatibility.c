@@ -1,11 +1,13 @@
 #include "FileLockCompatibility.h"
 #include "SpawnDiagnostics.h"
+#include "../ProcessSupport/RuntimeLayout.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <mach/mach.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
@@ -47,9 +49,17 @@ static void configureFileLockScope(const char *enabled, const char *root) {
     char canonical[PATH_MAX];
     if (!realpath(root, canonical)) return;
     const char *leaf = strrchr(canonical, '/');
-    if (!leaf || strcmp(leaf, "/SimulatorData")) return;
+    if (!leaf || strcmp(leaf, "/" LSB_DATA_DIRECTORY)) return;
     struct stat status;
     if (stat(canonical, &status) || !S_ISDIR(status.st_mode) || status.st_uid != geteuid()) return;
+    char sibling[PATH_MAX];
+    int size = snprintf(sibling, sizeof(sibling), "%.*s/" LSB_RUNTIME_DIRECTORY, (int)(leaf - canonical), canonical);
+    if (size <= 0 || (size_t)size >= sizeof(sibling)) return;
+    int runtime = open(sibling, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (runtime < 0) return;
+    bool valid = !fstat(runtime, &status) && S_ISDIR(status.st_mode) && status.st_uid == geteuid();
+    close(runtime);
+    if (!valid) return;
     size_t length = strlen(canonical);
     memcpy(fileLockRoot, canonical, length + 1);
     fileLockRootLength = length;

@@ -40,7 +40,7 @@ static LSBDSettingsResponse resultFor(int directory, const LSBDSettingsRequest *
 int main(void) {
     char base[] = "/tmp/LiveSimBooter-settings-worker.XXXXXX", data[1024], root[1024];
     assert(mkdtemp(base));
-    snprintf(data, sizeof(data), "%s/SimulatorData", base);
+    snprintf(data, sizeof(data), "%s/data", base);
     snprintf(root, sizeof(root), "%s/RuntimeRoot", base);
     assert(!mkdir(data, 0700) && !mkdir(root, 0700));
     int directory;

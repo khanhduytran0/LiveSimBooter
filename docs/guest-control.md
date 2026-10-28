@@ -30,18 +30,19 @@ so retain the other labels needed for the current boot.
 </dict></plist>
 ```
 
-The worker requires simulator platform 7 and the host's sibling `RuntimeRoot` / `SimulatorData` directories. It creates
-`SimulatorData/var/run/launchctl-control`. Directory components are opened without following symlinks, and a held worker
+The worker requires simulator platform 7 and the host's sibling `RuntimeRoot` / `data` directories under the selected
+store App Group's `LSB/iOS/23A343` directory. It creates
+`data/var/run/launchctl-control`. Directory components are opened without following symlinks, and a held worker
 lock prevents two instances from consuming the same queue. Native SSH needs Python 3 and write access to that directory.
 
 ## Commands
 
-Supply the actual SSH destination and physical SimulatorData path; the tool has no device or App Group default. Port 2222
+Supply the actual SSH destination and physical data path; the tool has no device or App Group default. Port 2222
 is the default. SSH uses the user's normal host-key configuration; additional SSH options can be passed with `--ssh-option`.
 
 ```sh
 python3 Tools/guest-launchctl.py --host root@device.local \
-  --data-root /private/var/mobile/Containers/Shared/AppGroup/APP-GROUP-ID/SimulatorData \
+  --data-root /private/var/mobile/Containers/Shared/AppGroup/APP-GROUP-ID/LSB/iOS/23A343/data \
   --output-dir tmp/guest-launchctl -- print system
 ```
 
@@ -51,7 +52,7 @@ Keep those options and replace the arguments after `--` for subsequent commands:
 list
 print system
 kickstart -k user/501/com.apple.lsd
-bootstrap user/501 /private/var/mobile/Containers/Shared/AppGroup/APP-GROUP-ID/SimulatorData/Library/YourJobs/example.plist
+bootstrap user/501 /private/var/mobile/Containers/Shared/AppGroup/APP-GROUP-ID/LSB/iOS/23A343/data/Library/YourJobs/example.plist
 bootout user/501/com.example.job
 ```
 
@@ -75,7 +76,7 @@ This validates job control; it does not imply that every bootstrapped program co
 With the matching host, LiveProcess and guest shim installed, `launchctl reboot userspace` requests a new simulator session
 inside the existing native host. The persistent tabs remain open. The host regenerates the launchd bootstrap configuration,
 boot UUID, Metal helpers, IOSurface/framebuffer/HID services and launchd-owned Fish using the original host arguments and environment.
-It preserves SimulatorData; this is a restart, not a data reset. A normal launchd exit or crash does not trigger automatic restart.
+It preserves the data root; this is a restart, not a data reset. A normal launchd exit or crash does not trigger automatic restart.
 
 The 23A343 launchd adapter pins UUID `C3EC5C45-8C85-3D11-B59C-62C4248F5EF9`, instruction contexts and exact callsites. It records
 an accepted reboot only at the successful routine-821 reply, then notifies the broker at launchd's final clean `exit(0)`.
@@ -86,7 +87,7 @@ notifications before constructing new services. Missing exit evidence or an unre
 and requires reopening the host; it does not create an overlapping session.
 
 After the old generation has exited, the host locks the control queue and archives interrupted `active`, `request` and
-`client.lock` entries under `SimulatorData/var/run/launchctl-control/reboot-interrupted.<UUID>/`. It preserves logs and receipts
+`client.lock` entries under `data/var/run/launchctl-control/reboot-interrupted.<UUID>/`. It preserves logs and receipts
 and never replays the old command or fabricates success. The client issuing the reboot may therefore lose its result; inspect
 the new boot UUID, launchd PID and output independently instead of resubmitting the reboot. Other interrupted-worker cases
 still require the inspection described below. Wire protocol version 2 requires rebuilding the host, extension and shim together.

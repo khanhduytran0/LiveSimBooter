@@ -1,6 +1,6 @@
 #import "GuestDisplaySettings.h"
+#import "RuntimeStorage.h"
 #include "../ProcessSupport/DisplaySettings.h"
-#include "../ProcessSupport/SpawnPlan.h"
 #include <errno.h>
 #include <string.h>
 #include <time.h>
@@ -25,8 +25,7 @@ NSArray<NSString *> *LSBPerformanceHUDNames(void) {
     static LSBGuestDisplaySettings *controller;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSURL *group = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:@LSB_APP_GROUP];
-        controller = [[self alloc] initWithDataRoot:[group URLByAppendingPathComponent:@"SimulatorData" isDirectory:YES] timeout:8];
+        controller = [[self alloc] initWithDataRoot:LSBRuntimeStorage.sharedStorage.dataURL timeout:8];
     });
     return controller;
 }

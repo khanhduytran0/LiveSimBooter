@@ -67,14 +67,15 @@ python3 Tools/stage-sshdog.py --binary tmp/sshdog-input/sshdog.signed \
 The tool verifies the existing signature and key formats, then writes a new stage under ignored `tmp/`. It never signs,
 deploys, starts a daemon, overwrites an existing stage, or reads a client private key. Its `stage.json` records the files and
 destination roots. The optional `client/known_hosts` pins the supplied host key for the named host and port; keep it on
-the Mac. Only the `RuntimeRoot` and `SimulatorData` trees are deployment payloads.
+the Mac. Only the `RuntimeRoot` and `data` trees are deployment payloads.
 
-Copy those two trees into the corresponding App Group directories. Ensure the server configuration is readable by guest
+The `--device-group` argument names the selected store App Group itself; the tool appends `LSB/iOS/23A343` when constructing
+physical paths. Copy those two trees under `<selected store group>/LSB/iOS/23A343/`. Ensure the server configuration is readable by guest
 uid 501, with its host private key and authorized_keys mode 0600 and config directory mode 0700. Create
-`SimulatorData/Library/Logs` if needed. No checksum pass after copying is required by this workflow.
+`data/Library/Logs` if needed. No checksum pass after copying is required by this workflow.
 
 The generated environment sets `SSHDOG_SHELL` to the **physical** Fish executable, sets HOME/CFFIXED_USER_HOME to the
-physical SimulatorData path, and points XDG_CONFIG_HOME to the staged Fish configuration. `SSHDOG_SHELL` is only a pathname;
+physical data path, and points XDG_CONFIG_HOME to the staged Fish configuration. `SSHDOG_SHELL` is only a pathname;
 appended `-C` arguments fail upstream's `os.Stat` check and cause fallback to `/bin/sh`. The Fish file instead sets
 `status job-control none` and `fish_use_posix_spawn`. The server reads `./config`, so its working directory matters.
 No `config/daemon` marker is installed: launchd owns the foreground process. Port 2223 keeps it separate from native phone
@@ -93,9 +94,9 @@ selected-service sanitizer, which replaces WorkingDirectory and would prevent re
 
 ```sh
 python3 Tools/guest-launchctl.py --host root@device.local --port 2222 \
-  --data-root /private/var/mobile/Containers/Shared/AppGroup/APP-GROUP-ID/SimulatorData \
+  --data-root /private/var/mobile/Containers/Shared/AppGroup/APP-GROUP-ID/LSB/iOS/23A343/data \
   --output-dir tmp/guest-launchctl -- bootstrap user/501 \
-  /private/var/mobile/Containers/Shared/AppGroup/APP-GROUP-ID/RuntimeRoot/System/Library/LaunchDaemons/com.kdt.LiveSimBooter.sshdog.plist
+  /private/var/mobile/Containers/Shared/AppGroup/APP-GROUP-ID/LSB/iOS/23A343/RuntimeRoot/System/Library/LaunchDaemons/com.kdt.LiveSimBooter.sshdog.plist
 ```
 
 The bootstrap plist argument is a **physical path** because launchctl opens that file. Inside the plist, Program is the

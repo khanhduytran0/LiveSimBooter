@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "../ProcessSupport/FakePTY.h"
+#include "../ProcessSupport/RuntimeLayout.h"
 
 extern char **environ;
 extern unsigned dyld_get_active_platform(void);
@@ -19,8 +20,8 @@ static int prepareEnvironment(void) {
     char root[PATH_MAX], data[PATH_MAX], expectedData[PATH_MAX], path[PATH_MAX * 4 + 64];
     if (!realpath(configuredRoot, root) || !realpath(configuredData, data)) return errno;
     const char *leaf = strrchr(root, '/');
-    if (!leaf || strcmp(leaf, "/RuntimeRoot")) return EINVAL;
-    int length = snprintf(expectedData, sizeof(expectedData), "%.*s/SimulatorData", (int)(leaf - root), root);
+    if (!leaf || strcmp(leaf, "/" LSB_RUNTIME_DIRECTORY)) return EINVAL;
+    int length = snprintf(expectedData, sizeof(expectedData), "%.*s/" LSB_DATA_DIRECTORY, (int)(leaf - root), root);
     if (length < 0 || (size_t)length >= sizeof(expectedData)) return ENAMETOOLONG;
     if (strcmp(data, expectedData)) return EINVAL;
     length = snprintf(path, sizeof(path), "%s/bin:%s/usr/bin:%s/usr/sbin:%s/sbin", root, root, root, root);

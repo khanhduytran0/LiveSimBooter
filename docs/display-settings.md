@@ -35,11 +35,11 @@ key is absent. It rejects an existing value of the wrong type.
 Graphical bootstrap creates the fixed job `com.kdt.LiveSimBooter.display-settings`, running
 `/usr/libexec/display-settings --serve` with `RunAtLoad=true`, `KeepAlive=false`, and `EnableTransactions=false`.
 Its output goes to guest `/private/var/mobile/Library/Logs/display-settings.log`, backed by
-`SimulatorData/Library/Logs/display-settings.log` in the App Group.
+`data/Library/Logs/display-settings.log` under the selected App Group's `LSB/iOS/23A343` directory.
 
 The native host never calls guest CoreAnimation entry points. [GuestDisplaySettings.m](../Host/GuestDisplaySettings.m)
 exchanges fixed-size records with the guest worker through the owned, private
-`SimulatorData/var/run/display-settings` directory. [DisplaySettings.h](../ProcessSupport/DisplaySettings.h) defines
+`data/var/run/display-settings` directory. [DisplaySettings.h](../ProcessSupport/DisplaySettings.h) defines
 version 1: a 56-byte request, 64-byte response, and 40-byte ready record. The only operations are read, HUD mode 0–9,
 and touch Boolean 0–1. Requests contain no executable path, arbitrary command, preference domain, or preference key.
 
@@ -69,7 +69,7 @@ Unavailable instead of a guessed value. The CLI JSON separates the operation err
 The preference path needs both the pinned CoreFoundation native-PID preflight compatibility and the exact shared-counter
 object adapter. The stock user object is `apple.sim.cfprefs.user.daemonv`: 23A343 uses `snprintf(size=31)`, truncating its
 version digit. [NotificationSharedMemory.c](../Guest/NotificationSharedMemory.c) maps only that exact name to the owned
-`SimulatorData/tmp/cfpreferences-user-v1.shm`. The real daemon creates a 16 KiB writable page; clients open it read-only.
+`data/tmp/cfpreferences-user-v1.shm`. The real daemon creates a 16 KiB writable page; clients open it read-only.
 No additional sandbox exception is granted. XML preference files are valid: the earlier nil reads occurred before plist
 parsing because the shared counter page was missing. After replacing the shim, restart cfprefsd and its clients to discard
 the daemon's cached fallback page.

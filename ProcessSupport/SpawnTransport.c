@@ -3,6 +3,9 @@
 #include "SingleThreadGuard.h"
 #include "ChildStatus.h"
 #include "GuestEntitlements.h"
+#if !defined(LSB_GUEST_RUNTIME) && !defined(LSB_TRANSPORT_TESTING)
+#include "StoreAppGroups.h"
+#endif
 #if defined(LSB_XPC_WIRE_COMPATIBILITY)
 #include "../Guest/XPCWireCompatibility.h"
 #endif
@@ -51,16 +54,16 @@ static bool signedValue(xpc_object_t dictionary, const char *key, int64_t *value
     return true;
 }
 
-static int decodeExecutionRole(xpc_object_t dictionary, uint32_t *role) {
+static int decodeExecutionRole(xpc_object_t dictionary, uint32_t *role, uint32_t *productionStatus) {
     *role = LSB_EXECUTION_SIMULATOR;
-    xpc_object_t versionObject = xpc_dictionary_get_value(dictionary, "bootstrap-version");
-    xpc_object_t roleObject = xpc_dictionary_get_value(dictionary, "execution-role");
-    // A legacy broker can only launch a simulator. Never infer native execution from a path or environment string.
-    if (!versionObject && !roleObject) return 0;
-    uint64_t version, value;
+    *productionStatus = LSB_NATIVE_PRODUCTION_UNKNOWN;
+    // Version 2 requires the native policy. Legacy or incomplete replies cannot authorize cache detachment.
+    uint64_t version, value, status;
     if (!unsignedValue(dictionary, "bootstrap-version", &version) || version != LSB_BOOTSTRAP_VERSION ||
-        !unsignedValue(dictionary, "execution-role", &value) || value > LSB_EXECUTION_NATIVE_METAL_SERVICE) return EPROTO;
+        !unsignedValue(dictionary, "execution-role", &value) || value > LSB_EXECUTION_NATIVE_METAL_SERVICE ||
+        !unsignedValue(dictionary, "native-production-status", &status) || status > LSB_NATIVE_DEVELOPMENT) return EPROTO;
     *role = (uint32_t)value;
+    *productionStatus = (uint32_t)status;
     return 0;
 }
 
@@ -276,11 +279,24 @@ int LSBTransportCopyBrokerPort(mach_port_t *port) {
     extern int LSBTestCopyBrokerPort(mach_port_t *port);
     return LSBTestCopyBrokerPort(port);
 #else
-    kern_return_t result = bootstrap_look_up(bootstrap_port, LSB_BROKER_SERVICE, port);
-    if (result == KERN_SUCCESS) return 0;
-    if (result == 1100) return EACCES; // BOOTSTRAP_NOT_PRIVILEGED
-    if (result == 1102) return ENOENT; // BOOTSTRAP_UNKNOWN_SERVICE
-    return EIO;
+    LSBStoreAppGroups groups;
+    int error = LSBCopyStoreAppGroups(&groups);
+    if (error) return error;
+    int failure = ENOENT;
+    for (size_t index = 0; index < groups.count; ++index) {
+        char name[LSB_BROKER_SERVICE_BYTES];
+        error = LSBStoreBrokerServiceName(groups.identifiers[index], name);
+        if (error) return error;
+        mach_port_t candidate = MACH_PORT_NULL;
+        kern_return_t result = bootstrap_look_up(bootstrap_port, name, &candidate);
+        if (result == KERN_SUCCESS && sendRight(candidate)) { *port = candidate; return 0; }
+        if (MACH_PORT_VALID(candidate)) mach_port_deallocate(mach_task_self(), candidate);
+        // An inactive store is expected. A denied one may still precede the host's other entitled store namespace.
+        if (result == 1102) continue; // BOOTSTRAP_UNKNOWN_SERVICE
+        if (result == 1100) { failure = EACCES; continue; } // BOOTSTRAP_NOT_PRIVILEGED
+        return EIO;
+    }
+    return failure;
 #endif
 }
 
@@ -401,7 +417,7 @@ int LSBTransportCheckIn(LSBBootstrapReply *result, int fds[LSB_MAX_FDS]) {
         result->pid = pid;
         if (!error) error = remoteError;
         if (!error && (!result->requestID || pid <= 0)) error = EPROTO;
-        if (!error) error = decodeExecutionRole(reply, &result->executionRole);
+        if (!error) error = decodeExecutionRole(reply, &result->executionRole, &result->nativeProductionStatus);
         if (!error) {
             int64_t guestPID, parentPID;
             if (!signedValue(reply, "guest-pid", &guestPID) || guestPID <= 0 || guestPID > INT_MAX ||
@@ -434,6 +450,7 @@ int LSBTransportCheckIn(LSBBootstrapReply *result, int fds[LSB_MAX_FDS]) {
     }
     if (reply) xpc_release(reply);
     if (error) {
+        result->nativeProductionStatus = LSB_NATIVE_PRODUCTION_UNKNOWN;
         closeFDs(fds);
         if (result->statusFD >= 0) close(result->statusFD);
         if (result->wakeFD >= 0) close(result->wakeFD);
@@ -672,7 +689,8 @@ void LSBTransportDisposeMessage(LSBReceivedMessage *message) {
 
 static int replyToMessage(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
                           const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], bool bootstrap, int statusFD, int wakeFD,
-                          mach_port_t tankPort, const LSBSpawnPorts *ports, pid_t guestPID, pid_t parentPID, uint32_t executionRole) {
+                          mach_port_t tankPort, const LSBSpawnPorts *ports, pid_t guestPID, pid_t parentPID, uint32_t executionRole,
+                          uint32_t productionStatus) {
     if (!message || !message->object || error < 0 || pid < 0) return EINVAL;
     xpc_object_t reply = xpc_dictionary_create_reply((xpc_object_t)message->object);
     if (!reply) {
@@ -691,6 +709,7 @@ static int replyToMessage(LSBReceivedMessage *message, int error, pid_t pid, uin
     if (!error && !encodingError && bootstrap) {
         encodingError = plan && pid > 0 && guestPID > 0 && parentPID >= 0 ? validateBootstrapFDs(statusFD, wakeFD) : EINVAL;
         if (!encodingError) encodingError = validateRoleMetadata(executionRole, pid, guestPID, tankPort, ports);
+        if (!encodingError && !LSBValidNativeProductionStatus(productionStatus)) encodingError = EINVAL;
         if (!encodingError) {
             xpc_object_t status = xpc_fd_create(statusFD), wake = xpc_fd_create(wakeFD);
             if (!status || !wake) encodingError = errno ? errno : EBADF;
@@ -708,6 +727,7 @@ static int replyToMessage(LSBReceivedMessage *message, int error, pid_t pid, uin
             xpc_dictionary_set_int64(reply, "parent-pid", parentPID);
             xpc_dictionary_set_uint64(reply, "bootstrap-version", LSB_BOOTSTRAP_VERSION);
             xpc_dictionary_set_uint64(reply, "execution-role", executionRole);
+            xpc_dictionary_set_uint64(reply, "native-production-status", productionStatus);
         }
     }
     if (encodingError) error = encodingError;
@@ -724,7 +744,8 @@ static int replyToMessage(LSBReceivedMessage *message, int error, pid_t pid, uin
 
 int LSBTransportReply(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
                       const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS]) {
-    return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, false, -1, -1, MACH_PORT_NULL, NULL, 0, 0, LSB_EXECUTION_SIMULATOR);
+    return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, false, -1, -1, MACH_PORT_NULL, NULL, 0, 0,
+                          LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN);
 }
 
 int LSBTransportReplyEntitlements(LSBReceivedMessage *message, int error, const void *bytes, size_t size) {
@@ -784,13 +805,13 @@ int LSBTransportReplyProcessIdentity(LSBReceivedMessage *message, int error, con
 int LSBTransportReplyBootstrap(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
                                const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD) {
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, true, statusFD, wakeFD,
-                          MACH_PORT_NULL, NULL, pid, getpid(), LSB_EXECUTION_SIMULATOR);
+                          MACH_PORT_NULL, NULL, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN);
 }
 
 int LSBTransportReplyBootstrapWithPorts(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
                                         const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, const LSBSpawnPorts *ports) {
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, true, statusFD, wakeFD,
-                          MACH_PORT_NULL, ports, pid, getpid(), LSB_EXECUTION_SIMULATOR);
+                          MACH_PORT_NULL, ports, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN);
 }
 
 int LSBTransportReplyBootstrapWithMetadata(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
@@ -798,14 +819,15 @@ int LSBTransportReplyBootstrapWithMetadata(LSBReceivedMessage *message, int erro
                                            const LSBBootstrapMetadata *metadata) {
     if (!metadata || (metadata->launchdTankPort != MACH_PORT_NULL && !sendRight(metadata->launchdTankPort))) return EINVAL;
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, true, statusFD, wakeFD,
-                          metadata->launchdTankPort, metadata->ports, metadata->guestPID, metadata->parentPID, metadata->executionRole);
+                          metadata->launchdTankPort, metadata->ports, metadata->guestPID, metadata->parentPID, metadata->executionRole,
+                          metadata->nativeProductionStatus);
 }
 
 int LSBTransportReplyLaunchdBootstrap(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
                                       const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, mach_port_t tankPort) {
     if (!MACH_PORT_VALID(tankPort)) return EINVAL;
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, true, statusFD, wakeFD,
-                          tankPort, NULL, pid, getpid(), LSB_EXECUTION_SIMULATOR);
+                          tankPort, NULL, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN);
 }
 
 int LSBTransportReceive(mach_port_t port, LSBReceivedMessage *message) {
@@ -830,7 +852,8 @@ int LSBTransportReceive(mach_port_t port, LSBReceivedMessage *message) {
     if (!error) {
         message->kind = (uint32_t)kind;
         message->error = (int)childError;
-        if (xpc_dictionary_get_value(request, "execution-role") || xpc_dictionary_get_value(request, "bootstrap-version")) error = EPROTO;
+        if (xpc_dictionary_get_value(request, "execution-role") || xpc_dictionary_get_value(request, "bootstrap-version") ||
+            xpc_dictionary_get_value(request, "native-production-status")) error = EPROTO;
         // This control request must carry only its four-field envelope, including no capabilities under unknown keys.
         if (kind == LSB_REQUEST_REBOOT_USERSPACE && xpc_dictionary_get_count(request) != 4) error = EPROTO;
     }

@@ -98,8 +98,8 @@ simulator cfprefsd and `com.kdt.LiveSimBooter.terminal-fish` jobs, and select th
 
 Explicit native-host command-line labels replace those twelve defaults; the three fixed jobs remain included. For example,
 `--launchd-services com.apple.notifyd` selects only notifyd as the additional job. Labels do not come from guest environment
-variables. The mode writes its generated jobs under the owned `SimulatorData/Library/LiveSimBooter-CoreDaemons-<selection-hash>` directory, with
-per-label output in `SimulatorData/Library/Logs/<label>.log`. Sorted selections have stable directory names; narrowing or
+variables. The mode writes its generated jobs under the owned `data/Library/LiveSimBooter-CoreDaemons-<selection-hash>` directory, with
+per-label output in `data/Library/Logs/<label>.log`, under the selected group's `LSB/iOS/23A343` directory. Sorted selections have stable directory names; narrowing or
 expanding a selection leaves earlier job files intact and only bootstraps the selected directory.
 
 `LSBPrepareLaunchdServicesPlan` validates the selected matching-runtime plist, label, program and argument fields before
@@ -167,7 +167,7 @@ Device results for this selected-service stage should be recorded separately fro
 The 2026-10-26 trial uses the matching 23A343 runtime on iPhone16,2 / iOS 26.1. The first notifyd startup aborted because
 `shm_open("apple.shm.notification_center", ...)` returned `EPERM`. `Guest/NotificationSharedMemory.c` adapts only that exact
 object (with or without its leading slash), and only with `LSB_SIMULATE_NOTIFICATION_SHM=1`, to an owned regular file at
-`SimulatorData/tmp/notification-center.shm`. It preserves creation/exclusion/truncation, normal file permissions, close-on-exec,
+`SimulatorData/tmp/notification-center.shm` (the historical name of the current `data/tmp` location). It preserves creation/exclusion/truncation, normal file permissions, close-on-exec,
 and descriptor/mapping lifetime across unlink. It does not change unrelated POSIX shared-memory objects.
 
 notifyd publishes its PID to libnotify clients, which create native process-exit watches. The identity adapter therefore

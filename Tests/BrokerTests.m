@@ -1,3 +1,4 @@
+#include "../ProcessSupport/RuntimeLayout.h"
 #import <Foundation/Foundation.h>
 #include <assert.h>
 #include <errno.h>
@@ -38,6 +39,9 @@ static kern_return_t testBootstrapLookup(mach_port_t, const char *, mach_port_t 
 #undef LSBConfiguredGuestDeviceType
 #undef LSBSaveConfiguredGuestDeviceType
 
+static uint32_t testNativeProductionStatus = LSB_NATIVE_DEVELOPMENT;
+uint32_t LSBHostNativeProductionStatus(void) { return testNativeProductionStatus; }
+
 // Isolate preference publication from the developer's real NSUserDefaults domain; filesystem validation/install stays real.
 static NSString *savedDeviceIdentifier;
 static unsigned devicePreferenceWrites;
@@ -59,7 +63,7 @@ typedef struct {
     bool deliveredPlan;
     mach_port_t launchdTank;
     pid_t guestPID, parentPID;
-    uint32_t executionRole;
+    uint32_t executionRole, nativeProductionStatus;
 } RecordedReply;
 
 typedef struct { unsigned identifier; int retainedFD; } TestMessageObject;
@@ -310,7 +314,7 @@ int LSBTransportReply(LSBReceivedMessage *message, int error, pid_t pid, uint64_
         for (unsigned i = 0; i < plan->fdCount; ++i) assert(fcntl(fds[i], F_GETFD) >= 0);
     }
     unsigned identifier = ((TestMessageObject *)message->object)->identifier;
-    replies[replyCount++] = (RecordedReply){identifier, message->kind, error, sendError, pid, requestID, plan != NULL, MACH_PORT_NULL, 0, 0, 0};
+    replies[replyCount++] = (RecordedReply){identifier, message->kind, error, sendError, pid, requestID, plan != NULL, MACH_PORT_NULL, 0, 0, 0, 0};
     releaseMessageObject(message->object);
     message->object = NULL;
     if (message->kind == LSB_REQUEST_READY && readyReplyHook) readyReplyHook();
@@ -357,6 +361,7 @@ int LSBTransportReplyBootstrapWithMetadata(LSBReceivedMessage *message, int erro
                                            const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD,
                                            const LSBBootstrapMetadata *metadata) {
     assert(metadata && metadata->guestPID > 0 && metadata->parentPID >= 0 && metadata->ports);
+    assert(metadata->nativeProductionStatus == (metadata->executionRole == LSB_EXECUTION_SIMULATOR ? testNativeProductionStatus : LSB_NATIVE_PRODUCTION_UNKNOWN));
     if (checkInReplyHook) checkInReplyHook();
     int result;
     if (metadata->launchdTankPort)
@@ -365,6 +370,7 @@ int LSBTransportReplyBootstrapWithMetadata(LSBReceivedMessage *message, int erro
     replies[replyCount - 1].guestPID = metadata->guestPID;
     replies[replyCount - 1].parentPID = metadata->parentPID;
     replies[replyCount - 1].executionRole = metadata->executionRole;
+    replies[replyCount - 1].nativeProductionStatus = metadata->nativeProductionStatus;
     return result;
 }
 void LSBTransportDisposeMessage(LSBReceivedMessage *message) {
@@ -736,6 +742,26 @@ static void testNativeProbeRoleIsHostOnly(void) {
     assert(!submittedLaunchOptions);
     handleMessage(messageFor(LSB_REQUEST_CHECKIN, getpid(), 3, 0));
     assert(replies[replyCount - 1].executionRole == LSB_EXECUTION_SIMULATOR);
+}
+
+static void testProductionStatusIsHostOnly(void) {
+    for (uint32_t status = LSB_NATIVE_PRODUCTION_UNKNOWN; status <= LSB_NATIVE_DEVELOPMENT; ++status) {
+        resetBroker();
+        testNativeProductionStatus = status;
+        int fd;
+        unsigned object;
+        LSBReceivedMessage *request = spawnRequest(&fd, &object);
+        const char *spoof[] = {"EffectiveProductionStatusAp=0", "LSB_NATIVE_PRODUCTION_STATUS=2", LSB_RETAIN_HOST_CACHE_ENV "=0"};
+        for (unsigned index = 0; index < sizeof(spoof) / sizeof(*spoof); ++index)
+            assert(!LSBPlanAddString(&request->plan, spoof[index], &request->plan.envp[request->plan.envc++]));
+        enqueueSpawn(request, nil);
+        assert(startingJob);
+        handleMessage(messageFor(LSB_REQUEST_CHECKIN, getpid(), 3, 0));
+        assert(replies[replyCount - 1].nativeProductionStatus == status);
+        assert(replies[replyCount - 1].executionRole == LSB_EXECUTION_SIMULATOR);
+    }
+    resetBroker();
+    testNativeProductionStatus = LSB_NATIVE_DEVELOPMENT;
 }
 
 static LSBJob *runTestJob(LSBJob *parent, uint32_t generation) {
@@ -3691,7 +3717,7 @@ static NSString *makeRebootRuntime(void) {
 }
 
 static NSDictionary *rebootConfiguration(void) {
-    NSString *data = [runtimeRoot.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"SimulatorData"];
+    NSString *data = [runtimeRoot.stringByDeletingLastPathComponent stringByAppendingPathComponent:@LSB_DATA_DIRECTORY];
     return [NSDictionary dictionaryWithContentsOfFile:[data stringByAppendingPathComponent:@"var/run/LiveSimBooter-launchd-bootstrap.plist"]][@"Bootstrap"];
 }
 
@@ -3993,6 +4019,7 @@ int main(void) {
         testInitialGuestArguments();
         testLaunchdTerminalLineage();
         testNativeProbeRoleIsHostOnly();
+        testProductionStatusIsHostOnly();
         testExitStatusesAndRepeatedReaping();
         testExecReplacement();
         testExecFailurePreservesCaller();

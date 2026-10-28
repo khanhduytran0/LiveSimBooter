@@ -15,6 +15,8 @@ extern xpc_object_t xpc_pipe_create_from_port(mach_port_t port, uint32_t flags);
 extern int xpc_pipe_routine(xpc_object_t pipe, xpc_object_t message, xpc_object_t *reply);
 extern int xpc_pipe_receive(mach_port_t port, xpc_object_t *message, uint64_t flags);
 extern int xpc_pipe_routine_reply(xpc_object_t reply);
+// Returns an owned entitlement value for the current native process, or NULL when unavailable.
+extern xpc_object_t xpc_copy_entitlement_for_self(const char *name);
 extern void xpc_dictionary_get_audit_token(xpc_object_t dictionary, audit_token_t *token);
 extern const struct _xpc_type_s _xpc_type_mach_send;
 extern void xpc_dictionary_set_mach_send(xpc_object_t dictionary, const char *key, mach_port_t port);

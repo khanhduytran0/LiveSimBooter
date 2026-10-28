@@ -1,4 +1,5 @@
 #include "SessionControlQueue.h"
+#include "../ProcessSupport/RuntimeLayout.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -125,7 +126,7 @@ int LSBQuarantineSessionControlQueue(const char *data) {
     int saved = errno, error = 0;
     char canonical[PATH_MAX];
     size_t size = data ? strnlen(data, PATH_MAX) : 0;
-    static const char suffix[] = "/SimulatorData";
+    static const char suffix[] = "/" LSB_DATA_DIRECTORY;
     if (!data || !size || size >= PATH_MAX || data[0] != '/' || size < sizeof(suffix) - 1 ||
         strcmp(data + size - (sizeof(suffix) - 1), suffix)) error = EINVAL;
     if (!error && !realpath(data, canonical)) error = errno == ENOENT ? 0 : errno;

@@ -1,3 +1,4 @@
+#include "../ProcessSupport/RuntimeLayout.h"
 #import <Foundation/Foundation.h>
 #include "Broker.h"
 #include "ExtensionLauncher.h"
@@ -5,6 +6,9 @@
 #include "RunningBoardMonitor.h"
 #include "SessionControlQueue.h"
 #import "DeviceConfiguration.h"
+#import "RuntimeStorage.h"
+#include "NativeProductionStatus.h"
+#include "StoreAppGroups.h"
 #include "ChildStatus.h"
 #include "SpawnTransport.h"
 #include "PrivateXPC.h"
@@ -452,7 +456,7 @@ static int configuredSpringBoardMetal(const LSBSpawnPlan *plan, const char *cons
     BOOL selected = NO;
     for (unsigned i = 0; labels && labels[i]; ++i) if (!strcmp(labels[i], "com.apple.SpringBoard")) selected = YES;
     if (!selected) return 0;
-    NSString *data = [runtimeRoot.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"SimulatorData"];
+    NSString *data = [runtimeRoot.stringByDeletingLastPathComponent stringByAppendingPathComponent:@LSB_DATA_DIRECTORY];
     NSString *config = [data stringByAppendingPathComponent:@"var/run/LiveSimBooter-launchd-bootstrap.plist"];
     if (plan->argc != 2 || strcmp(plan->strings + plan->argv[1], config.fileSystemRepresentation)) return EINVAL;
     NSDictionary *bootstrap;
@@ -1567,7 +1571,8 @@ static void handleMessage(LSBReceivedMessage *message) {
             LSBChildStatusSetParentPID(job.childStatus, parent ? parent.guestPID : old ? LSBChildStatusGetParentPID(old.childStatus) : getpid());
             LSBBootstrapMetadata metadata = { .guestPID = job.guestPID, .parentPID = LSBChildStatusGetParentPID(job.childStatus),
                 .launchdTankPort = job.simulatorLaunchd ? LSBLaunchdHandshakeTankPort(job.launchdHandshake) : MACH_PORT_NULL,
-                .ports = &job.request->ports, .executionRole = job.executionRole };
+                .ports = &job.request->ports, .executionRole = job.executionRole,
+                .nativeProductionStatus = job.executionRole == LSB_EXECUTION_SIMULATOR ? LSBHostNativeProductionStatus() : LSB_NATIVE_PRODUCTION_UNKNOWN };
             error = LSBTransportReplyBootstrapWithMetadata(message, 0, pid, identifier, runtimeRoot.fileSystemRepresentation,
                 &job.request->plan, job.request->fds, job.statusFD, job.wakeReadFD, &metadata);
             disposeMessage(message);
@@ -1686,16 +1691,13 @@ static void handleMessage(LSBReceivedMessage *message) {
 
 static int prepareRuntimeRoot(void) {
     NSFileManager *manager = NSFileManager.defaultManager;
-    NSURL *group = [manager containerURLForSecurityApplicationGroupIdentifier:@LSB_APP_GROUP];
-    if (!group) { fprintf(stderr, "[broker] App Group entitlement/container unavailable: %s\n", LSB_APP_GROUP); return EACCES; }
-    runtimeRoot = [[group URLByAppendingPathComponent:@"RuntimeRoot" isDirectory:YES] path];
-    NSString *oldRoot = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/RuntimeRoot"];
-    if (![manager fileExistsAtPath:runtimeRoot] && [manager fileExistsAtPath:oldRoot]) {
-        NSError *error = nil;
-        if (![manager moveItemAtPath:oldRoot toPath:runtimeRoot error:&error]) {
-            fprintf(stderr, "[broker] RuntimeRoot migration failed: %s\n", error.description.UTF8String); return EIO;
-        }
+    LSBRuntimeStorage *storage = LSBRuntimeStorage.sharedStorage;
+    if (storage.error) {
+        fprintf(stderr, "[broker] Runtime storage unavailable: %s\n", storage.error.localizedDescription.UTF8String);
+        return [storage.error.domain isEqualToString:NSPOSIXErrorDomain] ? (int)storage.error.code : EACCES;
     }
+    runtimeRoot = storage.runtimeRootURL.path;
+    fprintf(stderr, "[broker] App Group=%s storage=%s\n", storage.appGroupIdentifier.UTF8String, storage.storageURL.fileSystemRepresentation);
     BOOL directory = NO;
     if (![manager fileExistsAtPath:runtimeRoot isDirectory:&directory] || !directory) return ENOENT;
     char canonical[PATH_MAX];
@@ -1894,7 +1896,7 @@ static void completeUserspaceReboot(uint64_t generation) {
         finishDeviceChange(EIO);
         return;
     }
-    NSString *data = [runtimeRoot.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"SimulatorData"];
+    NSString *data = [runtimeRoot.stringByDeletingLastPathComponent stringByAppendingPathComponent:@LSB_DATA_DIRECTORY];
     int queueError = LSBQuarantineSessionControlQueue(data.fileSystemRepresentation);
     if (queueError) {
         rebootDrainFailed = YES;
@@ -2029,7 +2031,10 @@ int LSBStartHost(int argc, const char *argv[], const char *envp[]) {
         if (!error) error = initialExecutionRole(argc, argv, &executionRole);
         if (error) { disposeMessage(initial); fprintf(stderr, "[broker] Invalid initial plan: %s\n", strerror(error)); return error; }
         mach_port_t service = MACH_PORT_NULL;
-        kern_return_t status = bootstrap_check_in(bootstrap_port, LSB_BROKER_SERVICE, &service);
+        char serviceName[LSB_BROKER_SERVICE_BYTES];
+        error = LSBStoreBrokerServiceName(LSBRuntimeStorage.sharedStorage.appGroupIdentifier.UTF8String, serviceName);
+        if (error) { disposeMessage(initial); return error; }
+        kern_return_t status = bootstrap_check_in(bootstrap_port, serviceName, &service);
         if (status) { disposeMessage(initial); fprintf(stderr, "[broker] bootstrap_check_in: %d\n", status); return EIO; }
         jobs = [NSMutableArray new];
         hostTerminal.signalHandler = ^int(pid_t foreground, int number) { return signalTerminal(foreground, number); };

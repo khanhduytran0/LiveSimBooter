@@ -4,9 +4,10 @@ The opt-in `--launchd` host argument starts the matching iOS 26 (23A343) `sbin/l
 The ordinary icon launch waits for Start, then boots the graphical session with launchd-owned Fish. The minimal `--launchd`
 bootstrap described first below intentionally has no service search paths; it is a separate checkpoint from the graphical boot.
 
-The native host writes `SimulatorData/var/run/LiveSimBooter-launchd-bootstrap.plist` beside the app group's RuntimeRoot.
+The native host writes `data/var/run/LiveSimBooter-launchd-bootstrap.plist` beside RuntimeRoot under the selected group's
+`LSB/iOS/23A343` directory. Historical device records below may use the old `SimulatorData` root name.
 It supplies the runtime/data environment, a regular-file stdout/stderr at
-`SimulatorData/Library/Logs/LiveSimBooter-launchd.log`, and `/dev/null` stdin. Stock launchd refuses terminal-backed stdout,
+`data/Library/Logs/LiveSimBooter-launchd.log`, and `/dev/null` stdin. Stock launchd refuses terminal-backed stdout,
 including the console inherited from a CoreDevice launch. The configuration is generated independently of any Mac simulator device.
 
 ## Replacing the trampoline and holding tank
@@ -31,10 +32,12 @@ not a real tank PID or evidence that a tank process exited. A launchd update req
 
 ## Workqueue handoff
 
-The current default keeps the native shared cache mapped and enables hardware redirection of its registered workqueue entry.
-Both the native app and guest shim must be rebuilt together. Omitted `LSB_RETAIN_HOST_CACHE` and
-`LSB_WORKQUEUE_HARDWARE_BREAKPOINT` settings mean enabled; an explicit `0` disables each option, and launchd preserves those
-settings in descendants. Set both to `0` only to reproduce the legacy cache-removal diagnostic. The retained-cache evidence
+Production or unknown devices keep the native shared cache mapped and enable hardware redirection of its registered workqueue entry.
+The host caches an exact Boolean `EffectiveProductionStatusAp` result and supplies it through authenticated check-in metadata.
+Only false permits the development detach/software path; production/unknown rejects `LSB_RETAIN_HOST_CACHE=0`.
+Explicit retention is available on development devices, and launchd propagates the resolved settings to descendants.
+Rebuild the native app, extension, and guest shim together after this bootstrap-metadata change. See [handoff policy](runtime-handoff.md).
+The retained-cache evidence
 below establishes the workqueue handoff without a debugger. The later metadata-name patch reached a home screen with app
 icons; input validation remains separate.
 
@@ -185,7 +188,7 @@ The stock path is `/private/var/tmp/com.kdt.LiveSimBooter.launchd`; setting `TMP
 The first shim draft also exposed an early-initialization constraint: libSystem calls unrelated `sysctlbyname` queries before
 `getenv` is usable. The adapter now checks the query name and write parameters before touching environment or errno state.
 
-The scoped state adapter maps that exact directory and its descendants to `SimulatorData/tmp/launchd`. It covers mkdir,
+The scoped state adapter maps that exact directory and its descendants to `data/tmp/launchd`. It covers mkdir,
 open, fopen, stat, unlink and renamex_np; unrelated paths are unchanged. It rejects traversal components and overlong translated
 paths. Legacy syslog still attempts its original Unix socket path and can fail nonfatally; no process-wide chdir or socket
 namespace emulation is introduced.
@@ -241,8 +244,8 @@ boot. The following job probes separately exercise endpoint propagation, `xpcpro
 ## A df job and exec replacement
 
 The opt-in `--launchd-df` bootstrap writes one RunAtLoad job, `com.kdt.LiveSimBooter.df`, into the dedicated
-`SimulatorData/Library/LiveSimBooter-LaunchDaemons` directory. It refuses unexpected entries in that directory. The job uses
-guest path `/bin/df` and writes stdout/stderr to `SimulatorData/Library/Logs/df.log`. The plist uses the guest path
+`data/Library/LiveSimBooter-LaunchDaemons` directory. It refuses unexpected entries in that directory. The job uses
+guest path `/bin/df` and writes stdout/stderr to `data/Library/Logs/df.log`. The plist uses the guest path
 `/private/var/mobile/Library/Logs/df.log`; launchd translates it through the configured simulator data directory.
 WorkingDirectory uses `/private/var/mobile/` with a trailing slash to select that same prefix rule.
 `LSB_DEBUG_STOP_CHILDREN=1` propagates the pre-handoff debugger stop to the job processes as well as launchd.
@@ -604,7 +607,7 @@ Mach service name. These are workspace connection-state buffers, unrelated to th
 Evidence and the stopped stack are in `tmp/app-launch-fix/lldb-springboard-contacts-reconnect.txt`.
 
 With `LSB_SIMULATE_NOTIFICATION_SHM=1`, the existing shared-memory adapter now maps those bounded names to separate
-`frontboard-workspace-1-*.shm` and `frontboard-workspace-2-*.shm` files in canonical, owned `SimulatorData/tmp`.
+`frontboard-workspace-1-*.shm` and `frontboard-workspace-2-*.shm` files in canonical, owned `data/tmp`.
 It retains normal creation, exclusive creation, shared mapping and unlink lifetime. Symlinks, hardlinks, special files,
 unsafe roots and unsupported names remain rejected. The sandbox wrapper handles only native-self queries with filter 17
 and the three matching POSIX SHM operations, reporting access to those backing files. Unmatched calls retain their

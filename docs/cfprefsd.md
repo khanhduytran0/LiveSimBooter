@@ -4,10 +4,11 @@ The `--launchd-backboardd` configuration now starts the stock iOS 26 **23A343** 
 It uses job label `com.apple.cfprefsd.xpc.daemon`, arguments `/usr/sbin/cfprefsd daemon`, and Mach service
 `com.apple.cfprefsd.daemon`. These three fields are validated against the matching runtime's stock plist before generating
 the isolated job. The generated job has `RunAtLoad = true`, `KeepAlive = false`, and `EnableTransactions = false`; native
-scheduler, resource-limit and credential policy are not emulated. Its output goes to `SimulatorData/Library/Logs/cfprefsd.log`.
+scheduler, resource-limit and credential policy are not emulated. Its output goes to `data/Library/Logs/cfprefsd.log` under
+the selected App Group's `LSB/iOS/23A343` directory. Older device evidence below predates the `SimulatorData` → `data` rename.
 
 The configuration also enables `BKDigitizerVisualizeTouches` in the simulator's `com.apple.backboardd` preferences domain.
-It reads and merges `SimulatorData/Library/Preferences/com.apple.backboardd.plist`, retaining unrelated keys, then publishes
+It reads and merges `data/Library/Preferences/com.apple.backboardd.plist`, retaining unrelated keys, then publishes
 the complete plist through an atomic rename. An already-enabled file is left byte-for-byte intact. No host `NSUserDefaults`
 domain or native phone preferences are changed. Empty, df and lifecycle launch modes do not alter this file.
 
@@ -29,7 +30,7 @@ as the stock default. Backboardd observes that property and feeds it to the per-
 stock touch-visualization preference, not a host-drawn overlay.
 
 The simulator CoreFoundation preference paths consult `SIMULATOR_SHARED_RESOURCES_DIRECTORY`; launchd and children
-receive the isolated `SimulatorData` directory there, and through `HOME` and `CFFIXED_USER_HOME`. The file is prepared before
+receive the isolated `data` directory there, and through `HOME` and `CFFIXED_USER_HOME`. The file is prepared before
 the new launchd session starts, so its new cfprefsd instance can read the enabled value without an existing daemon cache.
 Reconfiguring a still-running simulator preferences session is not a live preference-update mechanism.
 
@@ -37,13 +38,13 @@ Reconfiguring a still-running simulator preferences session is not a live prefer
 
 Stage these matching runtime files before choosing backboardd mode:
 
-| Source below stock RuntimeRoot | Destination below App Group |
+| Source below stock RuntimeRoot | Destination below selected group/LSB/iOS/23A343 |
 | --- | --- |
 | `usr/sbin/cfprefsd` | `RuntimeRoot/usr/sbin/cfprefsd` |
 | `System/Library/LaunchDaemons/com.apple.cfprefsd.xpc.daemon.plist` | `RuntimeRoot/System/Library/LaunchDaemons/com.apple.cfprefsd.xpc.daemon.plist` |
 
 Sign the executable using the existing runtime identity/identifier procedure; preserve its simulator platform and original
-executable file type. The generated jobs live in `SimulatorData/Library/LiveSimBooter-BackboardDaemons/`; the stock runtime
+executable file type. The generated jobs live in `data/Library/LiveSimBooter-BackboardDaemons/`; the stock runtime
 plists remain input files. The host creates the Preferences directory with mode 0700 and newly written preference files
 with mode 0600. Existing preferences must be an owned, singly-linked regular file of at most 1 MiB containing a dictionary.
 Malformed data, oversized files, symlinks, hard links and other file types fail preparation without overwriting the input.
@@ -142,7 +143,7 @@ truncates the intended version digit. The daemon had fallen back to private heap
 clients' `shm_open(O_RDONLY)` returned `ENOENT`. CoreFoundation treats failure to map this counter page as an invalid source
 before parsing its property list. XML was supported and was not the cause of the failed reads.
 
-The existing owned-file shared-memory adapter now maps only that exact name to `SimulatorData/tmp/cfpreferences-user-v1.shm`.
+The existing owned-file shared-memory adapter now maps only that exact name to `data/tmp/cfpreferences-user-v1.shm`.
 The real daemon creates a 16 KiB writable mapping; clients open separate read-only mappings and observe its change counters.
 Other names, including slash-prefixed, untruncated `v1`, system-daemon and test names, retain native behavior. No sandbox
 preflight exception was added. A fresh guest session is required when installing this fix because the daemon and clients

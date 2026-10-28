@@ -461,7 +461,7 @@ def main(argv=None):
               'missing_stock_symlink_targets': [name for name, entry in entries.items() if entry.get('missing_source_target')],
               'applications': app_inventory(root, entries), 'complete_boot_image': False,
               'notes': ['No device publication or app registration.', 'Cache and patched loaders require the documented separate workflow.',
-                        'Mutable SimulatorData is not copied.', 'Original simulator entitlement sections stay in Mach-O; no entitlement sidecars are used.']}
+                        'Mutable data is not copied.', 'Original simulator entitlement sections stay in Mach-O; no entitlement sidecars are used.']}
     print(json.dumps(stage(options, root, entries, report) if options.stage else report, indent=2))
     return 0 if not errors and (not missing or options.allow_missing_dependencies) else 1
 

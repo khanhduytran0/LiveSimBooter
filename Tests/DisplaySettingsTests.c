@@ -317,8 +317,8 @@ static void testDirectoriesAndFiles(void) {
     assert(mkdtemp(fixture));
     int root = open(fixture, O_RDONLY | O_DIRECTORY | O_CLOEXEC), directory = 123;
     assert(root >= 0);
-    assert(!mkdirat(root, "SimulatorData", 0700));
-    assert(snprintf(dataRoot, sizeof(dataRoot), "%s/SimulatorData", fixture) < (int)sizeof(dataRoot));
+    assert(!mkdirat(root, "data", 0700));
+    assert(snprintf(dataRoot, sizeof(dataRoot), "%s/data", fixture) < (int)sizeof(dataRoot));
     assert(LSBDSettingsOpenDirectory(dataRoot, true, &directory) == ENOENT && directory == -1);
     assert(!mkdirat(root, "RuntimeRoot", 0755));
     assert(LSBDSettingsOpenDirectory(dataRoot, false, &directory) == ENOENT && directory == -1);
@@ -335,13 +335,13 @@ static void testDirectoriesAndFiles(void) {
     testExclusiveWriters(directory);
     assert(!close(directory));
 
-    const char *components[] = {"RuntimeRoot", "SimulatorData", "SimulatorData/var", "SimulatorData/var/run", "SimulatorData/var/run/display-settings"};
+    const char *components[] = {"RuntimeRoot", "data", "data/var", "data/var/run", "data/var/run/display-settings"};
     for (unsigned i = 0; i < sizeof(components) / sizeof(components[0]); ++i) {
         assert(!fchmodat(root, components[i], i == 4 ? 0750 : 0775, 0));
         assert(LSBDSettingsOpenDirectory(dataRoot, false, &directory) == EACCES && directory == -1);
         assert(!fchmodat(root, components[i], i == 4 ? 0700 : 0755, 0));
     }
-    const char *links[] = {"RuntimeRoot", "SimulatorData/var", "SimulatorData/var/run", "SimulatorData/var/run/display-settings"};
+    const char *links[] = {"RuntimeRoot", "data/var", "data/var/run", "data/var/run/display-settings"};
     for (unsigned i = 0; i < sizeof(links) / sizeof(links[0]); ++i) {
         char target[PATH_MAX];
         assert(snprintf(target, sizeof(target), "%s/%s-saved", fixture, links[i]) < (int)sizeof(target));
@@ -354,9 +354,13 @@ static void testDirectoriesAndFiles(void) {
         assert(!renameat(root, saved, root, links[i]));
     }
     assert(LSBDSettingsOpenDirectory(NULL, false, &directory) == EINVAL && directory == -1);
-    assert(LSBDSettingsOpenDirectory("SimulatorData", false, &directory) == EINVAL && directory == -1);
+    assert(LSBDSettingsOpenDirectory("data", false, &directory) == EINVAL && directory == -1);
     assert(LSBDSettingsOpenDirectory(fixture, false, &directory) == EINVAL && directory == -1);
     assert(LSBDSettingsOpenDirectory(dataRoot, false, NULL) == EINVAL);
+    assert(!mkdirat(root, "SimulatorData", 0700));
+    char previousData[PATH_MAX];
+    assert(snprintf(previousData, sizeof(previousData), "%s/SimulatorData", fixture) < (int)sizeof(previousData));
+    assert(LSBDSettingsOpenDirectory(previousData, false, &directory) == EINVAL && directory == -1);
     removeTree(root);
     assert(!close(root));
     assert(!rmdir(fixture));

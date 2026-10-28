@@ -279,20 +279,20 @@ static void testFilesystem(void) {
     assert(!setenv(LSB_SIMULATOR_LAUNCHD_ENV, "01", 1));
     checkFilesystemPath(originalFile, originalFile);
     assert(!setenv(LSB_SIMULATOR_LAUNCHD_ENV, "1", 1));
-    assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", "/group/SimulatorData", 1));
-    checkFilesystemPath(original, "/group/SimulatorData/tmp/launchd");
-    checkFilesystemPath(originalFile, "/group/SimulatorData/tmp/launchd/disabled.plist");
-    checkFilesystemPath("/private/var/tmp/com.kdt.LiveSimBooter.launchd/", "/group/SimulatorData/tmp/launchd/");
-    checkFilesystemPath("/private/var/tmp/com.kdt.LiveSimBooter.launchd/.hidden", "/group/SimulatorData/tmp/launchd/.hidden");
-    checkFilesystemPath("/private/var/tmp/com.kdt.LiveSimBooter.launchd/...", "/group/SimulatorData/tmp/launchd/...");
+    assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", "/group/data", 1));
+    checkFilesystemPath(original, "/group/data/tmp/launchd");
+    checkFilesystemPath(originalFile, "/group/data/tmp/launchd/disabled.plist");
+    checkFilesystemPath("/private/var/tmp/com.kdt.LiveSimBooter.launchd/", "/group/data/tmp/launchd/");
+    checkFilesystemPath("/private/var/tmp/com.kdt.LiveSimBooter.launchd/.hidden", "/group/data/tmp/launchd/.hidden");
+    checkFilesystemPath("/private/var/tmp/com.kdt.LiveSimBooter.launchd/...", "/group/data/tmp/launchd/...");
     const char *traversals[] = {"/../other", "/.", "/a/..", "/a/../other", "/a//./b"};
     for (unsigned i = 0; i < sizeof(traversals) / sizeof(traversals[0]); ++i) {
         char path[PATH_MAX];
         assert(snprintf(path, sizeof(path), "%s%s", original, traversals[i]) > 0);
         checkRejectedPath(path, EINVAL);
     }
-    expectedPath = "/group/SimulatorData/tmp/launchd/disabled.plist";
-    expectedOtherPath = "/group/SimulatorData/tmp/launchd";
+    expectedPath = "/group/data/tmp/launchd/disabled.plist";
+    expectedOtherPath = "/group/data/tmp/launchd";
     expectedFlags = RENAME_SWAP;
     unsigned before = filesystemCalls;
     assert(LSBLaunchdRename(originalFile, original, RENAME_SWAP) == -1 && errno == EACCES);
@@ -300,11 +300,11 @@ static void testFilesystem(void) {
     expectedFlags = 0;
     assert(LSBLaunchdRename(originalFile, expectedOtherPath, 0) == -1 && errno == EACCES);
     expectedPath = "/elsewhere";
-    expectedOtherPath = "/group/SimulatorData/tmp/launchd/disabled.plist";
+    expectedOtherPath = "/group/data/tmp/launchd/disabled.plist";
     assert(LSBLaunchdRename(expectedPath, originalFile, 0) == -1 && errno == EACCES);
     assert(filesystemCalls == before + 3);
-    assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", "/group/SimulatorData///", 1));
-    checkFilesystemPath(originalFile, "/group/SimulatorData/tmp/launchd/disabled.plist");
+    assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", "/group/data///", 1));
+    checkFilesystemPath(originalFile, "/group/data/tmp/launchd/disabled.plist");
     const char *badRoots[] = {"", "relative", "/", "/group/../other", "/group/./data"};
     for (unsigned i = 0; i < sizeof(badRoots) / sizeof(badRoots[0]); ++i) {
         assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", badRoots[i], 1));

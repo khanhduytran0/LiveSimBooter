@@ -1,8 +1,8 @@
 # Simulator processes through LiveProcess
 
-The native `LiveSimBooter` app now has a minimal UIKit foreground window and acts as a launch broker. Every simulator program
+The native `LiveSimBooter` app owns the UIKit tabs and acts as a launch broker. Every simulator program
 runs in a separate `LiveProcess.appex` instance. The implementation intercepts `posix_spawn`, `posix_spawnp`, `wait`, `waitpid`, and `kill`; it does
-not implement a complete POSIX process tree or boot `launchd_sim`.
+not implement a complete POSIX process tree. The normal graphical session boots simulator launchd, which owns the Fish tab and other guest jobs.
 
 The native app and extension have an iOS 26.0 deployment target. The matching iOS 26 runtime remains the guest target.
 The spawn attribute and file-action decoder is pinned to the arm64 Darwin ABI
@@ -10,12 +10,12 @@ audited against that runtime's host-support libkernel. Recheck those layouts bef
 
 ## Launch path
 
-1. [The native view](../Host/ViewController.m) starts the initial guest once from `viewDidLoad`. [The broker](../Host/Broker.m)
-   locates the shared runtime, registers `group.com.kdt.LiveSimBooter.spawn` with `bootstrap_check_in`, starts its receiver,
-   and then submits the initial executable as a spawn plan. Arguments after the host executable name select the initial
-   guest; without arguments it selects interactive `/bin/fish` with the [fake terminal](fake-pty.md) and job control disabled.
-   `--terminal /bin/program ...` wraps an explicit guest in that terminal. Pass `/bin/spawn-probe` explicitly for the process
-   tests. The actual `posix_spawn` call occurs inside the simulator guest.
+1. [The native view](../Host/ViewController.m) waits for **Start** on an ordinary cold launch; explicit guest arguments retain
+   automatic startup. [The broker](../Host/Broker.m) selects the store App Group described below, locates its shared runtime,
+   registers `<selected actual store group>.LiveSimBooter.spawn` with `bootstrap_check_in`, and starts its receiver. The normal
+   initial guest is simulator launchd with the default graphical jobs. The ordinary Fish tab uses its launchd-owned helper and
+   [fake terminal](fake-pty.md), with job control disabled. Explicit `/bin/spawn-probe` selects the process test;
+   `--terminal /bin/program ...` wraps an explicit development guest in that terminal. The actual `posix_spawn` call occurs inside the guest.
 2. [The launch adapter](../Host/ExtensionLauncher.m) uses `NSExtension` to discover `com.kdt.LiveSimBooter.LiveProcess`. It obtains
    the underlying `PKHostPlugIn` and creates a fresh instance UUID. `PKHost readyPlugIns:...ready:` asks pkd to launch that instance
    and returns its PID. Its optional registered-plugin UUID array is checked when present; the device normally omits it.
@@ -24,6 +24,8 @@ audited against that runtime's host-support libkernel. Recheck those layouts bef
 3. [The C extension entry](../LiveProcess/main.c) calls `launch_extension_check_in_live_4UIKit()`, a synchronous libxpc SPI that
    notifies launchd the extension is alive. This is a C API call; the child does not create a UIKit application, NSXPC listener,
    or Objective-C extension context. It then checks that it is single threaded and contacts the broker through a synchronous XPC pipe.
+   A shared C helper reads its actual signed store-group entitlements; it tries the corresponding broker service names. The selected
+   runtime path comes from the authenticated broker reply, rather than being independently guessed by the child.
 4. The broker matches the kernel audit PID to the PID from pkd's launch reply. Check-in retries are bounded while that reply is
    pending. It binds the kernel audit PID generation to the job, preventing another extension instance or a reused PID from
    acquiring that job's plan. No data is delivered before the launch PID matches. This does not rely on a child-supplied PID or
@@ -33,8 +35,9 @@ audited against that runtime's host-support libkernel. Recheck those layouts bef
    state, resolves the executable within RuntimeRoot, and maps it alongside `usr/lib/dyld_sim`.
 6. The native child retains one raw Mach send right to the broker and passes its numeric name in `LSB_BROKER_PORT`, replacing
    any inherited value. A READY exchange reports preparation success or its errno. After releasing native XPC objects, the child
-   checks its thread count, performs the existing fresh-TSD/native-cache handoff, and enters dyld_sim. The loader checks again immediately before
-   detachment. READY means preparation reached that point; it does not prove that dyld_sim or the guest program subsequently ran.
+   checks its thread count, performs the fresh-TSD handoff, and enters dyld_sim. The default retains the native cache with hardware
+   workqueue redirection; diagnostic detachment performs another thread check. READY means preparation reached that point;
+   it does not prove that dyld_sim or the guest program subsequently ran.
 7. The child inserts [libLiveSimSpawn.dylib](../Guest/SpawnShim.c) into the simulator environment. Its interposition tuples replace
    public `posix_spawn` and `posix_spawnp`; a later guest spawn follows the same broker/extension path. Its wait interposer
    reads the shared status table directly, without guest XPC or a helper thread.
@@ -70,17 +73,36 @@ suspends. Long-running assertion and extension behavior remain device checks.
 
 ## Shared runtime and signing
 
-Both targets require the app group `group.com.kdt.LiveSimBooter`. The broker resolves the group's actual container using
-`containerURLForSecurityApplicationGroupIdentifier:`; it does not hard-code a container UUID.
+Both targets request these store groups through Xcode settings, with a team suffix in Debug and an empty suffix in Release:
 
-The layout is `<app-group-container>/RuntimeRoot`. On startup, if that directory does not exist and the old
-`Documents/RuntimeRoot` does, the host moves the old directory into the group. An existing group runtime wins; the migration
-does not merge or overwrite it. Migration failure stops startup. The resolved directory is canonicalized before sending its
-path to a child.
+```ini
+APP_GROUP_SIDESTORE = group.com.SideStore.SideStore$(DEVELOPMENT_TEAM_SUFFIX)
+APP_GROUP_ALTSTORE = group.com.rileytestut.AltStore$(DEVELOPMENT_TEAM_SUFFIX)
+```
 
-Both app and extension provisioning profiles must authorize their own application identifier and the same app group. The host
-keeps Increased Memory Limit. The initial child profile lacked that entitlement, so the child currently omits it; it must not
-be added to its signature without a matching profile. The signed build was verified with certificate SHA-1
+Runtime discovery reads the actual signed group entitlements so store re-signing can update the suffix. The broker resolves
+accessible groups using `containerURLForSecurityApplicationGroupIdentifier:`; it never hard-codes a container UUID. A group
+with an existing `LSB` directory wins, otherwise one with `Apps`, otherwise the first accessible group. SideStore
+precedes AltStore for ties. The selection is fixed for the native process lifetime and shared by the broker and display settings.
+The shared native C helper calls `xpc_copy_entitlement_for_self`, copies only the supported group strings, and releases the XPC
+result before returning. It does not add an asynchronous XPC connection or keep a native object across the simulator handoff.
+
+The layout is `<selected store group>/LSB/iOS/23A343/{RuntimeRoot,data}`. Markers and storage components must be real directories,
+not symlinks. There is no automatic migration, merge, or fallback to the previous dedicated group or Documents. Stop the host
+and guests, restore `RuntimeRoot`, rename an old `SimulatorData` root to `data`, and keep the backup until verified; see
+[the migration runbook](migration.md). Only build 23A343 is selected; there is no runtime-version picker.
+The selected runtime directory is canonicalized before the broker supplies it to a child. Retention when uninstalling this app
+depends on another installed, entitled owner of the selected group; keep the store and an independent backup.
+
+Both app and extension profiles must authorize their own application identifier, the same expanded store groups, and Increased
+Memory Limit. Inspect both final signatures and profiles after packaging or store re-signing. Shared storage does not change
+runtime code-signature requirements. Current setup commands are in [agent setup](agent-setup.md).
+
+### Early shared-runtime evidence
+
+The following records predate store-group storage and describe the original dedicated group layout. They are not fresh setup commands.
+The initial child profile lacked Increased Memory Limit, so that build omitted it; the current setup requires it for both targets.
+The early signed build was verified with certificate SHA-1
 `D7610EDC80D34A9B1A3D3C8563D66A5CD4716293`, team `UU7W52U79B`, matching embedded profiles, and `get-task-allow` for both targets.
 No machine-specific provisioning UUID is stored in the project.
 For ordinary provisioning on a replacement phone, both profiles must include its UDID. The profiles used for the earlier tests
@@ -93,7 +115,7 @@ The runtime still needs appropriately signed dyld_sim, cache, executable, and sh
 their code signatures. Use the existing device-compatible `df` signing procedure for a new executable such as `spawn-probe`;
 ordinary executable signing can reintroduce the executable-segment/profile issue documented in the earlier loader experiments.
 
-For a fresh phone, the explicit spawn-probe test needs these five files, relative to the newly resolved App Group container:
+That early explicit spawn-probe test used these five files, relative to the then-resolved App Group container:
 
 | Local source | Destination inside `RuntimeRoot` |
 | --- | --- |
@@ -109,8 +131,8 @@ the cache and need no loose copies. The old active root has no other data files 
 and empty library directories are not required for this test. The `tmp` artifacts are local and ignored by Git; rebuilding
 them follows [the cache procedure](shared-cache.md). Preserve any existing runtime on a replacement phone before overwriting it.
 
-The current default interactive launch additionally needs `bin/fish` from the [pristine Simulator build](fish.md) and the
-updated shim containing FakePTY and creation-mask tracking. The native host creates `RuntimeRoot/home/mobile` and a temporary
+The early default interactive launch additionally needed `bin/fish` from the [pristine Simulator build](fish.md) and the
+updated shim containing FakePTY and creation-mask tracking. That native host created `RuntimeRoot/home/mobile` and a temporary
 terminal-state file alongside RuntimeRoot. Device-platform executables/dylibs additionally need the
 [iOS compatibility variant of dyld_sim](ios-platform.md); its relocated-cache support remains intact.
 
@@ -323,7 +345,8 @@ Go as status 23, although the upstream server incorrectly reported SSH client st
 
 ## Build and exercise
 
-From the repository root:
+Use [agent setup](agent-setup.md) for current packaging, store-group storage, and deployment. The commands and device identifiers
+below record the early probe reproduction; ignored artifacts may no longer exist. The local test/build entry points remain:
 
 ```sh
 sh Tests/run.sh
@@ -347,7 +370,8 @@ phone needs profiles containing its UDID. The generic-build result does not esta
 
 The shim builder produces `tmp/multiprocess/libLiveSimSpawn.dylib` and `tmp/multiprocess/spawn-probe` for arm64 iOS Simulator.
 After signing them using the runtime's established rules, place them at `RuntimeRoot/usr/lib/libLiveSimSpawn.dylib` and
-`RuntimeRoot/bin/spawn-probe`. The view now starts interactive Fish by default; use an explicit first argument for the probe.
+`RuntimeRoot/bin/spawn-probe`, now under the selected group's `LSB/iOS/23A343` directory. Use an explicit first argument for the probe;
+an ordinary cold launch waits for **Start**, then boots the graphical session.
 Launch the native host into the foreground:
 
 ```sh

@@ -5,9 +5,16 @@ receives its launch plan, locates `RuntimeRoot` in the App Group, maps `usr/lib/
 enters the simulator runtime. LiveProcess uses C for its native startup and releases native XPC objects before handoff.
 The original starter delegates, controller, and storyboards remain in `unused/`; the new host UI lives in `Host/`.
 
-The current default retains the native shared cache and redirects native workqueue entry with a hardware breakpoint.
-Cache detachment is an opt-in diagnostic. The detach experiments below describe that path; see
-[retained-cache workqueue redirection](launchd.md#retained-native-cache-with-hardware-redirection) for the current default.
+The native host caches MobileGestalt's `EffectiveProductionStatusAp` before launching guests. Only an exact Boolean false
+permits native-cache detachment; missing, malformed, or true results keep the native cache and hardware workqueue bridge.
+This is a device production-status check, not an iOS-version or Developer Mode check. The development iPhone used for detach
+tests has custom boot arguments and relaxed TXM enforcement; those results do not establish support on ordinary iOS 26 phones.
+
+The authenticated XPC check-in reply carries that status separately from the guest's environment. LiveProcess validates the
+policy before switching TLS: non-production defaults to detach/software bridging, while production/unknown defaults to
+retain/hardware bridging and rejects an explicit detach request. Explicit retention remains available on development devices.
+No MobileGestalt object or native function pointer crosses the handoff. See
+[retained-cache workqueue redirection](launchd.md#retained-native-cache-with-hardware-redirection) for its device evidence.
 
 A normal icon launch waits for **Start** on the IOSurface tab before starting the broker and graphical runtime. Explicit guest
 arguments, including `--launchd-services`, `/bin/df`, and `--terminal`, retain automatic startup for development tests. Startup is

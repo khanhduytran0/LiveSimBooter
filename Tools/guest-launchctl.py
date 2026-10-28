@@ -21,11 +21,11 @@ identifier = request["id"]
 if not re.fullmatch(r"[0-9a-f]{32}", identifier):
     raise ValueError("invalid request ID")
 root = pathlib.Path(request["data_root"])
-if not root.is_absolute() or root.name != "SimulatorData":
-    raise ValueError("data root must name an absolute SimulatorData directory")
+if not root.is_absolute() or root.name != "data":
+    raise ValueError("data root must name an absolute data directory")
 root = root.resolve(strict=True)
-if root.name != "SimulatorData" or not (root.parent / "RuntimeRoot").is_dir():
-    raise ValueError("SimulatorData must have a sibling RuntimeRoot directory")
+if root.name != "data" or not (root.parent / "RuntimeRoot").is_dir():
+    raise ValueError("data must have a sibling RuntimeRoot directory")
 directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 for component in ("var", "run", "launchctl-control"):
     next_directory = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
@@ -167,7 +167,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", required=True, help="SSH destination, for example root@device.local")
     parser.add_argument("--port", type=int, default=2222)
-    parser.add_argument("--data-root", required=True, help="physical SimulatorData directory on the device")
+    parser.add_argument("--data-root", required=True, help="physical data directory on the device")
     parser.add_argument("--output-dir", type=Path, required=True, help="local directory for request metadata, output and status")
     parser.add_argument("--timeout", type=float, default=90, help="maximum seconds to await a result (default 90)")
     parser.add_argument("--ssh-option", action="append", default=[], help="additional SSH -o option; repeatable")
@@ -180,8 +180,8 @@ def main():
     if not 0 < options.timeout <= 3600:
         parser.error("timeout must be between 0 and 3600 seconds")
     data = Path(options.data_root)
-    if not data.is_absolute() or data.name != "SimulatorData" or ".." in data.parts:
-        parser.error("data-root must name an absolute SimulatorData directory without '..'")
+    if not data.is_absolute() or data.name != "data" or ".." in data.parts:
+        parser.error("data-root must name an absolute data directory without '..'")
     if options.request_id:
         if arguments or not re.fullmatch(r"[0-9a-f]{32}", options.request_id):
             parser.error("request-id needs 32 lowercase hex digits and no command arguments")

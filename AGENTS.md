@@ -14,8 +14,14 @@ Do not substitute an iOS 26.x update or iOS 27 runtime because its marketing ver
   Do not commit runtime binaries, private keys, account data, device unlock codes, or machine-specific paths.
 - Treat paths and PIDs in older experiment notes as historical evidence. `tmp/` links in those notes may not exist in a fresh checkout;
   the setup guide and tracked setup tools must not depend on them.
-- Configure the local team, app and extension identifiers, and App Group together. `ProcessSupport/SpawnPlan.h`, both entitlements files,
-  and the Xcode target settings must agree. Shell variables in the setup guide do not rewrite these source settings.
+- Configure the local team, app and extension identifiers, and both store App Groups together. The `APP_GROUP_SIDESTORE` and
+  `APP_GROUP_ALTSTORE` Xcode settings, both targets' signed entitlements/profiles, and runtime group identifiers must agree.
+  Shell variables in the setup guide do not rewrite these source settings.
+- Runtime storage is `<selected store App Group>/LSB/iOS/23A343/{RuntimeRoot,data}`. Prefer an available group containing
+  `LSB`, then one containing `Apps`, with SideStore before AltStore for ties or an empty setup. Only the pinned build is selected;
+  there is no runtime-version picker or automatic migration from older locations. Manually restore `RuntimeRoot` and rename
+  the old `SimulatorData` root to `data` as described
+  in `docs/migration.md`. Preserve the backup until verified.
 - Keep original runtime inputs immutable. Build into a new directory and keep one known-working device runtime until the replacement is tested.
   Inspect free space before making another multi-gigabyte cache or resource tree. Do not clean unrelated files to make room.
 
@@ -23,8 +29,9 @@ Do not substitute an iOS 26.x update or iOS 27 runtime because its marketing ver
 
 - `Host/` retains the native cache and owns UIKit, the broker, framebuffer presentation, and public IOSurface service.
 - `LiveProcess/main.c` remains pure C. Simulator guests prepare synchronously, release native XPC objects, and check thread count.
-  The default retains the native cache and redirects native workqueue entry with a hardware breakpoint. The diagnostic detach
-  path must not call removed host-cache implementations; retained native code must not run against incompatible guest TLS either.
+  Production/unknown devices retain the native cache and redirect workqueue entry with a hardware breakpoint. Only a native
+  non-production MobileGestalt result permits cache detachment; do not infer this from the OS version or Developer Mode.
+  Detached code must not call removed host-cache implementations; retained native code must not run against incompatible guest TLS either.
 - Native Metal helpers use separate host-selected LiveProcess roles and keep native libraries. Guests cannot choose arbitrary native roles.
 - `Guest/` contains simulator interposers. `ProcessSupport/` contains shared wire formats and validation. Preserve ownership of FDs,
   Mach rights, immutable identity snapshots, full audit tokens, and logical/native PID distinctions.

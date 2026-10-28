@@ -76,6 +76,16 @@ focus. The broker publishes the terminal-change notification before starting its
 contacts and pauses drawable presentation. Dirty updates continue into the display's owned baseline, so returning to IOSurface
 can present the current image without restarting backboardd or losing pending frame acknowledgments.
 
+The terminal parses output and answers device/cursor queries immediately. It coalesces screen painting on the main queue
+and skips painting while the Fish tab is hidden. Reopening the tab displays the latest screen, including output received
+before its first appearance or just before EOF. Painting updates the existing text storage in one editing transaction,
+without animation, and scrolls only when the cursor leaves the viewport. Identical attributed text skips the storage edit,
+but still checks layout and cursor visibility after resizing. Replacing the text view's entire `attributedText` and always
+calling `scrollRangeToVisible:` caused visible jumps during Fish autosuggestions in the initial coalesced-rendering trial.
+`Tests/TerminalScreenTests.m` checks burst coalescing, hidden output and
+resize, final output without another callback, and reentrant replies/presentation changes; these are local behavioral tests,
+not a measured device performance result.
+
 The focused broker/configuration suites cover authenticated attachment, xpcproxy/helper/Fish replacement, subtree isolation,
 concurrent-session rejection, default icon-launch job selection and preserved explicit diagnostic modes. TerminalSession tests
 cover transactional final actions, FD/environment failure rollback, late output binding, EOF and closure notification.
@@ -160,6 +170,17 @@ replace the separate device checks below.
 
 ## Device checks and diagnostics
 
+On 2026-10-28, the refactor ran without LLDB on iPhone16,2 / iOS 26.1 (`23B50`) with the unchanged iOS Simulator 26.0
+(`23A343`) runtime. Its cache remained at `0x110000000`, UUID `73ED978A-FD25-3166-A57A-34E21BB7E5B8`; only the native app,
+extension and separately built guest shim were replaced with development-signed artifacts. A 200-line Fish builtin burst
+received while the tab was hidden appeared when the tab opened, and the user confirmed responsive typing/deletion.
+Fish's `df` child exited zero. The first UI trial exposed flashing and a vertical jump when an autosuggestion disappeared;
+after the in-place text-storage correction, repeated typing/deleting over a full `launchctl list` page stayed positioned
+without flashing, confirmed by the user. The final build removed temporary render tracing; the user also confirmed that
+swipe-dismissal and reopening of the keyboard preserved a visible, stable prompt while typing/deleting. The screen tests
+do not exercise UIKit's layout behavior; this is separate device
+evidence, not a CPU or frame-time benchmark. Logs and before/after screenshots are under ignored `tmp/refactor-20261028/`.
+
 On 2026-10-26, the graphical host **10396** started the launchd-owned terminal job with logical PID **10516**. Its xpcproxy
 instance **10516** replaced itself with helper **10517**, then Fish **10518**, preserving the logical job identity. Fish
 reached `fish> ` and accepted interactive input. The command `df -h >/dev/null; echo DF_STATUS=$status` launched **10554**;
@@ -200,7 +221,7 @@ at the old host pthread PC. The short and large startup-vector tests did not rep
 suspended worker under LLDB isolated the stale entry point; the integrated thread bridge then enabled the successful runs above.
 The isolated zero-token report remains a separate unresolved observation.
 
-Two diagnostic environment switches are available and normally off:
+These diagnostic environment switches are available and normally off:
 
 - `LSB_DEBUG_STOP_BEFORE_HANDOFF=1` makes LiveProcess send itself `SIGSTOP` after reporting READY and building its launch
   arguments, before entering the simulator loader. This permits attaching LLDB while native code is still available. The
@@ -208,6 +229,9 @@ Two diagnostic environment switches are available and normally off:
 - `LSB_TERMINAL_INPUT_FIFO=1` makes the native host create a mode-`0600` FIFO at `<terminal-state-path>.input` and print its
   exact path as `[terminal] input FIFO=...`. Writing raw bytes to it feeds the same line-discipline/input path as the keyboard.
   It avoids relying on console stdin forwarding during device tests. The host removes the FIFO when the terminal closes.
+- `LSB_TERMINAL_CONSOLE_OUTPUT=1` in the native host environment also mirrors terminal output to its stdout, for example a
+  connected devicectl console. Ordinary UI sessions leave this off so console backpressure cannot stall UIKit. Diagnostic
+  mirroring remains synchronous and can block if that console stops consuming output; the Fish tab receives output either way.
 
 The FIFO and stop switch are test controls; neither is required for ordinary on-screen use. Runtime `DYLD_PRINT_*`
 diagnostics remain off unless explicitly supplied.

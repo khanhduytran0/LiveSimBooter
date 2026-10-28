@@ -199,6 +199,9 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_FAKE_P
     Tests/FakePTYTests.c Guest/FakePTY.c ProcessSupport/FakePTY.c -o "$test_directory/FakePTY"
 "$test_directory/FakePTY"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/FakePTYDescriptorTests.c -o "$test_directory/FakePTYDescriptor"
+"$test_directory/FakePTYDescriptor"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ThreadBootstrapTests.c -o "$test_directory/ThreadBootstrap"
 "$test_directory/ThreadBootstrap"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \

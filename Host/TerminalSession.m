@@ -23,7 +23,7 @@ NSString *const LSBTerminalSessionDidCloseNotification = @"LSBTerminalSessionDid
     NSMutableData *_pendingInput;
     NSMutableData *_unclaimedOutput;
     NSString *_inputPath;
-    BOOL _started, _closed;
+    BOOL _started, _closed, _mirrorConsole;
     uint32_t _inputFlush;
 }
 @property (nonatomic, readwrite) NSString *statePath;
@@ -48,6 +48,8 @@ static int terminalSignal(void *context, pid_t group, int number) {
 - (instancetype)initWithDirectory:(NSString *)directory error:(int *)error {
     if (!(self = [super init])) { *error = ENOMEM; return nil; }
     _master = _slave = _stateFD = _consoleFD = -1;
+    const char *consoleOutput = getenv("LSB_TERMINAL_CONSOLE_OUTPUT");
+    _mirrorConsole = consoleOutput && !strcmp(consoleOutput, "1");
     _pendingInput = [NSMutableData new];
     _unclaimedOutput = [NSMutableData new];
     _masterRegistrations = dispatch_group_create();
@@ -266,9 +268,8 @@ static int terminalSignal(void *context, pid_t group, int number) {
             [_unclaimedOutput appendBytes:bytes length:length];
         }
     }
-    // Preserve the raw terminal stream in a connected devicectl console for reproducible diagnostics.
-    if (length) fwrite(bytes, 1, length, stdout);
-    fflush(stdout);
+    // Console backpressure can block UIKit. Mirror only when explicitly requested for device diagnostics.
+    if (_mirrorConsole && length) { fwrite(bytes, 1, length, stdout); fflush(stdout); }
 }
 - (void)setOutputHandler:(void (^)(NSData *data))outputHandler {
     _outputHandler = [outputHandler copy];

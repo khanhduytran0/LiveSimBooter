@@ -21,7 +21,7 @@ static int testInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *, NSDic
 #define LSBConfiguredGuestDeviceType testConfiguredDeviceType
 #define LSBSaveConfiguredGuestDeviceType testSaveDeviceType
 #define LSBInstallGuestDeviceCapabilitiesWithNativeHaptics testInstallGuestDeviceCapabilitiesWithNativeHaptics
-static int testCopyXMLFromDEREntitlements(const void *, size_t, void **, size_t *);
+static int testCopyXMLFromDEREntitlementsWithDictionary(const void *, size_t, void **, size_t *, NSDictionary **);
 static int testReadMachOCodeDirectoryHash(int, unsigned char [20]);
 static kern_return_t testTaskInfo(task_name_t, task_flavor_t, task_info_t, mach_msg_type_number_t *);
 static kern_return_t testBootstrapLookup(mach_port_t, const char *, mach_port_t *);
@@ -31,7 +31,7 @@ static int testTaskCaptureReceive(const LSBTaskPortCaptureOffer *, const audit_t
 #define LSBTaskPortCaptureCreate testTaskCaptureCreate
 #define LSBTaskPortCaptureReceive testTaskCaptureReceive
 #define LSBPeerDebuggerQuery testPeerDebuggerQuery
-#define LSBCopyXMLFromDEREntitlements testCopyXMLFromDEREntitlements
+#define LSBCopyXMLFromDEREntitlementsWithDictionary testCopyXMLFromDEREntitlementsWithDictionary
 #define LSBReadMachOCodeDirectoryHash testReadMachOCodeDirectoryHash
 #define LSBLaunchdRegisterEndpointWithTimeout LSBTestRegisterEndpoint
 #define LSBLaunchdUnregisterEndpointWithTimeout LSBTestUnregisterEndpoint
@@ -47,7 +47,7 @@ static int testTaskCaptureReceive(const LSBTaskPortCaptureOffer *, const audit_t
 #undef bootstrap_look_up
 #undef LSBLaunchdRegisterEndpointWithTimeout
 #undef LSBLaunchdUnregisterEndpointWithTimeout
-#undef LSBCopyXMLFromDEREntitlements
+#undef LSBCopyXMLFromDEREntitlementsWithDictionary
 #undef LSBReadMachOCodeDirectoryHash
 #undef LSBConfiguredGuestDeviceType
 #undef LSBSaveConfiguredGuestDeviceType
@@ -219,9 +219,9 @@ static void handleMessage(LSBReceivedMessage *message) {
     brokerHandleMessage(message);
 }
 
-static int testCopyXMLFromDEREntitlements(const void *der, size_t size, void **xml, size_t *xmlSize) {
-    if (xmlConversionError) { *xml = NULL; *xmlSize = 0; return xmlConversionError; }
-    return LSBCopyXMLFromDEREntitlements(der, size, xml, xmlSize);
+static int testCopyXMLFromDEREntitlementsWithDictionary(const void *der, size_t size, void **xml, size_t *xmlSize, NSDictionary **dictionary) {
+    if (xmlConversionError) { *xml = NULL; *xmlSize = 0; *dictionary = nil; return xmlConversionError; }
+    return LSBCopyXMLFromDEREntitlementsWithDictionary(der, size, xml, xmlSize, dictionary);
 }
 
 static kern_return_t testBootstrapLookup(mach_port_t bootstrap, const char *name, mach_port_t *port) {
@@ -3167,32 +3167,14 @@ static RecordedReply *requestProcessList(audit_token_t caller) {
 static void testProcessListEntitlementsAndAuthentication(void) {
     resetBroker();
     for (id value in @[@YES, @NO, @1, @0, @"true", @[], @{}]) {
-        NSData *plist = [NSPropertyListSerialization dataWithPropertyList:@{@"proc_info-allow": value, @"com.apple.druid": value,
-                                                                           @"task_for_pid-allow": value}
-                                                                  format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
-        uint32_t size = (uint32_t)plist.length + 8;
-        const unsigned char header[] = {0xfa, 0xde, 0x71, 0x71, size >> 24, size >> 16, size >> 8, size};
-        NSMutableData *blob = [NSMutableData dataWithBytes:header length:sizeof(header)];
-        [blob appendData:plist];
+        NSDictionary *entitlements = @{@"proc_info-allow": value, @"com.apple.druid": value, @"task_for_pid-allow": value};
         BOOL expected = CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() && [value boolValue];
-        NSDictionary *entitlements = guestEntitlementsDictionary(blob);
-        assert(entitlements && booleanGuestEntitlement(entitlements, @"proc_info-allow") == expected);
+        assert(booleanGuestEntitlement(entitlements, @"proc_info-allow") == expected);
         assert(booleanGuestEntitlement(entitlements, @"com.apple.druid") == expected);
         assert(booleanGuestEntitlement(entitlements, @"task_for_pid-allow") == expected);
         assert(!booleanGuestEntitlement(entitlements, @"missing"));
-        ((unsigned char *)blob.mutableBytes)[3] ^= 1;
-        assert(!guestEntitlementsDictionary(blob)); // A valid plist cannot authorize anything with the wrong signing-blob header.
     }
-    assert(!guestEntitlementsDictionary(nil) && !guestEntitlementsDictionary([NSData dataWithBytes:"invalid" length:7]));
     assert(!booleanGuestEntitlement(nil, @"proc_info-allow"));
-    for (id root in @[@[], @"not a dictionary"]) {
-        NSData *plist = [NSPropertyListSerialization dataWithPropertyList:root format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
-        uint32_t size = (uint32_t)plist.length + 8;
-        const unsigned char header[] = {0xfa, 0xde, 0x71, 0x71, size >> 24, size >> 16, size >> 8, size};
-        NSMutableData *blob = [NSMutableData dataWithBytes:header length:sizeof(header)];
-        [blob appendData:plist];
-        assert(!guestEntitlementsDictionary(blob));
-    }
     char temporary[] = "/tmp/LSBProcessList.XXXXXX", canonical[PATH_MAX];
     assert(mkdtemp(temporary) && realpath(temporary, canonical));
     NSString *directory = [NSString stringWithUTF8String:canonical];

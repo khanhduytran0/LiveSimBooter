@@ -34,7 +34,7 @@ static id propertyListValue(xpc_object_t object, unsigned depth, ConversionBudge
             if (!value) return nil;
             [array addObject:value];
         }
-        return array;
+        return [array copy];
     }
     if (type == XPC_TYPE_DICTIONARY) {
         if (xpc_dictionary_get_count(object) > 65536 - budget->nodes) return nil;
@@ -49,25 +49,27 @@ static id propertyListValue(xpc_object_t object, unsigned depth, ConversionBudge
             dictionary[name] = value;
             return true;
         });
-        return complete ? dictionary : nil;
+        return complete ? [dictionary copy] : nil;
     }
     return nil;
 }
 
-int LSBCopyXMLFromDEREntitlements(const void *der, size_t derSize, void **xml, size_t *xmlSize) {
+int LSBCopyXMLFromDEREntitlementsWithDictionary(const void *der, size_t derSize, void **xml, size_t *xmlSize, NSDictionary **dictionary) {
     if (xml) *xml = NULL;
     if (xmlSize) *xmlSize = 0;
+    if (dictionary) *dictionary = nil;
     if (!xml || !xmlSize || !LSBGuestEntitlementsHasValidBlobHeader(der, derSize)) return EINVAL;
     const unsigned char *bytes = der;
     int error = LSBValidateGuestEntitlementsDER(bytes + 8, derSize - 8);
     if (error) return error;
+    NSDictionary *decoded = nil;
     @autoreleasepool {
         xpc_object_t object = xpc_create_from_ce_der(bytes + 8, derSize - 8);
         if (!object || xpc_get_type(object) != XPC_TYPE_DICTIONARY) return EINVAL;
         ConversionBudget budget = {0};
-        id dictionary = propertyListValue(object, 0, &budget);
-        if (!dictionary) return EINVAL;
-        NSData *data = [NSPropertyListSerialization dataWithPropertyList:dictionary format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
+        decoded = propertyListValue(object, 0, &budget);
+        if (!decoded) return EINVAL;
+        NSData *data = [NSPropertyListSerialization dataWithPropertyList:decoded format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
         if (!data) return EINVAL;
         if (data.length > LSB_GUEST_ENTITLEMENTS_MAX_XML_BLOB_SIZE - 8) return E2BIG;
         size_t size = data.length + 8;
@@ -78,6 +80,11 @@ int LSBCopyXMLFromDEREntitlements(const void *der, size_t derSize, void **xml, s
         memcpy(result + sizeof(header), data.bytes, data.length);
         *xml = result;
         *xmlSize = size;
-        return 0;
     }
+    if (dictionary) *dictionary = decoded; // Publish outside the inner pool so the autoreleasing output remains valid for its caller.
+    return 0;
+}
+
+int LSBCopyXMLFromDEREntitlements(const void *der, size_t derSize, void **xml, size_t *xmlSize) {
+    return LSBCopyXMLFromDEREntitlementsWithDictionary(der, derSize, xml, xmlSize, NULL);
 }

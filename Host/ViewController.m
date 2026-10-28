@@ -350,10 +350,12 @@ static void showStatus(UIViewController *controller, NSString *text) {
     self.visible = YES;
     // A tab/scene can become visible after attachment and EOF; recover the current session even if a notification was missed.
     [self bindTerminal];
+    self.terminal.presentationEnabled = YES;
     if (self.session && !self.session.closed) [self.terminal becomeFirstResponder];
 }
 - (void)viewWillDisappear:(BOOL)animated {
     self.visible = NO;
+    self.terminal.presentationEnabled = NO;
     [self.view endEditing:YES];
     [super viewWillDisappear:animated];
 }

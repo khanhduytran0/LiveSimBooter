@@ -200,7 +200,7 @@ static int inspectionSysctl(int *name, u_int count, void *output, size_t *length
     int error = LSBTransportListProcesses(&list, &size);
     if (error) { errno = error; return -1; } // Never fall back to enumerating native processes after an authorization denial.
     struct kinfo_proc *processes = NULL;
-    if (all && list->count) {
+    if (all && output && list->count) {
         processes = calloc(list->count, sizeof(*processes));
         if (!processes) { free(list); errno = ENOMEM; return -1; }
         for (uint32_t i = 0; i < list->count; ++i) {

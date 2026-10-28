@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <errno.h>
 #include <sys/sysctl.h>
 #include <sys/resource.h>
@@ -9,16 +10,26 @@ static int testSysctl(int *, u_int, void *, size_t *, void *, size_t);
 static int testRusage(int, int, rusage_info_t *);
 static kern_return_t testTaskForPID(mach_port_name_t, int, mach_port_name_t *);
 static kern_return_t testPortModRefs(ipc_space_t, mach_port_name_t, mach_port_right_t, mach_port_delta_t);
+static void *testKinfoAlloc(size_t, size_t);
 #define sysctl testSysctl
 #define proc_pid_rusage testRusage
 #define task_for_pid testTaskForPID
 #define mach_port_mod_refs testPortModRefs
+#define calloc testKinfoAlloc
 #define LSB_PROCESS_INSPECTION_TESTING
 #include "../Guest/ProcessInspection.c"
 #undef sysctl
 #undef proc_pid_rusage
 #undef task_for_pid
 #undef mach_port_mod_refs
+#undef calloc
+
+static unsigned kinfoAllocations;
+static bool failKinfoAllocation;
+static void *testKinfoAlloc(size_t count, size_t size) {
+    ++kinfoAllocations;
+    return failKinfoAllocation ? NULL : calloc(count, size);
+}
 
 static unsigned nativeCalls, listCalls;
 static int nativeError, listError, lastMIB[4], lastRusagePID, lastTaskPID;
@@ -197,8 +208,14 @@ int main(void) {
     listError = 0; errno = EDOM;
     assert(!inspectionSysctl(maximum, 2, &value, &length, NULL, 0) && value == LSB_PROCESS_LIST_CAPACITY && errno == EDOM);
     length = 0;
+    unsigned sizingCalls = listCalls;
+    failKinfoAllocation = true;
     assert(!inspectionSysctl(all, 4, NULL, &length, NULL, 0) && length == 2 * sizeof(struct kinfo_proc));
+    assert(!kinfoAllocations && listCalls == sizingCalls + 1 && errno == EDOM);
+    assert(inspectionSysctl(all, 4, NULL, (size_t *)1, NULL, 0) == -1 && errno == EFAULT && !kinfoAllocations);
     struct kinfo_proc info[2]; length = sizeof(info);
+    assert(inspectionSysctl(all, 4, info, &length, NULL, 0) == -1 && errno == ENOMEM && kinfoAllocations == 1);
+    failKinfoAllocation = false;
     assert(!inspectionSysctl(all, 4, info, &length, NULL, 0) && length == sizeof(info));
     assert(info[0].kp_proc.p_pid == 21 && info[0].kp_eproc.e_ppid == 11 && !strcmp(info[0].kp_proc.p_comm, "CocoaTop"));
     assert(info[1].kp_proc.p_pid == 22 && !strcmp(info[1].kp_proc.p_comm, "df"));

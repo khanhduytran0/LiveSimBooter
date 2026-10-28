@@ -371,13 +371,6 @@ static void logGuestEntitlementError(LSBJob *job) {
     }
 }
 
-static NSDictionary *guestEntitlementsDictionary(NSData *blob) {
-    if (!LSBGuestEntitlementsHasValidBlobHeaderForOperation(blob.bytes, blob.length, 7)) return nil;
-    NSData *plist = [blob subdataWithRange:NSMakeRange(8, blob.length - 8)];
-    id object = [NSPropertyListSerialization propertyListWithData:plist options:NSPropertyListImmutable format:NULL error:NULL];
-    return [object isKindOfClass:NSDictionary.class] ? object : nil;
-}
-
 // Only an actual plist Boolean true authorizes inspection; integers/strings and absent or malformed metadata fail closed.
 static BOOL booleanGuestEntitlement(NSDictionary *entitlements, NSString *key) {
     id value = entitlements[key];
@@ -405,12 +398,12 @@ static void snapshotGuestEntitlements(LSBJob *job) {
     job.guestEntitlements = snapshot;
     void *xml = NULL;
     size_t size = 0;
-    job.guestXMLEntitlementsError = LSBCopyXMLFromDEREntitlements(snapshot.bytes, snapshot.length, &xml, &size);
+    NSDictionary *entitlements = nil;
+    job.guestXMLEntitlementsError = LSBCopyXMLFromDEREntitlementsWithDictionary(snapshot.bytes, snapshot.length, &xml, &size, &entitlements);
     if (!job.guestXMLEntitlementsError) {
         job.guestXMLEntitlements = [[NSData alloc] initWithBytesNoCopy:xml length:size freeWhenDone:YES];
         if (!job.guestXMLEntitlements) { free(xml); job.guestXMLEntitlementsError = ENOMEM; }
         else {
-            NSDictionary *entitlements = guestEntitlementsDictionary(job.guestXMLEntitlements);
             job.guestProcessInfoAllowed = booleanGuestEntitlement(entitlements, @"proc_info-allow");
             job.guestTaskForPIDAllowed = booleanGuestEntitlement(entitlements, @"task_for_pid-allow");
             job.guestDragUIAllowed = booleanGuestEntitlement(entitlements, @"com.apple.druid");

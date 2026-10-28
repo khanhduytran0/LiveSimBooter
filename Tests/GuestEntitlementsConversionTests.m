@@ -27,7 +27,8 @@ static NSData *blobForDER(NSData *raw) {
 
 static NSDictionary *converted(NSData *blob) {
     void *bytes = NULL; size_t size = 0;
-    int error = LSBCopyXMLFromDEREntitlements(blob.bytes, blob.length, &bytes, &size);
+    NSDictionary *decoded = nil;
+    int error = LSBCopyXMLFromDEREntitlementsWithDictionary(blob.bytes, blob.length, &bytes, &size, &decoded);
     if (error) fprintf(stderr, "conversion failed: %d (%s)\n", error, strerror(error));
     assert(!error && LSBGuestEntitlementsHasValidBlobHeaderForOperation(bytes, size, 7));
     NSData *xml = [NSData dataWithBytes:(unsigned char *)bytes + 8 length:size - 8];
@@ -35,7 +36,8 @@ static NSDictionary *converted(NSData *blob) {
     NSPropertyListFormat format = 0;
     id dictionary = [NSPropertyListSerialization propertyListWithData:xml options:0 format:&format error:NULL];
     assert([dictionary isKindOfClass:NSDictionary.class] && format == NSPropertyListXMLFormat_v1_0);
-    return dictionary;
+    assert(decoded && [decoded isEqual:dictionary]);
+    return decoded;
 }
 
 static void expectError(NSData *blob, int expected) {
@@ -43,6 +45,16 @@ static void expectError(NSData *blob, int expected) {
     int error = LSBCopyXMLFromDEREntitlements(blob.bytes, blob.length, &bytes, &size);
     if (error != expected) fprintf(stderr, "conversion error=%d expected=%d\n", error, expected);
     assert(error == expected && !bytes && !size);
+    NSDictionary *dictionary = @{ @"stale": @YES };
+    bytes = (void *)1; size = 99;
+    assert(LSBCopyXMLFromDEREntitlementsWithDictionary(blob.bytes, blob.length, &bytes, &size, &dictionary) == expected);
+    assert(!dictionary && !bytes && !size);
+}
+
+static void assertImmutableContainers(id value) {
+    assert(![value isKindOfClass:NSMutableDictionary.class] && ![value isKindOfClass:NSMutableArray.class]);
+    if ([value isKindOfClass:NSDictionary.class]) for (id key in value) assertImmutableContainers(value[key]);
+    if ([value isKindOfClass:NSArray.class]) for (id child in value) assertImmutableContainers(child);
 }
 
 static NSData *tlv(unsigned char tag, NSData *content) {
@@ -71,8 +83,25 @@ static void testConversion(void) {
         @"negative": @(-129), @"positive": @128, @"text": @"é𝄞" };
     NSDictionary *nested = converted(blob);
     assert([nested isEqual:expected]);
+    assertImmutableContainers(nested);
     assert(CFGetTypeID((__bridge CFTypeRef)nested[@"a"]) == CFBooleanGetTypeID());
     assert(CFGetTypeID((__bridge CFTypeRef)nested[@"positive"]) == CFNumberGetTypeID());
+    assert(CFGetTypeID((__bridge CFTypeRef)nested[@"array"][0]) == CFBooleanGetTypeID());
+    NSDictionary *snapshot;
+    @autoreleasepool {
+        NSMutableData *input = [blob mutableCopy];
+        void *xml = NULL; size_t xmlSize = 0;
+        assert(!LSBCopyXMLFromDEREntitlementsWithDictionary(input.bytes, input.length, &xml, &xmlSize, &snapshot));
+        memset(input.mutableBytes, 0, input.length);
+        memset(xml, 0, xmlSize); free(xml);
+    }
+    assert([snapshot isEqual:expected]); // Owned decoded values survive source/XML destruction and the converter's autorelease pool.
+    assertImmutableContainers(snapshot);
+    void *legacyXML = NULL, *currentXML = NULL; size_t legacySize = 0, currentSize = 0;
+    assert(!LSBCopyXMLFromDEREntitlements(blob.bytes, blob.length, &legacyXML, &legacySize));
+    assert(!LSBCopyXMLFromDEREntitlementsWithDictionary(blob.bytes, blob.length, &currentXML, &currentSize, NULL));
+    assert(legacySize == currentSize && !memcmp(legacyXML, currentXML, legacySize));
+    free(legacyXML); free(currentXML);
     const unsigned char empty[] = {0x70, 5, 2, 1, 1, 0xb0, 0};
     assert([converted(blobForDER([NSData dataWithBytes:empty length:sizeof(empty)])) isEqual:@{}]);
     const unsigned char unicode[] = {0x70, 0x1a, 2, 1, 1, 0xb0, 0x15,
@@ -97,6 +126,10 @@ static void testConversion(void) {
     void *bytes = (void *)1; size_t size = 99;
     assert(LSBCopyXMLFromDEREntitlements(blob.bytes, blob.length, NULL, &size) == EINVAL && !size);
     assert(LSBCopyXMLFromDEREntitlements(blob.bytes, blob.length, &bytes, NULL) == EINVAL && !bytes);
+    snapshot = expected; size = 99;
+    assert(LSBCopyXMLFromDEREntitlementsWithDictionary(blob.bytes, blob.length, NULL, &size, &snapshot) == EINVAL && !size && !snapshot);
+    snapshot = expected; bytes = (void *)1;
+    assert(LSBCopyXMLFromDEREntitlementsWithDictionary(blob.bytes, blob.length, &bytes, NULL, &snapshot) == EINVAL && !bytes && !snapshot);
 
     // Small DER can expand past the XML transport cap because markup characters require escaping.
     NSMutableData *large = [NSMutableData dataWithLength:220000]; memset(large.mutableBytes, '&', large.length);

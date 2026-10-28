@@ -18,6 +18,47 @@ static void pumpUntil(BOOL (^finished)(void)) {
     assert(finished());
 }
 
+static void consoleMirroring(void) {
+    char directory[] = "/tmp/LiveSimBooter-terminal-console.XXXXXX";
+    assert(mkdtemp(directory));
+    const char *existing = getenv("LSB_TERMINAL_CONSOLE_OUTPUT");
+    char *original = existing ? strdup(existing) : NULL;
+    const char *settings[] = {NULL, "0", "1", "true"};
+    for (unsigned i = 0; i < sizeof(settings) / sizeof(*settings); ++i) {
+        if (settings[i]) assert(!setenv("LSB_TERMINAL_CONSOLE_OUTPUT", settings[i], 1));
+        else assert(!unsetenv("LSB_TERMINAL_CONSOLE_OUTPUT"));
+        FILE *capture = tmpfile();
+        assert(capture);
+        fflush(stdout);
+        int savedOutput = dup(STDOUT_FILENO);
+        assert(savedOutput >= 0 && dup2(fileno(capture), STDOUT_FILENO) >= 0);
+        int error = 0;
+        LSBTerminalSession *session = [[LSBTerminalSession alloc] initWithDirectory:[NSString stringWithUTF8String:directory] error:&error];
+        assert(session && !error);
+        LSBReceivedMessage message = {0};
+        assert(![session attachToMessage:&message]);
+        NSMutableData *output = [NSMutableData new];
+        session.outputHandler = ^(NSData *data) { [output appendData:data]; };
+        [session start];
+        assert(write(message.fds[1], "console\n", 8) == 8);
+        pumpUntil(^BOOL { return output.length == 9; });
+        for (unsigned fd = 0; fd < message.plan.fdCount; ++fd) close(message.fds[fd]);
+        pumpUntil(^BOOL { return session.closed; });
+        fflush(stdout);
+        assert(dup2(savedOutput, STDOUT_FILENO) >= 0);
+        close(savedOutput);
+        rewind(capture);
+        char bytes[16];
+        size_t size = fread(bytes, 1, sizeof(bytes), capture);
+        assert(i == 2 ? size == 9 && !memcmp(bytes, "console\r\n", 9) : size == 0);
+        assert([output isEqualToData:[@"console\r\n" dataUsingEncoding:NSUTF8StringEncoding]]);
+        fclose(capture);
+    }
+    if (original) { assert(!setenv("LSB_TERMINAL_CONSOLE_OUTPUT", original, 1)); free(original); }
+    else assert(!unsetenv("LSB_TERMINAL_CONSOLE_OUTPUT"));
+    assert(!rmdir(directory));
+}
+
 static void replacingStandardIO(void) {
     char directory[] = "/tmp/LiveSimBooter-terminal-replace.XXXXXX";
     assert(mkdtemp(directory));
@@ -118,6 +159,7 @@ static void replacementFailureIsAtomic(void) {
 
 int main(void) {
     @autoreleasepool {
+        consoleMirroring();
         replacingStandardIO();
         replacementFailureIsAtomic();
         char directory[] = "/tmp/LiveSimBooter-terminal-session.XXXXXX";

@@ -11,8 +11,78 @@ static LSBTerminalScreen *screen(NSUInteger rows, NSUInteger columns) {
     return screen;
 }
 
+static void drainMainQueue(void) {
+    __block BOOL drained = NO;
+    dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:2];
+    while (!drained && deadline.timeIntervalSinceNow > 0)
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.001]];
+    assert(drained);
+}
+
+static void presentationTests(void) {
+    LSBTerminalScreen *terminal = screen(4, 30);
+    __weak LSBTerminalScreen *weakTerminal = terminal;
+    __block unsigned renders = 0, replies = 0;
+    __block NSString *painted;
+    terminal.presentationHandler = ^{ ++renders; painted = [weakTerminal text]; };
+    terminal.reply = ^(NSData *data) {
+        ++replies;
+        assert([data isEqualToData:[@"\033[1;8R" dataUsingEncoding:NSUTF8StringEncoding]]);
+        feed(weakTerminal, @"!"); // A synchronous echo must still parse while presentation is hidden.
+    };
+
+    // Startup output precedes first appearance. A split Unicode/ANSI stream still replies immediately and paints nothing.
+    NSData *startup = [@"start é\033[6n" dataUsingEncoding:NSUTF8StringEncoding];
+    for (NSUInteger i = 0; i < startup.length; ++i) [terminal consume:[startup subdataWithRange:NSMakeRange(i, 1)]];
+    assert(replies == 1 && !renders && [[terminal text] isEqualToString:@"start é! "]);
+    drainMainQueue();
+    assert(!renders);
+    terminal.presentationEnabled = YES;
+    assert(!renders);
+    drainMainQueue();
+    assert(renders == 1 && [painted isEqualToString:@"start é! "]);
+
+    // A burst has the same final screen as immediate parsing, with one render despite many newline fragments.
+    for (unsigned i = 0; i < 200; ++i) { feed(terminal, @"row"); feed(terminal, @"\r\n"); }
+    assert(renders == 1);
+    NSString *burst = [terminal text];
+    drainMainQueue();
+    assert(renders == 2 && [painted isEqualToString:burst]);
+
+    // Hide before an already queued redraw runs, then resize and reach EOF without another output callback.
+    feed(terminal, @"final output");
+    terminal.presentationEnabled = NO;
+    [terminal resizeRows:3 columns:25];
+    terminal.reply = nil;
+    drainMainQueue();
+    assert(renders == 2);
+    NSString *final = [terminal text];
+    terminal.presentationEnabled = YES;
+    drainMainQueue();
+    assert(renders == 3 && [painted isEqualToString:final]);
+    terminal.presentationEnabled = NO;
+    terminal.presentationEnabled = YES;
+    drainMainQueue();
+    assert(renders == 3); // Showing an unchanged screen needs no replacement of attributedText.
+
+    // Reentrant output during presentation invalidates the following pass instead of losing that change.
+    __block BOOL inject = YES;
+    terminal.presentationHandler = ^{
+        ++renders;
+        painted = [weakTerminal text];
+        if (inject) { inject = NO; feed(weakTerminal, @"!"); }
+    };
+    feed(terminal, @"x");
+    drainMainQueue();
+    drainMainQueue();
+    assert(renders == 5 && [painted isEqualToString:[terminal text]] && [painted hasSuffix:@"x! "]);
+    terminal.presentationHandler = nil;
+}
+
 int main(void) {
     @autoreleasepool {
+        presentationTests();
         LSBTerminalScreen *editing = screen(3, 10);
         feed(editing, @"abcdef\rXY\033[K");
         assert([[editing text] isEqualToString:@"XY "] && editing.column == 2);
@@ -90,6 +160,6 @@ int main(void) {
         feed(bounded, @"\033[3J\033[2J\033[H");
         assert([[bounded text] isEqualToString:@" "]);
     }
-    puts("TerminalScreen: split UTF-8/ANSI, cursor editing, scrolling, erase, reentrant terminal replies, and bounded resize passed");
+    puts("TerminalScreen: coalesced/hidden presentation, final output, split UTF-8/ANSI, editing, reentrant replies, and bounded resize passed");
     return 0;
 }

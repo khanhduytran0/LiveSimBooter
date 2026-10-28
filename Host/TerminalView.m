@@ -9,6 +9,8 @@
 @property (nonatomic) NSUInteger rows, columns, row, column, cursorOffset;
 @property (nonatomic) BOOL cursorVisible;
 @property (nonatomic, copy) void (^reply)(NSData *data);
+@property (nonatomic) BOOL presentationEnabled;
+@property (nonatomic, copy) void (^presentationHandler)(void);
 - (void)resizeRows:(NSUInteger)rows columns:(NSUInteger)columns;
 - (void)consume:(NSData *)data;
 - (NSString *)text;
@@ -22,6 +24,7 @@
     unsigned _state, _remainingUTF8;
     uint32_t _codepoint, _minimumUTF8;
     BOOL _wrapPending;
+    BOOL _presentationDirty, _presentationScheduled;
 }
 
 - (instancetype)init {
@@ -33,6 +36,33 @@
         [self resizeRows:24 columns:80];
     }
     return self;
+}
+
+- (void)schedulePresentation {
+    // Parsing and replies stay synchronous; output fragments only schedule one redraw on the next main-queue turn.
+    if (!_presentationEnabled || !_presentationDirty || _presentationScheduled || !_presentationHandler) return;
+    _presentationScheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self->_presentationScheduled = NO;
+        if (!self->_presentationEnabled || !self->_presentationDirty || !self->_presentationHandler) return;
+        self->_presentationDirty = NO;
+        self->_presentationHandler();
+    });
+}
+
+- (void)setPresentationHandler:(void (^)(void))handler {
+    _presentationHandler = [handler copy];
+    [self schedulePresentation];
+}
+
+- (void)setPresentationEnabled:(BOOL)enabled {
+    _presentationEnabled = enabled;
+    if (enabled) [self schedulePresentation];
+}
+
+- (void)invalidatePresentation {
+    _presentationDirty = YES;
+    [self schedulePresentation];
 }
 
 - (NSMutableArray<NSString *> *)blankLine {
@@ -73,6 +103,7 @@
     self.row = MIN(self.row, rows - 1);
     self.column = MIN(self.column, columns - 1);
     _wrapPending = NO;
+    [self invalidatePresentation];
 }
 
 - (void)lineFeed {
@@ -255,6 +286,7 @@
 - (void)consume:(NSData *)data {
     const uint8_t *bytes = data.bytes;
     for (NSUInteger index = 0; index < data.length; ++index) [self consumeByte:bytes[index]];
+    if (data.length) [self invalidatePresentation];
 }
 
 - (NSString *)text {
@@ -319,6 +351,7 @@
         [self addSubview:_status];
         [self addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(focusTerminal:)]];
         [self buildControls];
+        _screen.presentationHandler = ^{ [weakSelf render]; };
     }
     return self;
 }
@@ -403,8 +436,24 @@
     }];
     if (_screen.cursorVisible && _screen.cursorOffset < styled.length)
         [styled addAttribute:NSBackgroundColorAttributeName value:UIColor.darkGrayColor range:NSMakeRange(_screen.cursorOffset, 1)];
-    _display.attributedText = styled;
-    if (styled.length) [_display scrollRangeToVisible:NSMakeRange(_screen.cursorOffset, 1)];
+    BOOL changed = ![_display.attributedText isEqualToAttributedString:styled];
+    [UIView performWithoutAnimation:^{
+        // Update TextKit's existing storage in one edit instead of resetting the text view's attributedText property.
+        if (changed) {
+            NSTextStorage *storage = self->_display.textStorage;
+            [storage beginEditing];
+            [storage setAttributedString:styled];
+            [storage endEditing];
+        }
+        // Resizing or moving a hidden cursor can require scrolling without changing the attributed text.
+        [self->_display layoutIfNeeded];
+        UITextPosition *cursor = [self->_display positionFromPosition:self->_display.beginningOfDocument
+            offset:MIN(self->_screen.cursorOffset, styled.length)];
+        if (cursor) {
+            CGRect caret = [self->_display caretRectForPosition:cursor];
+            if (!CGRectContainsRect(self->_display.bounds, caret)) [self->_display scrollRectToVisible:caret animated:NO];
+        }
+    }];
 }
 
 - (void)appendOutput:(NSData *)data {
@@ -414,8 +463,10 @@
         return;
     }
     [_screen consume:data];
-    [self render];
 }
+
+- (BOOL)isPresentationEnabled { return _screen.presentationEnabled; }
+- (void)setPresentationEnabled:(BOOL)enabled { _screen.presentationEnabled = enabled; }
 
 - (void)setInputHandler:(void (^)(NSData *data))inputHandler {
     _inputHandler = [inputHandler copy];
@@ -451,7 +502,6 @@
     columns = MIN(columns, 400); rows = MIN(rows, 200);
     if (rows != _screen.rows || columns != _screen.columns) {
         [_screen resizeRows:rows columns:columns];
-        [self render];
         if (self.resizeHandler) self.resizeHandler((unsigned short)rows, (unsigned short)columns);
     }
 }

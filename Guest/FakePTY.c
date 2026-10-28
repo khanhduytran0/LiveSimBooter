@@ -41,10 +41,13 @@ static int finish(int error, int saved) { errno = error ? error : saved; return 
 
 int LSBPTYIsATTY(int fd) { return isTerminal(fd) ? 1 : isatty(fd); }
 
-int LSBPTYGetAttributes(int fd, struct termios *attributes) {
-    if (!isTerminal(fd)) return tcgetattr(fd, attributes);
+static int getAttributes(struct termios *attributes) {
     int saved = errno;
     return finish(attributes ? LSBFakePTYGetAttributes(terminal, attributes) : EFAULT, saved);
+}
+
+int LSBPTYGetAttributes(int fd, struct termios *attributes) {
+    return isTerminal(fd) ? getAttributes(attributes) : tcgetattr(fd, attributes);
 }
 
 int LSBPTYFlush(int fd, int selector) {
@@ -55,8 +58,7 @@ int LSBPTYFlush(int fd, int selector) {
     return -1;
 }
 
-int LSBPTYSetAttributes(int fd, int action, const struct termios *attributes) {
-    if (!isTerminal(fd)) return tcsetattr(fd, action, attributes);
+static int setAttributes(int action, const struct termios *attributes) {
     int saved = errno;
     if (!attributes) return finish(EFAULT, saved);
     if (action != TCSANOW && action != TCSADRAIN && action != TCSAFLUSH) return finish(EINVAL, saved);
@@ -64,8 +66,11 @@ int LSBPTYSetAttributes(int fd, int action, const struct termios *attributes) {
     return finish(LSBFakePTYSetAttributes(terminal, attributes), saved);
 }
 
-pid_t LSBPTYGetForeground(int fd) {
-    if (!isTerminal(fd)) return tcgetpgrp(fd);
+int LSBPTYSetAttributes(int fd, int action, const struct termios *attributes) {
+    return isTerminal(fd) ? setAttributes(action, attributes) : tcsetattr(fd, action, attributes);
+}
+
+static pid_t getForeground(void) {
     int saved = errno;
     pid_t foreground;
     int error = LSBFakePTYGetForeground(terminal, &foreground);
@@ -79,26 +84,30 @@ pid_t LSBPTYGetForeground(int fd) {
     return foreground;
 }
 
-int LSBPTYSetForeground(int fd, pid_t foreground) {
-    if (!isTerminal(fd)) return tcsetpgrp(fd, foreground);
+pid_t LSBPTYGetForeground(int fd) { return isTerminal(fd) ? getForeground() : tcgetpgrp(fd); }
+
+static int setForeground(pid_t foreground) {
     int saved = errno;
     return finish(LSBFakePTYSetForeground(terminal, foreground), saved);
 }
 
+int LSBPTYSetForeground(int fd, pid_t foreground) { return isTerminal(fd) ? setForeground(foreground) : tcsetpgrp(fd, foreground); }
+
 __attribute__((used)) static int ioctlArgument(int fd, unsigned long request, void *argument) {
     if (!isTerminal(fd)) return ioctl(fd, request, argument);
     int saved = errno, error = 0;
+    // This call already matched the descriptor. Share the operations without repeating their public wrappers' fstat checks.
     switch (request) {
-        case TIOCGETA: return LSBPTYGetAttributes(fd, argument);
-        case TIOCSETA: return LSBPTYSetAttributes(fd, TCSANOW, argument);
-        case TIOCSETAW: return LSBPTYSetAttributes(fd, TCSADRAIN, argument);
-        case TIOCSETAF: return LSBPTYSetAttributes(fd, TCSAFLUSH, argument);
+        case TIOCGETA: return getAttributes(argument);
+        case TIOCSETA: return setAttributes(TCSANOW, argument);
+        case TIOCSETAW: return setAttributes(TCSADRAIN, argument);
+        case TIOCSETAF: return setAttributes(TCSAFLUSH, argument);
         case TIOCGPGRP:
             if (!argument) return finish(EFAULT, saved);
-            *(pid_t *)argument = LSBPTYGetForeground(fd);
+            *(pid_t *)argument = getForeground();
             return *(pid_t *)argument < 0 ? -1 : 0;
         case TIOCSPGRP:
-            return argument ? LSBPTYSetForeground(fd, *(pid_t *)argument) : finish(EFAULT, saved);
+            return argument ? setForeground(*(pid_t *)argument) : finish(EFAULT, saved);
         case TIOCGWINSZ:
             error = argument ? LSBFakePTYGetWindow(terminal, argument) : EFAULT;
             break;

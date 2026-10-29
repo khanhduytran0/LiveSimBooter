@@ -89,6 +89,9 @@ int main(int argc, char **argv) {
 
 static unsigned nativeCalls, cacheCalls, environmentCalls;
 static bool cacheContains = true, nativeFailure;
+static bool networkCacheContains = true, networkAliasCacheContains;
+static const char networkAlias[] = "/usr/lib/libnetwork.dylib";
+static const char networkImage[] = "/System/Library/Frameworks/Network.framework/Network";
 static char *seenPath;
 static int seenMode;
 static void *nativeDlopen(const char *path, int mode) {
@@ -103,7 +106,8 @@ static void *nativeDlopen(const char *path, int mode) {
 static bool cacheContainsPath(const char *path) {
     ++cacheCalls;
     errno = ENOSPC;
-    return cacheContains && !strcmp(path, image);
+    return (cacheContains && !strcmp(path, image)) || (networkCacheContains && !strcmp(path, networkImage)) ||
+        (networkAliasCacheContains && !strcmp(path, networkAlias));
 }
 static char *testGetenv(const char *name) { ++environmentCalls; return getenv(name); }
 #define LSB_SHARED_CACHE_PATH_TESTING
@@ -123,10 +127,77 @@ static void check(const char *path, const char *expected, int mode) {
     assert(expected ? seenPath && !strcmp(expected, seenPath) : !seenPath);
 }
 
+static void checkNetworkAlias(const char *physicalAlias, bool mapped) {
+    check(networkAlias, mapped ? networkImage : networkAlias, RTLD_LAZY | RTLD_LOCAL);
+    check(physicalAlias, mapped ? networkImage : physicalAlias, RTLD_LAZY | RTLD_LOCAL);
+}
+
+static void testMissingNetworkAlias(void) {
+    char alias[PATH_MAX], target[PATH_MAX], parent[PATH_MAX];
+    join(alias, runtimeRoot, networkAlias);
+    join(target, runtimeRoot, networkImage);
+    checkNetworkAlias(alias, true);
+    const int modes[] = {RTLD_NOW, RTLD_NOLOAD | RTLD_NOW, RTLD_NOW | RTLD_FIRST, 0x7fffffff};
+    for (unsigned i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
+        check(networkAlias, networkImage, modes[i]);
+        check(alias, networkImage, modes[i]);
+    }
+    nativeFailure = true;
+    checkNetworkAlias(alias, true);
+    nativeFailure = false;
+    // A future cache may already know the alias; do not replace its own lookup semantics.
+    networkAliasCacheContains = true;
+    check(networkAlias, networkAlias, RTLD_NOW);
+    check(alias, networkAlias, RTLD_NOW);
+    networkAliasCacheContains = false;
+    networkCacheContains = false;
+    checkNetworkAlias(alias, false);
+    networkCacheContains = true;
+    if (!strncmp(runtimeRoot, "/private/var/", 13)) check(alias + 8, networkImage, RTLD_NOW);
+    const char *unrelated[] = {"/usr/lib/libnetwork.dylib-other", "/usr/lib/./libnetwork.dylib", "/usr//lib/libnetwork.dylib", networkImage};
+    for (unsigned i = 0; i < sizeof(unrelated) / sizeof(unrelated[0]); ++i) check(unrelated[i], unrelated[i], RTLD_NOW);
+    assert(!unsetenv("DYLD_ROOT_PATH"));
+    checkNetworkAlias(alias, false);
+    assert(!setenv("DYLD_ROOT_PATH", "/", 1));
+    checkNetworkAlias(alias, false);
+    assert(!setenv("DYLD_ROOT_PATH", runtimeRoot, 1));
+
+    const char *components[] = {"/usr", "/usr/lib", "/System", "/System/Library", "/System/Library/Frameworks",
+        "/System/Library/Frameworks/Network.framework"};
+    for (unsigned i = 0; i < sizeof(components) / sizeof(components[0]); ++i) {
+        join(parent, runtimeRoot, components[i]);
+        assert(!mkdir(parent, 0700));
+    }
+    checkNetworkAlias(alias, true);
+    // Neither an alias override nor a canonical override may be bypassed, even when it is a dangling symlink.
+    const char *overrides[] = {alias, target};
+    for (unsigned i = 0; i < sizeof(overrides) / sizeof(overrides[0]); ++i) {
+        int fd = open(overrides[i], O_WRONLY | O_CREAT | O_EXCL, 0600);
+        assert(fd >= 0 && !close(fd));
+        checkNetworkAlias(alias, false);
+        assert(!unlink(overrides[i]) && !symlink("missing-image", overrides[i]));
+        checkNetworkAlias(alias, false);
+        assert(!unlink(overrides[i]));
+    }
+    const char *parents[] = {"/usr/lib", "/System/Library/Frameworks/Network.framework"};
+    for (unsigned i = 0; i < sizeof(parents) / sizeof(parents[0]); ++i) {
+        join(parent, runtimeRoot, parents[i]);
+        assert(!rmdir(parent) && !symlink(directory, parent));
+        checkNetworkAlias(alias, false);
+        assert(!unlink(parent) && !mkdir(parent, 0700));
+    }
+    checkNetworkAlias(alias, true);
+    for (unsigned i = sizeof(components) / sizeof(components[0]); i > 0; --i) {
+        join(parent, runtimeRoot, components[i - 1]);
+        assert(!rmdir(parent));
+    }
+}
+
 int main(void) {
     initialize();
     // Before constructor readiness, even an otherwise matching path forwards without environment/cache work.
     check(physical, physical, RTLD_NOW);
+    check(networkAlias, networkAlias, RTLD_LAZY | RTLD_LOCAL);
     assert(!environmentCalls && !cacheCalls);
     initializeSharedCachePath();
     const int modes[] = {RTLD_NOW, RTLD_LAZY | RTLD_LOCAL, RTLD_NOLOAD | RTLD_NOW, RTLD_NOW | RTLD_FIRST, 0x7fffffff};
@@ -161,6 +232,8 @@ int main(void) {
     check(physical, physical, RTLD_NOW);
     assert(!unlink(path) && !setenv("DYLD_ROOT_PATH", runtimeRoot, 1));
 
+    testMissingNetworkAlias();
+
     char parent[PATH_MAX];
     makeImageDirectory(parent);
     check(physical, image, RTLD_NOW);
@@ -175,7 +248,7 @@ int main(void) {
     removeImageDirectory();
     assert(!rmdir(runtimeRoot) && !rmdir(directory));
     free(seenPath);
-    puts("SharedCachePathCompatibility: canonical/var paths, cache membership, overrides, malformed paths, modes, errno and early readiness passed");
+    puts("SharedCachePathCompatibility: canonical/var paths, missing Network alias, cache membership, overrides, modes, errno and early readiness passed");
     return 0;
 }
 #endif

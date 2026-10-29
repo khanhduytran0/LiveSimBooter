@@ -26,6 +26,7 @@ static char nativeBackBoardServicesPath[PATH_MAX];
 static char nativeExtensionFoundationPath[PATH_MAX];
 static char nativeCoreServicesPath[PATH_MAX];
 static char nativeCoreFoundationPath[PATH_MAX];
+static char nativeNetworkPath[PATH_MAX];
 static const char baseBoardInstallPath[] = "/System/Library/PrivateFrameworks/BaseBoard.framework/BaseBoard";
 static const char runningBoardServicesInstallPath[] =
     "/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices";
@@ -36,6 +37,7 @@ static const char backBoardServicesInstallPath[] = "/System/Library/PrivateFrame
 static const char extensionFoundationInstallPath[] = "/System/Library/Frameworks/ExtensionFoundation.framework/ExtensionFoundation";
 static const char coreServicesInstallPath[] = "/System/Library/Frameworks/CoreServices.framework/CoreServices";
 static const char coreFoundationInstallPath[] = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+static const char networkInstallPath[] = "/System/Library/Frameworks/Network.framework/Network";
 
 // 23A343 CoreServices compares getpid with a genuine audit-token PID in these two bundle-record lookup paths.
 // Reverse-engineered from +[LSBundleRecord _bundleRecordForAuditToken:checkNSBundleMainBundle:error:] and
@@ -45,7 +47,9 @@ static const unsigned coreServicesSelfReturns[] = {CoreServicesRecordSelfReturn,
 static const unsigned char coreServicesUUID[16] = {0x73, 0xf4, 0x11, 0xd9, 0x84, 0xa9, 0x33, 0xfe,
                                                  0x84, 0xc9, 0x8c, 0xd5, 0x7c, 0xa6, 0x33, 0xdc};
 static _Atomic(uintptr_t) coreServicesSelfImage, coreFoundationPreferencesImage;
+static _Atomic(uintptr_t) networkRouteImage;
 enum { CoreFoundationPreferencesReturn = 0x1971a4 };
+enum { NetworkRoutePIDReturn = 0xac7984 };
 _Static_assert(ATOMIC_POINTER_LOCK_FREE == 2, "Early identity caller checks must not require runtime initialization");
 
 static bool pinnedIdentityText(const struct mach_header_64 *header, intptr_t slide, const unsigned char expectedUUID[16],
@@ -127,6 +131,28 @@ static bool pinnedCoreFoundationPreferencesImage(const struct mach_header_64 *he
     return true;
 }
 
+// 23A343 nw_route_get_ifindex compares this getpid result with the RTM_GET_SILENT reply's kernel-authored rtm_pid.
+// XNU route_output always writes proc_selfpid(), so a logical PID discards a valid route and makes NWPath report offline.
+// Keep only this callsite native; routing permissions, interface data and every other Network caller remain unchanged.
+static bool pinnedNetworkRouteImage(const struct mach_header_64 *header, intptr_t slide) {
+    static const unsigned char uuid[16] = {0x37, 0xe5, 0x9d, 0x23, 0x28, 0x0c, 0x36, 0x6b,
+                                          0xa7, 0xad, 0x3c, 0x26, 0xd8, 0x94, 0x50, 0x8e};
+    if (!pinnedIdentityText(header, slide, uuid, 0xac7980, 0xac7ca4)) return false;
+    // Stock and rebuilt-cache instructions match; omit ADRP/GOT operands relocated by the cache builder. See docs/networking.md.
+    static const struct { unsigned offset; uint32_t instruction; } pins[] = {
+        {0xac7980, 0x940eb4e0}, {0xac7984, 0xaa0003f5}, {0xac79e4, 0x290bdbe0},
+        {0xac7c80, 0x39413fe8}, {0xac7c84, 0x7100111f}, {0xac7c88, 0x54fffec1},
+        {0xac7c8c, 0xb9405fe8}, {0xac7c90, 0x6b15011f}, {0xac7c94, 0x54fffe61},
+        {0xac7c98, 0xb94063e8}, {0xac7c9c, 0x6b16011f}, {0xac7ca0, 0x54fffe01}
+    };
+    for (unsigned i = 0; i < sizeof(pins) / sizeof(*pins); ++i) {
+        uint32_t instruction;
+        memcpy(&instruction, (const unsigned char *)header + pins[i].offset, sizeof(instruction));
+        if (instruction != pins[i].instruction) return false;
+    }
+    return true;
+}
+
 static void configureNativeImagePath(char path[PATH_MAX], const char *suffix) {
     path[0] = '\0';
     const char *root = getenv("DYLD_ROOT_PATH");
@@ -159,6 +185,8 @@ static void forgetNativeIdentityImage(const struct mach_header *image) {
     atomic_compare_exchange_strong_explicit(&coreServicesSelfImage, &expected, 0, memory_order_acq_rel, memory_order_acquire);
     expected = (uintptr_t)image;
     atomic_compare_exchange_strong_explicit(&coreFoundationPreferencesImage, &expected, 0, memory_order_acq_rel, memory_order_acquire);
+    expected = (uintptr_t)image;
+    atomic_compare_exchange_strong_explicit(&networkRouteImage, &expected, 0, memory_order_acq_rel, memory_order_acquire);
     atomic_fetch_add_explicit(&nativeIdentitySequence, 1, memory_order_acq_rel);
     for (unsigned i = 0; i < 16; ++i) if (atomic_load_explicit(&nativeIdentityRanges[i].image, memory_order_relaxed) == (uintptr_t)image)
         atomic_store_explicit(&nativeIdentityRanges[i].image, 0, memory_order_relaxed);
@@ -178,6 +206,12 @@ static void __attribute__((unused)) rememberNativeIdentityImage(const struct mac
         forgetNativeIdentityImage(image);
         if (pinnedCoreFoundationPreferencesImage((const struct mach_header_64 *)image, slide))
             atomic_store_explicit(&coreFoundationPreferencesImage, (uintptr_t)image, memory_order_release);
+        return;
+    }
+    if (!strcmp(path, networkInstallPath) || (nativeNetworkPath[0] && !strcmp(path, nativeNetworkPath))) {
+        forgetNativeIdentityImage(image);
+        if (pinnedNetworkRouteImage((const struct mach_header_64 *)image, slide))
+            atomic_store_explicit(&networkRouteImage, (uintptr_t)image, memory_order_release);
         return;
     }
     bool notifyd = nativeNotifydPath[0] && !strcmp(path, nativeNotifydPath);
@@ -233,6 +267,8 @@ static void __attribute__((unused)) rememberNativeIdentityImage(const struct mac
 }
 
 static bool callerNeedsNativeIdentity(uintptr_t caller) {
+    uintptr_t network = atomic_load_explicit(&networkRouteImage, memory_order_acquire);
+    if (network && caller >= network && caller - network == NetworkRoutePIDReturn) return true;
     uintptr_t preferences = atomic_load_explicit(&coreFoundationPreferencesImage, memory_order_acquire);
     if (preferences && caller >= preferences && caller - preferences == CoreFoundationPreferencesReturn) return true;
     uintptr_t coreServices = atomic_load_explicit(&coreServicesSelfImage, memory_order_acquire);
@@ -286,6 +322,7 @@ __attribute__((constructor)) static void initializeIdentity(void) {
     configureNativeImagePath(nativeExtensionFoundationPath, extensionFoundationInstallPath);
     configureNativeImagePath(nativeCoreServicesPath, coreServicesInstallPath);
     configureNativeImagePath(nativeCoreFoundationPath, coreFoundationInstallPath);
+    configureNativeImagePath(nativeNetworkPath, networkInstallPath);
 #ifndef LSB_PROCESS_IDENTITY_TESTING
     // Existing images are enumerated synchronously before publishing the guest PID. Early recursive calls retain native identity.
     _dyld_register_func_for_add_image(identityImageAdded);

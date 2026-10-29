@@ -54,6 +54,65 @@ static void assertPlistBoolean(id value, BOOL expected) {
     assert([value boolValue] == expected);
 }
 
+static void testWebContentStartupEnvironment(LSBReceivedMessage *message, NSString *root, NSString *dataPath, NSString *configPath) {
+    NSString *warningPath = [dataPath stringByAppendingPathComponent:@"var/run/LiveSimBooter-memory-warnings"];
+    NSDictionary *expected = @{@"JSC_useJIT": @"false", @"GIGACAGE_ENABLED": @"false", @"SIMULATOR_MEMORY_WARNINGS": warningPath};
+    NSMutableDictionary *hostEnvironment = [NSMutableDictionary dictionary];
+    for (NSString *key in expected) {
+        const char *value = getenv(key.UTF8String);
+        hostEnvironment[key] = value ? @(value) : NSNull.null;
+    }
+    const char *inherited[] = {"JSC_useJIT=true", "JSC_useJIT=", "GIGACAGE_ENABLED=true", "SIMULATOR_MEMORY_WARNINGS=/stale", NULL};
+    assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, inherited));
+    NSDictionary *bootstrap = readPlist(configPath)[@"Bootstrap"];
+    for (NSString *key in expected) {
+        assert(!strcmp(environmentValue(&message->plan, key.UTF8String), [expected[key] UTF8String]));
+        for (NSString *scope in @[@"Self", @"Child"]) {
+            id value = bootstrap[scope][key];
+            assert(CFGetTypeID((__bridge CFTypeRef)value) == CFStringGetTypeID() && [value isEqualToString:expected[key]]);
+        }
+        const char *value = getenv(key.UTF8String);
+        assert([hostEnvironment[key] isEqual:value ? @(value) : NSNull.null]);
+    }
+    for (NSString *key in @[@"__XPC_JSC_useJIT", @"__XPC_GIGACAGE_ENABLED"]) {
+        assert(!bootstrap[@"Child"][key] && !bootstrap[@"Self"][key] && !environmentValue(&message->plan, key.UTF8String));
+    }
+    dispose(message);
+    struct stat initial, after;
+    assert(!lstat(warningPath.fileSystemRepresentation, &initial));
+    assert(S_ISREG(initial.st_mode) && initial.st_uid == geteuid() && initial.st_nlink == 1 && initial.st_size == 0);
+    NSData *contents = [@"preserve this inode and data\n" dataUsingEncoding:NSUTF8StringEncoding];
+    int fd = open(warningPath.fileSystemRepresentation, O_WRONLY | O_NOFOLLOW);
+    assert(fd >= 0 && write(fd, contents.bytes, contents.length) == (ssize_t)contents.length && !close(fd));
+    assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, NULL));
+    dispose(message);
+    assert(!lstat(warningPath.fileSystemRepresentation, &after) && after.st_ino == initial.st_ino && after.st_dev == initial.st_dev);
+    assert([[NSData dataWithContentsOfFile:warningPath] isEqualToData:contents]);
+
+    NSData *priorConfig = [NSData dataWithContentsOfFile:configPath];
+    NSString *preserved = [warningPath stringByAppendingString:@".preserved"];
+    assert(!link(warningPath.fileSystemRepresentation, preserved.fileSystemRepresentation));
+    assert(LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, NULL) == EINVAL);
+    assertUnchanged(message);
+    assert([[NSData dataWithContentsOfFile:configPath] isEqualToData:priorConfig]);
+    assert(!unlink(preserved.fileSystemRepresentation));
+    assert(!rename(warningPath.fileSystemRepresentation, preserved.fileSystemRepresentation));
+    assert(!symlink(preserved.fileSystemRepresentation, warningPath.fileSystemRepresentation));
+    assert(LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, NULL) == ELOOP);
+    assertUnchanged(message);
+    assert([[NSData dataWithContentsOfFile:configPath] isEqualToData:priorConfig]);
+    assert(!unlink(warningPath.fileSystemRepresentation) && !mkfifo(warningPath.fileSystemRepresentation, 0600));
+    assert(LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, NULL) != 0);
+    assertUnchanged(message);
+    assert([[NSData dataWithContentsOfFile:configPath] isEqualToData:priorConfig]);
+    assert(!unlink(warningPath.fileSystemRepresentation) && !mkdir(warningPath.fileSystemRepresentation, 0700));
+    assert(LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, NULL) != 0);
+    assertUnchanged(message);
+    assert([[NSData dataWithContentsOfFile:configPath] isEqualToData:priorConfig]);
+    assert(!rmdir(warningPath.fileSystemRepresentation) && !rename(preserved.fileSystemRepresentation, warningPath.fileSystemRepresentation));
+    assert([[NSData dataWithContentsOfFile:warningPath] isEqualToData:contents]);
+}
+
 static void testDeviceProfile(LSBReceivedMessage *message, NSString *root, NSString *configPath) {
     const char *overrides[] = {"SIMULATOR_PRODUCT_CLASS=D83", "SIMULATOR_MODEL_IDENTIFIER=iPhone16,1", "SIMULATOR_PRODUCT_CLASS=ignored", NULL};
     assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, overrides));
@@ -946,6 +1005,7 @@ int main(void) {
         assert(write(message->fds[1], "again\n", 6) == 6);
         dispose(message);
         assert([[NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL] isEqualToString:@"stdout\nstderr\nagain\n"]);
+        testWebContentStartupEnvironment(message, root, dataPath, configPath);
         testDeviceProfile(message, root, configPath);
         testDFMode(message, root, dataPath, configPath, inherited);
         LSBNativeRuntimePolicy policy;

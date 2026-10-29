@@ -28,6 +28,8 @@ RESERVED = {'/usr/lib/dyld_sim', '/sbin/launchd_sim'}
 MACOS_HOST_TOOLS = {'/usr/sbin/iokitsimd', '/sbin/launchd_sim_trampoline', '/usr/lib/system/host/liblaunch_sim.dylib'}
 CAPABILITIES = '/Library/Developer/CoreSimulator/DeviceType/capabilities.plist'
 APPLICATION_MANIFEST = '/usr/share/LiveSimBooter/applications.json'
+TEXT_TO_SPEECH = '/System/Library/PrivateFrameworks/TextToSpeech.framework/TextToSpeech'
+SWIFT_SQLITE = '/System/Library/PrivateFrameworks/SwiftSQLite.framework/SwiftSQLite'
 MACHO_MAGICS = {b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xfe\xed\xfa\xce',
                 b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca', b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'}
 LOADS = {0xc, 0x80000018, 0x8000001f, 0x80000023, 0x20}
@@ -198,10 +200,14 @@ def parse_additions(values, cached):
 
 def inventory(root, cached, scopes, additions):
     entries, skipped, errors = {}, collections.Counter(), []
+    # The 23A343 cache builder zeros TextToSpeech's weak SwiftSQLite slots when that provider is absent.
+    # Stage the original dylib so dyld binds those slots at load time; keep the original cache set for dependency coverage.
+    loose_overrides = {TEXT_TO_SPEECH} if TEXT_TO_SPEECH in cached and SWIFT_SQLITE not in cached else set()
+    omitted_cached = cached - loose_overrides
     def inspect(path):
         name = '/' + path.relative_to(root).as_posix()
-        if excluded(name, cached):
-            skipped['cached_code' if name in cached else 'managed_loader' if name in RESERVED else
+        if excluded(name, omitted_cached):
+            skipped['cached_code' if name in omitted_cached else 'managed_loader' if name in RESERVED else
                     'macos_host_tool' if name in MACOS_HOST_TOOLS else 'stock_signature_or_cache'] += 1
             return
         if name in additions:
@@ -210,20 +216,25 @@ def inventory(root, cached, scopes, additions):
             if path.is_symlink():
                 target = canonical_source(root, path, strict=False)
                 target_name = '/' + target.relative_to(root).as_posix()
-                if target_name in cached or excluded(target_name, cached):
+                if excluded(target_name, omitted_cached):
                     skipped['cached_or_managed_alias'] += 1
                     return
                 # Relative links remain valid after moving the stage, including originally absolute guest paths.
                 entries[name] = {'kind': 'symlink', 'target': os.path.relpath(target, path.parent), 'size': 0, 'missing_source_target': not target.exists()}
             elif path.is_file():
                 info = macho(path)
-                if info and info.get('install_name') in cached:
+                if info and info.get('install_name') in omitted_cached:
                     skipped['cached_code_alias'] += 1
                     return
+                if name in loose_overrides:
+                    require(info and info['filetype'] == 6 and info.get('install_name') == name, 'Expected original TextToSpeech dylib')
                 entries[name] = {'kind': 'code' if info else 'resource', 'size': path.stat().st_size}
                 if info:
                     require(compatible_guest(info), 'Stock image is not plain arm64 iOS/iOS Simulator code')
                     entries[name]['macho'] = info
+                    if info.get('install_name') in loose_overrides:
+                        require(info['filetype'] == 6, 'Expected original TextToSpeech dylib')
+                        entries[name]['loose_cache_override'] = info['install_name']
             elif not path.is_dir():
                 raise ValueError('Unsupported non-regular source entry')
         except (OSError, ValueError, UnicodeError, struct.error) as error:
@@ -423,7 +434,8 @@ def stage(options, root, entries, report):
     report.update(mode='staged', signing_identity=options.identity, signing_identifier=options.identifier, entries=result,
                   native_signature_entitlements=None, entitlement_source='Original Mach-O __TEXT,__ents_der sections, preserved byte-for-byte')
     (output / 'stage-manifest.json').write_text(json.dumps(report, indent=2) + '\n')
-    return {'output': str(output), 'manifest': str(output / 'stage-manifest.json'), 'files': len(result), 'complete_boot_image': False}
+    return {'output': str(output), 'manifest': str(output / 'stage-manifest.json'), 'files': len(result), 'complete_boot_image': False,
+            'loose_cache_overrides': report.get('loose_cache_overrides', [])}
 
 
 def main(argv=None):
@@ -457,6 +469,7 @@ def main(argv=None):
     report = {'version': 1, 'mode': 'inventory', 'runtime_build': '23A343', 'source_root': str(root),
               'cache_manifest': str(options.cache_manifest.resolve()), 'scopes': list(options.scope or DEFAULT_SCOPES),
               'counts': dict(counts), 'source_bytes': sum(entry['size'] for entry in entries.values()), 'skipped': skipped,
+              'loose_cache_overrides': sorted({entry['loose_cache_override'] for entry in entries.values() if 'loose_cache_override' in entry}),
               'required_loader_overrides_missing': sorted(RESERVED - additions.keys()), 'errors': errors, 'missing_strong_dependencies': missing,
               'missing_stock_symlink_targets': [name for name, entry in entries.items() if entry.get('missing_source_target')],
               'applications': app_inventory(root, entries), 'complete_boot_image': False,

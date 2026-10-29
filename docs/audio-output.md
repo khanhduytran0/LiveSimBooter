@@ -59,23 +59,67 @@ logging for unknown virtual properties and forwarded system queries. Both enviro
 
 ## WebKit test status
 
-JavaScriptCore accepts `JSC_useJIT=false`, but it must reach WebContent before JSC initializes; setting it only on the UI
-application does not establish that its separate worker inherited it. WebKit also exposes the private process-pool
-`JITEnabled` setting, which sends `disable-jit` during worker bootstrap. See the original
+JIT-less WebContent startup and audible WebAudio output are verified on the pinned runtime. The generated guest `Bootstrap.Child` environment now
+persistently supplies `JSC_useJIT=false`, `GIGACAGE_ENABLED=false`, and `SIMULATOR_MEMORY_WARNINGS` pointing to
+`<data>/var/run/LiveSimBooter-memory-warnings`. These apply before guest jobs initialize; the native host environment is
+unchanged. Disabling Gigacage also disables its heap-isolation mitigation. The memory-warning file is empty: simulator
+libdispatch opens it with `O_EVTONLY` and watches `NOTE_ATTRIB`, but no native memory-pressure relay is implemented.
+
+The current nine-site launchd identity patch fixes ExtensionKit's routine 716 alive check-in by translating the audited
+native PID into the committed logical guest PID. It preserves full audit-token validation and authorization checks. See
+[the identity adapter](launchd.md#native-identity-and-service-ownership). JavaScriptCore's environment option must reach
+WebContent before JSC initializes; setting it only on the UI application is insufficient. See the original
 [option reader](https://github.com/apple-oss-distributions/WebKit/blob/2331c43da3e7123e51ba8682d7ec023b8591460e/Source/JavaScriptCore/runtime/Options.cpp)
 and [worker bootstrap](https://github.com/apple-oss-distributions/WebKit/blob/2331c43da3e7123e51ba8682d7ec023b8591460e/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm).
 
-An arm64 simulator test app was signed, registered and launched on the same iPhone 15 baseline. It sets the pool's
-`JITEnabled=NO` before constructing WKWebView and requires the child's `_isJITEnabled:` reply before enabling its finite,
-user-triggered WebAudio tone. Its scene and WKWebView initialize, but WebContent exits before the page loads or the query
-completes. Native logs record SIGTRAP after `launch_extension_check_in_live_4UIKit` reports routine 716 returning 1; that
-assertion's logging branch returns normally, so it does not identify the trapping instruction. Crash-report quota prevented
-a fresh stack. **WebKit audio and the resulting child JIT state remain unverified.**
+The 2026-10-28 cold-session test used iOS Simulator **26.0 / 23A343**, arm64, on development iPhone16,2 running native
+**26.1 / 23B50**. The cache remained at `0x110000000`, UUID `73ED978A-FD25-3166-A57A-34E21BB7E5B8`. Native host PID
+5595 launched the signed test app (logical PID 5664 / native PID 5665); WebContent was logical PID 5667 / native PID 5669. The app used the
+default `WKProcessPool` with no private pool configuration or application JIT setter. Local-page navigation and a JavaScript
+callback completed, and the actual child's `_isJITEnabled:` query returned `enabled=0`.
 
-The UI process also exposed a separate missing `SIMULATOR_MEMORY_WARNINGS` path. Pinned simulator libdispatch uses that
-environment variable to open a file with `O_EVTONLY` and watch `NOTE_ATTRIB`; it never reads file contents. An empty owned
-file was supplied through guest launchctl for the second diagnostic session, but WebContent still terminated. This is a
-test-session setting, not a native memory-pressure relay or a persistent setup change.
+That first session's GPU processes (native PIDs 5672, 5676 and 5678) each aborted after roughly 2.3 seconds with CoreAnimation
+exit code 7, decoded in the pinned QuartzCore as "Metal failed to specialize fragment function". The compiler-registration
+adapter now also admits the exact guest WebKit GPU executable,
+`/System/Library/ExtensionKit/Extensions/GPUExtension.appex/com.apple.WebKit.GPU`, so its own PID domain can launch
+`MTLCompilerService`. The original GPU executable was restored and the temporary diagnostic injection removed before retesting.
+
+The subsequent cold session used native host PID 5737, guest launchd native PID 5741, UI logical PID 5807 / native PID 5808,
+WebContent native PID 5811, GPU native PID 5814 and compiler native PIDs 5818 and 5821. With the same default pool and disabled
+JIT, repeated finite WebAudio tones reached `state=running` at 48 kHz and completed. The user confirmed they were audible.
+When the GPU's audio output later closed, the native queue reported 256,512 rendered frames and 1,536 underrun frames;
+this verifies the basic WebAudio path, not uninterrupted playback under all workloads.
+
+Selecting text initially crashed the UI process (native PID 5808) with SIGSEGV. GPU PID 5814 and WebContent PID 5811 then
+exited 0 after the UI process died; these were not repetitions of the earlier GPU code-7 abort. The TextToSpeech override
+below resolved the reproduced selection failure. Local WebAudio evidence is retained under
+`tmp/webcontent-20261028/startup/results/` and `tmp/webcontent-20261028/compiler-fix/results/`, including the broker console
+and `web-audio-full.log`; these ignored logs are not setup inputs.
+
+### Text selection and TextToSpeech
+
+An LLDB capture with hardware-only breakpoint policy caught SIGSEGV in native UI PID 5864 at a call through address zero in cached TextToSpeech
+(UUID `70B4AAB0-019B-3631-97CD-65F434AC0A2E`). Its stub at image offset `0x1cf008` called the weak SwiftSQLite import
+`_$s11SwiftSQLite5TableVMa`. The current 1,353-image cache omitted SwiftSQLite and contains zero at this import's GOT
+address, `0x174c857f0`. The correctly signed loose SwiftSQLite library was already present on disk.
+
+The cache records missing weak dependencies and does not redo cached-image fixups when the provider later appears;
+see the pinned [prebuilt loader dependency and fixup paths](https://github.com/apple-oss-distributions/dyld/blob/fd8d0c4d52320ebf64db34f3cb280310d905c5ae/dyld/PrebuiltLoader.cpp#L398-L462).
+This development cache accepts a loose TextToSpeech override, which restores its original binding metadata. All 58 other
+TextToSpeech dependencies are cached, all 64 SwiftSQLite imports exist in the stock provider, and that provider's ten
+dependencies are cached. The fix stages only the original 23A343 TextToSpeech executable at its normal framework path,
+signed with the configured host identifier and no native entitlements; its Mach-O type, platform and sections remain intact.
+Original runtime inputs and the cache are unchanged.
+
+After stopping the simulator, installing that override and starting a fresh session, the user confirmed responsive text
+selection without crashes or freezes, and working text-to-speech. This test used native host PID 5929, guest launchd native
+PID 5933 and UI logical PID 6002 / native PID 6003 on the same 23A343 cache and iPhone16,2 / 26.1 / 23B50 baseline.
+The diagnostic debugger was detached before restart; verification used no debugger. The app also completed navigation,
+reported WebContent native PID 6006 with JIT disabled, and completed repeated WebAudio tones. A read-only native task-memory
+inspection, without pausing the UI process, confirmed loose TextToSpeech at `0x10cc60000` and SwiftSQLite at `0x10c900000`.
+The repaired TextToSpeech slot at offset `0x265dc8` held `0x10c93b81c`, exactly SwiftSQLite's exported accessor at offset
+`0x3b81c`. The inspection released its task right. Evidence is under `tmp/webcontent-20261028/tts-override/`, including
+`results/mapped-images.json`; the earlier failure capture is `tmp/webcontent-20261028/results/lldb-text-selection.txt`.
 
 ## Pinned provenance
 

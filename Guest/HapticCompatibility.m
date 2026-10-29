@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <CoreHaptics/CoreHaptics.h>
 #import <objc/runtime.h>
+#import "HapticUIKitSupport.h"
 #include <dlfcn.h>
 #include <mach-o/loader.h>
 #include <stdint.h>
@@ -19,6 +20,45 @@
 typedef BOOL (*LSBHapticDoInit)(id, SEL, uint32_t, BOOL, NSDictionary *, BOOL, NSError **);
 static LSBHapticDoInit originalDoInit;
 static atomic_bool relayEnabled;
+static NSInteger nativeUIKitFeedbackLevel;
+
+@protocol LSBUIKitFeedbackSupport
+- (NSInteger)_feedbackSupportLevel;
+@end
+
+static NSInteger relayUIKitFeedbackLevel(id device, SEL selector) {
+    (void)device; (void)selector;
+    return nativeUIKitFeedbackLevel;
+}
+
+static void installUIKitFeedbackSupport(void) {
+    // Initial ObjC images have been registered before C constructors. Lookup does not load UIKit into non-UI daemons.
+    // Late dlopen of UIKit is deliberately unsupported: image callbacks run before ObjC fixups or under its runtime lock.
+    Class device = objc_lookUpClass("UIDevice");
+    const char *path = getenv("SIMULATOR_CAPABILITIES");
+    if (!device || !path || path[0] != '/') return;
+    NSDictionary *profile = [NSDictionary dictionaryWithContentsOfURL:[NSURL fileURLWithPath:@(path)] error:NULL];
+    NSInteger level = LSBHapticUIKitSupportLevel(profile);
+    if (level <= 0) return;
+
+    SEL selector = @selector(_feedbackSupportLevel);
+    Method method = NULL;
+    unsigned count = 0;
+    Method *methods = class_copyMethodList(device, &count);
+    for (unsigned index = 0; index < count; index++)
+        if (method_getName(methods[index]) == selector) { method = methods[index]; break; }
+    free(methods);
+    // Require UIDevice's own method, not a resolver or superclass method, with the pinned signed 64-bit NSInteger ABI.
+    if (!method || strcmp(method_getTypeEncoding(method), "q16@0:8")) return;
+    IMP implementation = method_getImplementation(method);
+    Dl_info info = {0};
+    if (!dladdr((const void *)implementation, &info) || !LSBHapticUIKitStubMatches(info.dli_fbase, (const void *)implementation)) {
+        fprintf(stderr, "[haptics] unsupported guest UIKit feedback stub\n");
+        return;
+    }
+    nativeUIKitFeedbackLevel = level;
+    method_setImplementation(method, (IMP)relayUIKitFeedbackLevel);
+}
 
 // The simulator SDK hides this exported libxpc entry. Keep its normal symbol binding as the original side of interposition.
 extern xpc_connection_t LSBHapticCreateMachService(const char *, dispatch_queue_t, uint64_t) __asm("_xpc_connection_create_mach_service");
@@ -89,4 +129,5 @@ __attribute__((constructor)) static void installHapticRelayCompatibility(void) {
     }
     originalDoInit = (LSBHapticDoInit)implementation;
     method_setImplementation(method, (IMP)relayDoInit);
+    installUIKitFeedbackSupport();
 }

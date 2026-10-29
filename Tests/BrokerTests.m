@@ -2573,8 +2573,13 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
     assert([manager createDirectoryAtPath:angels withIntermediateDirectories:YES attributes:nil error:NULL]);
     NSArray *selected = @[@"com.apple.notifyd", @"com.apple.lsd", @"com.apple.runningboardd", @"com.apple.containermanagerd",
         @"com.apple.fontservicesd", @"com.apple.containermanagerd.system", @"com.apple.distnoted.xpc.daemon", @"com.apple.configd_sim",
-        @"com.apple.sleepd", @"com.apple.systemstatusd", @"com.apple.SpringBoard", @"com.apple.iconservices.iconservicesagent", @"com.apple.TextInput.kbd",
+        @"com.apple.trustd", @"com.apple.sleepd", @"com.apple.systemstatusd", @"com.apple.SpringBoard",
+        @"com.apple.iconservices.iconservicesagent", @"com.apple.TextInput.kbd",
         @"com.apple.assistantd", @"com.apple.PosterBoard", @"com.apple.DragUI.druid"];
+    // iOS 26.0 23A343 trustd uses the stock certificate store and one guest Mach service; no native trust service is exposed.
+    NSDictionary *trustEnvironment = @{@"DEBUGSCOPE":
+        @"-policy-node,policy-set,policy,alloc,trust,bind,profile,trace,dbconn,OTR,serverxpc,sqlite3,error_thee_well, ringSigning",
+        @"WAIT4DEBUGGER": @"NO"};
     NSDictionary *enabled = @{@"#IfFeatureFlagEnabled": @"SystemStatus/EmbeddedDaemon", @"#Then": @YES};
     NSDictionary *disabled = @{@"#IfFeatureFlagDisabled": @"SystemStatus/EmbeddedDaemon", @"#Then": @YES};
     NSArray *statusServices = @[@"com.apple.systemstatus", @"com.apple.systemstatus.publisher", @"com.apple.systemstatus.activityattribution"];
@@ -2601,6 +2606,11 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
             @"ProgramArguments": @[@"/System/Library/PrivateFrameworks/AssistantServices.framework/assistantd"],
             @"MachServices": assistantServices, @"RunAtLoad": @YES, @"KeepAlive ": @YES, @"EnableTransactions": @YES,
             @"ProcessType": @"Adaptive", @"UserName": @"mobile"};
+        if ([label isEqual:@"com.apple.trustd"]) job = @{@"Label": label, @"ProgramArguments": @[@"/usr/libexec/trustd"],
+            @"MachServices": @{@"com.apple.trustd": @YES}, @"EnvironmentVariables": trustEnvironment,
+            @"UserName": @"_trustd", @"GroupName": @"_trustd", @"POSIXSpawnType": @"Adaptive", @"Umask": @54,
+            @"MinimalBootProfile": @YES, @"EnableTransactions": @YES, @"EnablePressuredExit": @YES,
+            @"_PanicOnCrash": @{@"AutomationOnly": @YES, @"PanicOnConsecutiveCrash": @YES}};
         if ([label isEqual:@"com.apple.PosterBoard"]) {
             jobDirectory = angels;
             job = @{@"Label": label, @"ProgramArguments": @[@"/Applications/PosterBoard.app/PosterBoard"], @"RunAtLoad": @NO,
@@ -2660,6 +2670,20 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
         assert([assistant[@"MachServices"] isEqual:assistantServices] && [assistant[@"MachServices"][@"com.apple.assistant.dictation"] boolValue]);
         assert([assistant[@"RunAtLoad"] boolValue] && ![assistant[@"KeepAlive"] boolValue] && ![assistant[@"EnableTransactions"] boolValue]);
         assert(!assistant[@"UserName"] && !assistant[@"ProcessType"] && !assistant[@"KeepAlive "]);
+        NSDictionary *trust = [NSDictionary dictionaryWithContentsOfFile:[jobDirectory stringByAppendingPathComponent:@"com.apple.trustd.plist"]];
+        assert(([trust[@"ProgramArguments"] isEqual:@[@"/usr/libexec/trustd"]]));
+        assert(([trust[@"MachServices"] isEqual:@{@"com.apple.trustd": @YES}]));
+        assert(CFGetTypeID((__bridge CFTypeRef)trust[@"MachServices"][@"com.apple.trustd"]) == CFBooleanGetTypeID());
+        assert([trust[@"EnvironmentVariables"] isEqual:trustEnvironment]);
+        for (NSString *key in @[@"RunAtLoad", @"KeepAlive", @"EnableTransactions"]) {
+            assert(CFGetTypeID((__bridge CFTypeRef)trust[key]) == CFBooleanGetTypeID());
+            assert([trust[key] boolValue] == [key isEqual:@"RunAtLoad"]);
+        }
+        for (NSString *key in @[@"UserName", @"GroupName", @"POSIXSpawnType", @"Umask", @"MinimalBootProfile", @"EnablePressuredExit", @"_PanicOnCrash"])
+            assert(!trust[key]);
+        assert([trust[@"WorkingDirectory"] isEqual:@"/private/var/mobile/"]);
+        assert([trust[@"StandardOutPath"] isEqual:@"/private/var/mobile/Library/Logs/com.apple.trustd.log"]);
+        assert([trust[@"StandardErrorPath"] isEqual:trust[@"StandardOutPath"]]);
         NSDictionary *poster = [NSDictionary dictionaryWithContentsOfFile:
             [jobDirectory stringByAppendingPathComponent:@"com.apple.PosterBoard.plist"]];
         assert(([poster[@"ProgramArguments"] isEqual:@[@"/Applications/PosterBoard.app/PosterBoard"]]));
@@ -2688,6 +2712,9 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
     const char *environment[] = {"LSB_NATIVE_CONFIGD=1", "com.apple.SystemConfiguration.configd=1", NULL};
     LSBReceivedMessage *initial = calloc(1, sizeof(*initial));
     assert(!initialPlan(initial, 3, arguments, environment) && !initialNativeConfigdPending);
+    NSString *customConfiguration = [NSString stringWithUTF8String:initial->plan.strings + initial->plan.argv[1]];
+    NSString *customJobs = [NSDictionary dictionaryWithContentsOfFile:customConfiguration][@"Bootstrap"][@"Paths"][0];
+    assert(![manager fileExistsAtPath:[customJobs stringByAppendingPathComponent:@"com.apple.trustd.plist"]]);
     assert(!enqueueInitialJob(initial, LSB_EXECUTION_SIMULATOR));
     assert(jobs.lastObject.simulatorLaunchd && !jobs.lastObject.nativeConfigdSelected); // Guest environment cannot request a native bridge.
     resetBroker();

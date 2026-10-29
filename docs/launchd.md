@@ -361,15 +361,16 @@ kernel audit token against jobs still indexed by the proxy's stable guest PID. B
 (`BOOTSTRAP_NOT_PRIVILEGED`), then `-[BKHIDSystem startHIDSystem]` failed. Details, the backtrace and the expanded cache's
 verified df run are in [backboardd and the simulator UI cache](backboardd.md).
 
-The implemented adapter changes eight inline PID loads in the pinned 23A343 launchd_sim, UUID
+The implemented adapter changes nine inline PID loads in the pinned 23A343 launchd_sim, UUID
 `C3EC5C45-8C85-3D11-B59C-62C4248F5EF9`. The current bootstrap check-in (routine 206) and XPC listener activation (routine 805)
 both call the endpoint handler at image offset `0x23670`. Its PID load at `0x236b0` now resolves the caller through the broker
 before the existing job lookup and endpoint-owner comparison. The two legacy check-in loads at `0x2e658` and `0x2e6b8`, plus
 XPC self lookup at `0x1bc08`, use the same adapter. The fifth load at `0x1db98` covers the owner comparison before returning
 an XPC service's bundle dictionary (routine 718). The sixth, at `0x2d130`, selects the managed requestor's domain before
 endpoint activation. The seventh and eighth, at `0x30048` and `0x2ffd8`, resolve an event publisher's owner for fetching
-subscriptions (routine 403 / `0x193`) and arming its poll (routine 406 / `0x196`). Interposing `audit_token_to_pid` alone
-cannot cover these inline reads.
+subscriptions (routine 403 / `0x193`) and arming its poll (routine 406 / `0x196`). The ninth, at `0x1dae4`, covers the owner
+comparison for an extension's alive check-in (routine 716 / `0x2cc`). Interposing `audit_token_to_pid` alone cannot cover
+these inline reads.
 
 The dictionary comparison became observable after explicitly registering the stock MTLCompilerService bundle. Launchd
 spawned xpcproxy with guest PID **81562**, then the broker committed its compiler replacement with native PID **81564**.
@@ -419,6 +420,32 @@ succeeded, which establishes endpoint availability rather than full functionalit
 is in `tmp/springboard-services/lldb-notifyd-first-trap.txt`; the successful **83502** run is in
 `tmp/springboard-services/probe-events-fixed.log`, following an earlier timed-out run in the same file.
 
+On 2026-10-28, a WebContent startup trial on iPhone16,2 / native iOS 26.1 exposed the ninth owner comparison. The guest
+remained the pinned 23A343 runtime. Hardware-only LLDB stopped simulator launchd **5132**, mapped at `0x106f48000`, before
+the original `ldr w8, [x1, #0x14]` at `+0x1dae4`. The intact audit token contained native PID **5261** and PID version
+`0x31b1`, while `[x0 + 0x3a0]` contained logical job PID **5259**. The following unchanged comparison rejects those
+different PIDs with `EPERM` through `+0x1db70`. The breakpoint was disabled and launchd detached. Evidence is in
+`tmp/webcontent-20261028/results/lldb-launchd-owner.txt`.
+
+The stock service dispatch table routes routine 716 to `+0x1dac0`. Its extension-job flag gate, owner comparison, reply
+validation and pending startup timer checks remain intact. After a successful check-in, the original handler cancels
+that timer and sets the job's alive bit. The ninth veneer only resolves the full audited caller into `w8`; it neither
+changes the job PID nor fabricates a successful reply. Missing resolver and rejected identity lookups still yield PID -1
+for the original comparison.
+
+The signed nine-site artifact then completed this check-in on the same device. Hardware-only LLDB stopped launchd
+**5287**, mapped at `0x106b78000`, immediately after the new veneer: `w8 = 5390` matched the unchanged logical job PID
+**5390**, while the original audit token still contained native WebContent PID **5391** and version `0x32ec`. At the
+handler return, `w0 = 0`, the startup timer at `job + 0x2d0` was null, and flags at `job + 0x3cc` were `0x53`, including
+the alive bit `0x40`. Both hardware breakpoints were disabled and launchd detached. See
+`tmp/webcontent-20261028/results/lldb-launchd-hold-worker.txt`.
+
+WebContent still failed later at JavaScriptCore's Gigacage allocation, independently of extension check-in. Its stopped
+backtrace and disassembly identified the fatal allocation branch requesting both maximum alignment and total size of
+`0x1000000000` (64 GiB), followed by `brk #0xc471` at `0x11a6c0d54`. This establishes successful routine-716 handling,
+not successful WebContent initialization, navigation or WebAudio. Evidence is in
+`tmp/webcontent-20261028/results/lldb-webcontent-trap.txt`.
+
 [The offline patcher](../Tools/patch-ios26-launchd-identity.py) replaces each load with a `B` into verified empty __TEXT
 padding. Each veneer preserves all general and SIMD registers except the original load's destination, restores NZCV,
 FPCR/FPSR, SP and LR, then branches to the next original instruction. It obtains the token pointer from the original register
@@ -449,10 +476,10 @@ Indigo registration deadline below. Avoid pausing the host broker while expectin
 Use a fresh output directory: the patcher and executable signer refuse to overwrite their source or an existing output.
 The patcher accepts the original stock payload or that same payload with a different signature allocation, validates its
 UUID and all nonsigning bytes, rejects partial or unrelated patches, and recognizes an already patched input idempotently.
-Older four-site, five-site and six-site outputs are not inputs to this eight-site patch: regenerate from the original stock
+Older four-site, five-site, six-site and eight-site outputs are not inputs to this nine-site patch: regenerate from the original stock
 or unpatched signed payload. The fifth and sixth veneers occupy verified zero padding at `0x52400` and `0x52600`; the event
-publisher veneers occupy `0x52800` and `0x52a00`. The resolver name is at `0x52c00`, with the reserved range ending at
-`0x52d00` inside the existing `__TEXT` segment. The last named section ends at
+publisher veneers occupy `0x52800` and `0x52a00`, and the extension check-in veneer occupies `0x52c00`. The resolver name is
+at `0x52e00`, with the reserved range ending at `0x52f00` inside the existing `__TEXT` segment. The last named section ends at
 `0x51b8c` and the segment ends at `0x54000`; the complete reserved range is verified empty before patching.
 It never signs or deploys a file. Rebuild and deploy the matching host app and shim with the patched launchd; an older shim
 without the exported resolver cannot complete the patched owner lookups.
@@ -485,15 +512,17 @@ Install the signed executable as `RuntimeRoot/sbin/launchd_sim` and the signed s
 MH_EXECUTE while clearing CS_EXECSEG_MAIN_BINARY, as required by this runtime's earlier signing tests.
 
 The earlier twelve offline patch tests passed against both stock and the device's unpatched signed binary; the current
-fourteen-test suite passes against stock 23A343, including the two publisher routes and rejection of an older patch revision.
+seventeen-test suite passes against stock 23A343, including the publisher and extension routes, expanded padding bounds,
+and rejection of earlier patch revisions.
 An independent chain walk verified all 1,708 existing fixups and exactly one new `_dlsym` bind. The native arm64 harness assembles the same veneer source,
-compares its instructions with the emitted patch bytes, and exercises all eight sites with positive, zero, negative and
+compares its instructions with the emitted patch bytes, and exercises all nine sites with positive, zero, negative and
 missing-helper results. It verifies original token bytes, destination W-register zero extension, and GPR/SIMD/flags/SP/LR
 preservation. Broker, transport and resolver tests cover authorization, stale generations, aliases, replacement ordering,
 and history saturation. The requestor-domain test also preserves the original managed lookup, fallback and native PID-domain
 creation instructions. The publisher tests pin both original jump-table entries, managed-job calls, missing-owner error
 branches and unchanged stream validation. The separate phone trials above establish the sixth site's compiler-listener and
-rendering result and the eight-site revision's notification round trip.
+rendering result, the eight-site revision's notification round trip, and the ninth site's successful extension alive
+check-in. WebContent's subsequent Gigacage allocation failure remains separate.
 
 `dyld_info -validate_only` and `-imports` accept the new metadata. The installed `dyld_info -fixups` printer traps when it
 tries to name the added GOT slot's section: the slot is valid segment/page padding outside a named section. Use the independent

@@ -177,7 +177,7 @@ logical identity; `libsystem_notify` is not broadly switched to native identity.
 The next failure appeared as Foundation namespace 19 / code 1 / SIGKILL in native process logs. LLDB instead caught the
 actual instruction: notifyd offset `0x5ec4`, `brk #0xb001`, with `BUG IN LIBNOTIFY: Event publisher error` and error 1.
 The initial publisher fetch and poll used two additional native-audit-PID job lookups in launchd_sim. The
-[eight-site identity adapter](launchd.md) now resolves those through the existing authenticated broker; audit tokens and
+[launchd identity adapter](launchd.md) now resolves those through the existing authenticated broker; audit tokens and
 event-stream authorization checks remain intact.
 
 With these fixes, native host **83483**, simulator launchd **83485**, notifyd **83505**, and probe **83502** / logical PID
@@ -1577,3 +1577,23 @@ is independently deferred. Saving every wallpaper type, lock-screen wallpaper pr
 are not established by the working Home Screen editor. FLEX remains a temporary inspection aid in SpringBoard and
 PosterBoard; loading it did not establish a lock-screen rendering fix. No additional runtime changes or restarts were made
 when recording this deferral.
+
+## Guest certificate evaluation service (2026-10-28)
+
+The default graphical selection now includes the original 23A343 `com.apple.trustd` job. It launches `/usr/libexec/trustd`
+and publishes only its stock `com.apple.trustd` Mach service inside simulator launchd. The existing daemon generator
+preserves these declarations and the stock diagnostic environment, sets Boolean `RunAtLoad=true`, `KeepAlive=false` and
+`EnableTransactions=false`, and omits stock user/group, pressured-exit and panic policies. It uses the same bounded startup
+policy as the other selected daemons; no native trust endpoint or unconditional trust result is introduced.
+
+After the separate Network route-PID and lazy `libnetwork.dylib` lookup corrections, the default-handling NSURLSession
+probe still failed HTTPS with `-1202` while trustd was absent; `SecTrustEvaluate` returned `-26276`. Bootstrapping the normalized
+stock trustd job made the same probe validate its four-certificate chain, return HTTP 200 with 577 bytes, and exit 0.
+Certificate verification remained enabled. This establishes the service dependency for the tested request, not every
+Safari operation or certificate policy. The [networking notes](networking.md) record the device/run evidence and independent fixes.
+
+The existing runtime staging scopes already include the trustd executable, original entitlement sections, launchd plist,
+and matching `System/Library/Security/Certificates.bundle`. Custom service lists replace the defaults and must include
+`com.apple.trustd` when HTTPS is required. There are now 17 selected default jobs, below the 20-job selection limit; the
+optional launchctl-control worker still fits. The Broker test covers ordinary and explicit-default startup, the exact
+program/service, serialized Boolean policy, omitted privileged settings, and continued exclusion from a custom one-job list.

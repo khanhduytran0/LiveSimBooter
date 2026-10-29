@@ -19,6 +19,9 @@ xcrun --sdk macosx clang -fblocks -std=c11 -Wall -Wextra -Werror -arch arm64 -DL
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
     Tests/HapticRelayTests.m -framework Foundation -framework AVFAudio -o "$test_directory/HapticRelay"
 "$test_directory/HapticRelay"
+xcrun --sdk macosx clang -fobjc-arc -Wall -Wextra -Werror -arch arm64 \
+    Tests/HapticUIKitSupportTests.m -framework Foundation -o "$test_directory/HapticUIKitSupport"
+"$test_directory/HapticUIKitSupport"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/NativeProductionStatusTests.c -framework CoreFoundation -o "$test_directory/NativeProductionStatus"
 "$test_directory/NativeProductionStatus"

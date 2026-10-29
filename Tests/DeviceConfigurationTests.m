@@ -188,6 +188,53 @@ static void audioPreferenceTests(void) {
     if (prior) assert(!setenv("LSB_AUDIO_OUTPUT", prior.UTF8String, 1));
 }
 
+static void feedbackSupportProjectionTests(NSString *parent) {
+    NSString *key = @"LSBUIKitFeedbackSupportLevel";
+    NSArray *levels = @[@0, @1, @2, @(-1), @3, @(NSIntegerMax), @YES, @NO, @0.0, @2.0, @1.5, @"2", @{}, @[], NSNull.null];
+    for (LSBGuestDeviceType *device in LSBGuestDeviceTypes()) {
+        NSDictionary *stock = profile(device, nil, nil);
+        NSMutableDictionary *original = stock.mutableCopy, *values = [stock[@"capabilities"] mutableCopy];
+        values[key] = @2;
+        original[@"capabilities"] = values.copy; // An invalid new answer must not retain an earlier session's override.
+        NSDictionary *before = original.copy;
+        for (NSUInteger index = 0; index < levels.count; ++index) {
+            id level = levels[index];
+            CFTypeRef nativeLevel = level == NSNull.null ? NULL : (__bridge CFTypeRef)level;
+            for (id nativeSupport in @[@YES, @NO, @1, NSNull.null]) {
+                CFTypeRef closedLoop = nativeSupport == NSNull.null ? NULL : (__bridge CFTypeRef)nativeSupport;
+                NSDictionary *adapted = nil;
+                assert(!LSBProjectGuestHapticsCapabilities(original, closedLoop, nativeLevel, &adapted));
+                assert(!LSBValidateGuestDeviceCapabilities(adapted, device) && [original isEqual:before]);
+                assert(![adapted isKindOfClass:NSMutableDictionary.class] && ![adapted[@"capabilities"] isKindOfClass:NSMutableDictionary.class]);
+                NSData *serialized = [NSPropertyListSerialization dataWithPropertyList:adapted format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+                NSDictionary *roundTrip = [NSPropertyListSerialization propertyListWithData:serialized options:NSPropertyListImmutable format:NULL error:NULL];
+                id emitted = roundTrip[@"capabilities"][key];
+                if (index < 3) {
+                    assert(emitted && CFGetTypeID((__bridge CFTypeRef)emitted) == CFNumberGetTypeID());
+                    assert(!CFNumberIsFloatType((__bridge CFNumberRef)emitted) && [emitted integerValue] == (NSInteger)index);
+                } else assert(!emitted);
+                id supported = roundTrip[@"capabilities"][@"DeviceSupportsClosedLoopHaptics"];
+                BOOL expected = closedLoop && CFGetTypeID(closedLoop) == CFBooleanGetTypeID() && CFBooleanGetValue(closedLoop);
+                assert(CFGetTypeID((__bridge CFTypeRef)supported) == CFBooleanGetTypeID() && [supported boolValue] == expected);
+                NSMutableDictionary *restored = adapted.mutableCopy, *capabilities = [adapted[@"capabilities"] mutableCopy];
+                [capabilities removeObjectForKey:key];
+                [capabilities removeObjectForKey:@"DeviceSupportsClosedLoopHaptics"];
+                restored[@"capabilities"] = capabilities;
+                assert([restored isEqual:stock]); // Selected device identity, geometry and unrelated capabilities remain stock.
+            }
+        }
+        NSString *root = fixtureRoot(parent, [@"feedback-level-" stringByAppendingString:device.identifier]);
+        NSDictionary *adapted = nil;
+        assert(!LSBProjectGuestHapticsCapabilities(stock, kCFBooleanTrue, (__bridge CFTypeRef)@2, &adapted));
+        assert(!LSBInstallGuestDeviceCapabilities(root, adapted) && [readProfile(livePath(root)) isEqual:adapted]);
+        assert(!LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(root, stock, NO));
+        assert([readProfile(livePath(root)) isEqual:stock]); // Disabling publishes the untouched staged profile, with no LSB-only level.
+    }
+    NSDictionary *output = @{};
+    assert(LSBProjectGuestHapticsCapabilities(nil, kCFBooleanTrue, (__bridge CFTypeRef)@2, &output) == EINVAL && !output);
+    assert(LSBProjectGuestHapticsCapabilities(profile(LSBDefaultGuestDeviceType(), nil, nil), kCFBooleanTrue, NULL, NULL) == EINVAL);
+}
+
 static void staticPathTests(NSString *parent) {
     LSBGuestDeviceType *device = LSBDefaultGuestDeviceType();
     NSDictionary *good = profile(device, nil, nil);
@@ -301,6 +348,7 @@ int main(void) {
         NSString *parent = @(directory);
         preflightTests(parent);
         hapticsProjectionTests(parent);
+        feedbackSupportProjectionTests(parent);
         audioPreferenceTests();
         staticPathTests(parent);
         atomicInstallTests(parent);

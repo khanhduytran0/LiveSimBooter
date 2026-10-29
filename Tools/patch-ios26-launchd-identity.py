@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Patch only 23A343 arm64 launchd_sim's eight audit-PID owner reads.
+"""Patch only 23A343 arm64 launchd_sim's nine audit-PID owner reads.
 
 Creates a new executable and manifest without signing or modifying the source. The output MUST be
 signed again: its old signature is retained only as an allocation/template for codesign --force.
@@ -27,7 +27,9 @@ SIGNATURE_COMMAND = 0xBE0
 LINKEDIT_COMMAND = 0xA00
 CHAIN_TAIL, CHAIN_TAIL_WORD = 0x59070, 0x5D218
 GOT_SLOT = 0x5BFF8
-CAVE_BEGIN, CAVE_END, VENEER_STRIDE = 0x51C00, 0x52D00, 0x200
+# Original __TEXT ends at 0x54000; its last section (__unwind_info) ends at 0x51b8c.
+# The pinned payload hash and zero-padding check cover this entire nine-veneer allocation.
+CAVE_BEGIN, CAVE_END, VENEER_STRIDE = 0x51C00, 0x52F00, 0x200
 SYMBOL = b'LSBLaunchdResolveAuditPID\0'
 FRAME_SIZE = 0x320
 # Offset, exact original LDR, token register (None means original SP), destination W register.
@@ -36,7 +38,8 @@ SITES = ((0x236B0, 0xB9401421, 1, 1), (0x2E658, 0xB9401681, 20, 1),
          (0x1DB98, 0xB9401429, 1, 9),  # Routine 718: XPC service dictionary owner comparison.
          (0x2D130, 0xB9401440, 2, 0),  # Requestor domain: choose the managed job's domain before its existing fallback.
          (0x30048, 0xB94016C0, 22, 0),  # Routine 403: event publisher fetch subscriptions; preserve its stream checks.
-         (0x2FFD8, 0xB94016C0, 22, 0))  # Routine 406: event publisher arm poll; preserve its stream checks.
+         (0x2FFD8, 0xB94016C0, 22, 0),  # Routine 406: event publisher arm poll; preserve its stream checks.
+         (0x1DAE4, 0xB9401428, 1, 8))  # Routine 716: extension alive check-in; preserve owner comparison and startup state.
 SYMBOL_OFFSET = CAVE_BEGIN + len(SITES) * VENEER_STRIDE
 
 

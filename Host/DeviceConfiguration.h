@@ -21,3 +21,6 @@ void LSBSaveConfiguredAudioOutputEnabled(BOOL enabled);
 int LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *runtimeRoot, NSDictionary *profile, BOOL enabled);
 // Pure profile adaptation. Only CFBoolean true enables support; false/unavailable/malformed native answers publish false.
 int LSBProjectGuestHapticsCapability(NSDictionary *profile, CFTypeRef nativeAnswer, NSDictionary **output);
+// Additionally publish the native UIKit support level as capabilities.LSBUIKitFeedbackSupportLevel: integer 0..2, never Boolean/float.
+// Unknown or malformed levels remove this LSB-only override; the closed-loop capability follows the same Boolean policy above.
+int LSBProjectGuestHapticsCapabilities(NSDictionary *profile, CFTypeRef nativeAnswer, CFTypeRef nativeFeedbackLevel, NSDictionary **output);

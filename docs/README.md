@@ -36,6 +36,7 @@ Historical sections below describe earlier cache layouts and failures; use the s
 - [Display settings](display-settings.md): native shortcuts backed by a fixed launchd-owned helper, with verified HUD and live touch toggles.
 - [Simulator preferences](cfprefsd.md): the stock cfprefsd job and isolated `BKDigitizerVisualizeTouches` preference.
 - [Services toward SpringBoard](springboard-services.md): simslim evidence, selected daemon startup, notification compatibility, and remaining limits.
+- [Simulator networking](networking.md): route-reply PID compatibility, cached library aliases, TLS and Safari diagnostics.
 - [Guest logging](logging.md): the libtrace self-query override, guest `log` tool limits, and measured service retry CPU costs.
 - [Shared-memory measurements](shared-memory.md): sampled page changes, process write counters, a controlled flush test, and attribution limits.
 - [File locks](file-locks.md): native suspension crashes and descriptor-scoped RunningBoard lock metadata compatibility.

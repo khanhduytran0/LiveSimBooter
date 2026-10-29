@@ -2132,7 +2132,7 @@ static int initialPlan(LSBReceivedMessage *message, int argc, const char *argv[]
         // Icon launches boot the graphical session. Its fixed launchd-owned terminal job supplies the Fish tab.
         const char *defaults[] = {"com.apple.notifyd", "com.apple.lsd", "com.apple.runningboardd", "com.apple.containermanagerd",
                                   "com.apple.fontservicesd", "com.apple.containermanagerd.system", "com.apple.distnoted.xpc.daemon",
-                                  "com.apple.configd_sim", "com.apple.sleepd", "com.apple.systemstatusd", "com.apple.SpringBoard",
+                                  "com.apple.configd_sim", "com.apple.trustd", "com.apple.sleepd", "com.apple.systemstatusd", "com.apple.SpringBoard",
                                   "com.apple.iconservices.iconservicesagent", "com.apple.TextInput.kbd", "com.apple.assistantd",
                                   "com.apple.PosterBoard", "com.apple.DragUI.druid", NULL};
         enableIndigo = YES;

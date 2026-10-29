@@ -682,7 +682,8 @@ lookups and error147 for the virtual framework bundle path, which did not belong
 The guest handoff now supplies `LSB_REGISTER_METAL_COMPILER=1` after removing conflicting input copies. The constructor
 retains the three existing daemon roles and additionally validates immediate app main executables under `Applications`,
 `System/Applications`, and `System/Library/CoreServices` inside canonical RuntimeRoot. Bounded regular Info.plist metadata
-must declare package type `APPL` and exactly match the executable name. Nested helpers and XPC services do not qualify.
+must declare package type `APPL` and exactly match the executable name. Other nested helpers and XPC services do not qualify;
+the exact WebKit GPU extension has the separate role described below.
 The imported compiler is still the fixed, contained matching Metal framework XPC bundle. Native Metal routes bypass this
 handoff; the compiler process itself cannot recursively opt in.
 
@@ -692,3 +693,31 @@ logical **12413** / native **12414** passed repeated first-character entry and f
 user; its Metal-rendered swipe control also worked. The registration API returns void, so the successful interaction is
 the device evidence, not the constructor's return log. Local evidence is `tmp/cpu-investigation/compiler-console.log`,
 `contacts-first-last-transition-sample.txt`, and `launchd-contacts-compiler.log`.
+
+### WebKit GPU compiler registration
+
+On 2026-10-28, the JIT-less WebKit probe completed navigation but its stock GPU extension repeatedly aborted. A temporary
+diagnostic captured native GPU PIDs **5713**, **5719**, and **5721**, without LLDB: Core Animation namespace **13**, code **7**,
+`Metal failed to specialize fragment function`. The payload named `fixed_frag_lpf_cpf`, specialization `BclrXc`, and reported
+that `MTLCompilerService` lookup failed with error **3**, `No such process`. Pinned QuartzCore calls `abort_with_payload`
+at TEXT offset `0x165304` for this failure. This was compiler discovery, not a missing shader function or render-server failure.
+
+The compiler constructor now also accepts exactly
+`System/Library/ExtensionKit/Extensions/GPUExtension.appex/com.apple.WebKit.GPU` inside canonical RuntimeRoot. The GPU has
+its own PID domain; its UI application's compiler import is insufficient. Registration uses the existing fixed compiler bundle
+and preserves the exact opt-in, canonical-path, regular-file and containment checks. It does not enable other extensions or
+change native Metal serialization. Focused tests cover GPU and root-alias success, adjacent filenames and extension exclusion,
+escaping executable symlinks, nonregular executables, and all existing compiler-bundle validation failures.
+
+The capture used iPhone16,2 on native iOS **26.1 / 23B50**, guest **26.0 / 23A343**, and the existing cache at **0x110000000**,
+UUID **73ED978A-FD25-3166-A57A-34E21BB7E5B8**. Evidence is `tmp/webcontent-20261028/gpu-diagnostic/results/payload.log`;
+the focused test log is `tmp/webcontent-20261028/compiler-registration-tests/result.log`.
+
+After stopping the session, the signed corrected shim was deployed, the original GPU executable restored, and the temporary
+diagnostic removed. The fresh session used native host **5737**, launchd **5741**, UI logical **5807** / native **5808**,
+WebContent **5811**, GPU **5814**, and compiler processes **5818** / **5821**. The GPU no longer aborted with code7, the page
+remained loaded with the actual WebContent JIT query returning false, and the user confirmed audible WebAudio on multiple plays.
+
+At approximately **21:08:44**, selecting text triggered a separate `SIGSEGV` in UI process **5808**. GPU **5814** and
+WebContent **5811** then exited normally with status0. A matching loose TextToSpeech override subsequently repaired its
+missing SwiftSQLite binding; selection and speech passed on device. See [the selection diagnosis](audio-output.md#text-selection-and-texttospeech).

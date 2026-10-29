@@ -99,9 +99,11 @@ Normal startup and device-picker apply publish the staged stock capability value
 a binary plist and replaced atomically; staged originals remain untouched. Experimental haptics default off. The native Settings
 choice, or exactly `LSB_EXPERIMENTAL_HAPTICS=1` in the **native host launch environment**, enables a session-owned haptic relay,
 the optional guest constructor helper, and projection of `DeviceSupportsClosedLoopHaptics` from actual native MobileGestalt.
-Only exact CFBoolean true enables that capability; unknown or malformed answers become false. The relay owns a genuine native
-host AudioSession; it does not forward a guest audio-session bypass to audiomxd. A public-engine transient was physically
-confirmed on iPhone 15; normal keyboard/UI feedback remains a separate validation step.
+Only exact CFBoolean true enables that capability; unknown or malformed answers become false. An enabled session also
+publishes the native UIKit feedback level as the typed integer `LSBUIKitFeedbackSupportLevel` for the pinned guest UIKit adapter.
+The relay owns a genuine native host AudioSession; it does not forward a guest audio-session bypass to audiomxd. A public-engine transient was physically
+confirmed on iPhone 15, as were public UIKit impact, selection and notification feedback. Keyboard feedback still follows
+the guest preference and needs a separate interaction check.
 Other profile fields and staged originals stay unchanged. See [haptic evidence and limits](keyboard-haptics.md).
 
 Audio output also defaults off and has its own native Settings switch. The switch restarts the simulator to apply the choice;
@@ -218,6 +220,19 @@ python3 Tools/patch-ios26-container-metadata.py --mach-o \
   > "$LSB_WORK/helper-metadata-patch.json"
 ```
 
+The current launchd identity patch includes nine audited-PID reads, including ExtensionKit's alive check-in. Regenerate
+from the original `23A343` launchd when updating an older patched runtime; the patcher rejects earlier patch revisions.
+Keep the installed signed launchd as a rollback copy until the replacement is tested. See
+[the identity adapter's validation and device status](launchd.md#native-identity-and-service-ownership).
+
+Generated guest `Bootstrap.Child` settings now disable JIT (`JSC_useJIT=false`) and Gigacage (`GIGACAGE_ENABLED=false`), and
+set `SIMULATOR_MEMORY_WARNINGS` to `<data>/var/run/LiveSimBooter-memory-warnings`; native launch settings are unchanged.
+Gigacage's heap-isolation mitigation is disabled. The empty warning file satisfies simulator initialization but does not relay
+native memory pressure. With the current launchd patch and GPU compiler registration, a default-process-pool WebContent
+test loaded a page, reported JIT disabled, and played audible WebAudio on the development iPhone 15. The signed stock
+TextToSpeech override described below also resolved the reproduced text-selection crash and enabled speech. See
+[WebKit evidence and limits](audio-output.md#webkit-test-status).
+
 These commands do not deploy or sign guest executables. `dyld_sim` retains `MH_DYLINKER`; executables retain `MH_EXECUTE`.
 Install diagnostic executables under `RuntimeRoot/usr/local/bin`, including `spawn-probe`, `lifecycle-probe`, and `exec-probe` when used.
 Keep production helpers in `usr/libexec` and runtime programs such as `df` and Fish at their existing paths. The generated simulator
@@ -272,6 +287,15 @@ The runtime stager inventories the selected original trees before copying; defau
 resources and command directories, excluding the original caches, stale bundle seals, and cache-resident Mach-Os. It builds
 a **new** `RuntimeRoot`, signs uncached code, and preserves original simulator executable sections. Do not blindly copy the
 whole stock root over a signed staging tree: that restores unsigned executables and cache overrides.
+
+There is one narrow stock override: when the cache inventory includes TextToSpeech but omits SwiftSQLite, the stager also
+signs `System/Library/PrivateFrameworks/TextToSpeech.framework/TextToSpeech` from the immutable original runtime. This
+restores weak bindings that the cache had recorded as missing. Default scopes include both frameworks; custom scopes must
+include TextToSpeech and the uncached SwiftSQLite executable. The report's `loose_cache_overrides` lists an override only
+when its code was actually selected. No extra command-line option is needed, and `--add-binary` still rejects arbitrary
+cached-image replacements. For an existing runtime, stop guests before applying the signed staged override and start a fresh
+session; copying only SwiftSQLite does not repair the cached TextToSpeech pointers. The cache itself need not be rebuilt.
+See [the selection and speech verification](audio-output.md#text-selection-and-texttospeech).
 
 The full migration recipe below explicitly adds `Developer` and `RestoreVersion.plist` to the default selection. Supplying
 any `--scope` replaces the defaults, so repeat the complete list. The optional CMS helper argument reuses a prebuilt
@@ -335,7 +359,7 @@ Unsupported architectures/platforms still block staging; there is no unsigned fa
 the documented dyld_sim variant supports them, while irrelevant Mac-only host tools are recorded and omitted. Contained dangling stock
 links are reported and preserved as relative links, not redirected into the native filesystem.
 
-The default 23A343 inventory contains about 13 GB of selected payload: 3,825 code files, 490,636 resources, 249 symlinks, and 254 app
+The initial 23A343 inventory contained about 13 GB of selected payload: 3,825 code files, 490,636 resources, 249 symlinks, and 254 app
 bundles, of which 163 have registerable executables. Adding `Developer` supplies five code files, 23 resources, and three links,
 about 1.2 MB, including the two XCTest support libraries omitted by the defaults. Four unresolved references remain in the full
 selection: two absent AppleInternal frameworks and `@rpath/XCTest.framework/XCTest` used by VisualTestKit and xctest.
@@ -499,9 +523,13 @@ arguments after the bundle identifier, now waits for **Start** on the IOSurface 
 remain available before startup and persist afterward. For an unattended development test, pass `--launchd-services` with no
 labels to start the same default selection automatically. Other explicit guest arguments, such as `/bin/df` or `--terminal`,
 also retain automatic startup. The default selection comes from
-`Host/Broker.m`: it includes SpringBoard, assistantd, configd_sim, systemstatusd, kbd, and the on-demand PosterBoard LaunchAngel.
+`Host/Broker.m`: it includes SpringBoard, assistantd, configd_sim, trustd, systemstatusd, kbd, and the on-demand PosterBoard LaunchAngel.
 The generator adds backboardd, cfprefsd, the launchd-owned Fish helper, and the display-settings worker. Explicit `--launchd-services LABEL...` **replaces**
 the additional default list. Keep the native app foregrounded for baseline tests.
+
+HTTPS certificate evaluation needs the stock guest `com.apple.trustd` service and matching
+`System/Library/Security/Certificates.bundle` resources, both covered by the default staging scopes. Keep trustd in custom
+graphical service selections that need HTTPS. This uses normal certificate validation; see [networking evidence](networking.md).
 
 Handoff success logs are disabled by default. To inspect guest entry, main-stack relocation, and the retained/detached cache
 choice, prefix the development launch command with `DEVICECTL_CHILD_LSB_TRACE_HANDOFF=1`. Launchd propagates this exact opt-in to
@@ -525,7 +553,7 @@ and review `Host/Broker.m` if the defaults have changed since this guide:
 xcrun devicectl device process launch --device "$LSB_DEVICE" --terminate-existing --console -- "$LSB_BUNDLE_ID" \
   --launchd-services com.apple.notifyd com.apple.lsd com.apple.runningboardd com.apple.containermanagerd \
   com.apple.fontservicesd com.apple.containermanagerd.system com.apple.distnoted.xpc.daemon com.apple.configd_sim \
-  com.apple.sleepd com.apple.systemstatusd com.apple.SpringBoard com.apple.iconservices.iconservicesagent \
+  com.apple.trustd com.apple.sleepd com.apple.systemstatusd com.apple.SpringBoard com.apple.iconservices.iconservicesagent \
   com.apple.TextInput.kbd com.apple.assistantd com.apple.PosterBoard com.apple.DragUI.druid com.kdt.LiveSimBooter.launchctl-control
 ```
 

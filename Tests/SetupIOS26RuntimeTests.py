@@ -27,9 +27,13 @@ runtime = load('runtime_setup', REPOSITORY / 'Tools/setup-ios26-runtime.py')
 signer = load('runtime_signer', REPOSITORY / 'Tools/sign-sim-executable.py')
 
 
-def make_macho(path, kind=2, dependencies=(), platform=7):
+def make_macho(path, kind=2, dependencies=(), platform=7, install_name=None):
     build = struct.pack('<6I', 0x32, 24, platform, 0x1a0000, 0x1a0000, 0)
     commands = [build]
+    if install_name:
+        value = install_name.encode() + b'\0'
+        length = (24 + len(value) + 7) & ~7
+        commands.append(struct.pack('<6I', 0xd, length, 24, 0, 0, 0) + value + bytes(length - 24 - len(value)))
     for name, weak in dependencies:
         value = name.encode() + b'\0'
         length = (24 + len(value) + 7) & ~7
@@ -145,6 +149,105 @@ class RuntimeSetupTests(unittest.TestCase):
         helper.write_bytes(data)
         with self.assertRaisesRegex(ValueError, 'arm64e'):
             runtime.parse_additions(['/bin/test=' + str(helper)], self.cached)
+
+    def text_to_speech_fixture(self):
+        self.cached.add(runtime.TEXT_TO_SPEECH)
+        for name in (runtime.TEXT_TO_SPEECH, runtime.SWIFT_SQLITE, '/usr/lib/cached.dylib'):
+            dependencies = [(runtime.SWIFT_SQLITE, True)] if name == runtime.TEXT_TO_SPEECH else []
+            make_macho(self.root / name[1:], 6, dependencies=dependencies, install_name=name)
+
+    def run_report(self, *arguments):
+        self.manifest.write_text(json.dumps({'version': 1, 'runtime_build': '23A343',
+                                            'images': [{'install_name': name} for name in sorted(self.cached)],
+                                            'automatically_supplied_host_libraries': [], 'expected_image_count': len(self.cached)}))
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            result = runtime.main(['--runtime-root', str(self.root), '--cache-manifest', str(self.manifest), *arguments])
+        self.assertEqual(result, 0)
+        return json.loads(stream.getvalue())
+
+    def test_text_to_speech_stock_override_keeps_original_cache_and_addition_policy(self):
+        self.text_to_speech_fixture()
+        entries, skipped, errors, missing = runtime.inventory(self.root, self.cached, ['System/Library', 'usr'], {})
+        self.assertFalse(errors or missing)
+        self.assertEqual(entries[runtime.TEXT_TO_SPEECH]['kind'], 'code')
+        self.assertEqual(entries[runtime.TEXT_TO_SPEECH]['loose_cache_override'], runtime.TEXT_TO_SPEECH)
+        self.assertNotIn('override_source', entries[runtime.TEXT_TO_SPEECH])
+        self.assertIn(runtime.SWIFT_SQLITE, entries)
+        self.assertNotIn('/usr/lib/cached.dylib', entries)
+        self.assertEqual(skipped['cached_code'], 1)
+        self.assertIn(runtime.TEXT_TO_SPEECH, self.cached)
+        replacement = self.base / 'replacement'
+        make_macho(replacement, 6, install_name=runtime.TEXT_TO_SPEECH)
+        with self.assertRaisesRegex(ValueError, 'cached'):
+            runtime.parse_additions([runtime.TEXT_TO_SPEECH + '=' + str(replacement)], self.cached)
+
+    def test_text_to_speech_report_follows_scope_and_provider_cache_membership(self):
+        self.text_to_speech_fixture()
+        self.app()
+        self.assertEqual(self.run_report('--scope', 'System/Library')['loose_cache_overrides'], [runtime.TEXT_TO_SPEECH])
+        self.assertEqual(self.run_report('--scope', 'Applications')['loose_cache_overrides'], [])
+        self.cached.add(runtime.SWIFT_SQLITE)
+        self.assertEqual(self.run_report('--scope', 'System/Library')['loose_cache_overrides'], [])
+        entries, _, errors, missing = runtime.inventory(self.root, self.cached, ['System/Library'], {})
+        self.assertFalse(errors or missing)
+        self.assertNotIn(runtime.TEXT_TO_SPEECH, entries)
+        self.assertNotIn(runtime.SWIFT_SQLITE, entries)
+        self.cached.remove(runtime.TEXT_TO_SPEECH)
+        self.assertEqual(self.run_report('--scope', 'System/Library')['loose_cache_overrides'], [])
+        entries, _, _, _ = runtime.inventory(self.root, self.cached, ['System/Library'], {})
+        self.assertIn(runtime.TEXT_TO_SPEECH, entries)  # Ordinary uncached code, not a cache override.
+
+    def test_text_to_speech_alias_requires_included_code_to_report_override(self):
+        self.text_to_speech_fixture()
+        original = self.root / runtime.TEXT_TO_SPEECH[1:]
+        real = original.parent / 'Versions/A/TextToSpeech'
+        real.parent.mkdir(parents=True)
+        original.rename(real)
+        original.symlink_to('Versions/A/TextToSpeech')
+        unrelated = original.parent / 'cached-alias'
+        make_macho(unrelated, 6, install_name='/usr/lib/cached.dylib')
+        entries, skipped, errors, missing = runtime.inventory(self.root, self.cached, ['System/Library'], {})
+        self.assertFalse(errors or missing)
+        self.assertEqual(entries[runtime.TEXT_TO_SPEECH]['kind'], 'symlink')
+        real_name = '/' + real.relative_to(self.root).as_posix()
+        self.assertEqual(entries[real_name]['loose_cache_override'], runtime.TEXT_TO_SPEECH)
+        self.assertNotIn('/' + unrelated.relative_to(self.root).as_posix(), entries)
+        self.assertEqual(skipped['cached_code_alias'], 1)
+        self.assertEqual(self.run_report('--scope', 'System/Library')['loose_cache_overrides'], [runtime.TEXT_TO_SPEECH])
+        self.assertEqual(self.run_report('--scope', runtime.TEXT_TO_SPEECH[1:])['loose_cache_overrides'], [])
+
+    def test_text_to_speech_override_is_signed_from_stock_through_normal_stage_path(self):
+        self.text_to_speech_fixture()
+        original = self.root / runtime.TEXT_TO_SPEECH[1:]
+        before = original.read_bytes()
+        output = self.base / 'signed-stage'
+        calls = []
+        def fake_sign(source, target, identity, identifier, helper, unused_signer):
+            calls.append((source, target, identity, identifier))
+            target.write_bytes(source.read_bytes())
+            return {'sha256': runtime.sha(target)}
+        with mock.patch.object(runtime.subprocess, 'run'), mock.patch.object(runtime, 'sign_binary', side_effect=fake_sign):
+            result = self.run_report('--scope', 'System/Library', '--scope', 'usr', '--stage', '--output-dir', str(output),
+                                     '--identity', '1' * 40, '--identifier', 'example.stage')
+        self.assertEqual(result['loose_cache_overrides'], [runtime.TEXT_TO_SPEECH])
+        saved = json.loads((output / 'stage-manifest.json').read_text())
+        self.assertEqual(saved['loose_cache_overrides'], [runtime.TEXT_TO_SPEECH])
+        staged = output / 'RuntimeRoot' / runtime.TEXT_TO_SPEECH[1:]
+        self.assertIn((original, staged, '1' * 40, 'example.stage'), calls)
+        self.assertEqual(len(calls), 2)  # TextToSpeech and its uncached SwiftSQLite provider.
+        self.assertEqual(staged.read_bytes(), before)
+        self.assertEqual(original.read_bytes(), before)
+        self.assertFalse((output / 'RuntimeRoot/usr/lib/cached.dylib').exists())
+
+    def test_text_to_speech_override_rejects_non_dylib_stock_input(self):
+        self.text_to_speech_fixture()
+        original = self.root / runtime.TEXT_TO_SPEECH[1:]
+        for data in (b'not Mach-O', make_macho(original, 2, install_name=runtime.TEXT_TO_SPEECH)):
+            original.write_bytes(data)
+            entries, _, errors, _ = runtime.inventory(self.root, self.cached, [runtime.TEXT_TO_SPEECH[1:]], {})
+            self.assertNotIn(runtime.TEXT_TO_SPEECH, entries)
+            self.assertEqual(errors, [{'path': runtime.TEXT_TO_SPEECH, 'error': 'Expected original TextToSpeech dylib'}])
 
     def test_strong_dependency_gap_and_weak_dependency_policy(self):
         binary = self.root / 'bin/test'

@@ -14,7 +14,8 @@ spec.loader.exec_module(patcher)
 EXPECTED_SITES = ((0x236B0, 0xB9401421, 1, 1), (0x2E658, 0xB9401681, 20, 1),
                   (0x2E6B8, 0xB9401688, 20, 8), (0x1BC08, 0xB94017E0, None, 0),
                   (0x1DB98, 0xB9401429, 1, 9), (0x2D130, 0xB9401440, 2, 0),
-                  (0x30048, 0xB94016C0, 22, 0), (0x2FFD8, 0xB94016C0, 22, 0))
+                  (0x30048, 0xB94016C0, 22, 0), (0x2FFD8, 0xB94016C0, 22, 0),
+                  (0x1DAE4, 0xB9401428, 1, 8))
 assert patcher.SITES == EXPECTED_SITES, 'Update the independent fixtures when the pinned input build/sites change'
 
 

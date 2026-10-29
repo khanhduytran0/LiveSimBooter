@@ -1,9 +1,20 @@
 #import "DeviceConfiguration.h"
+#include <TargetConditionals.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if TARGET_OS_IOS && !TARGET_OS_SIMULATOR
+#import <UIKit/UIKit.h>
+#include <objc/runtime.h>
+
+// UIDevice's feedback-engine SPI is NSInteger (q16@0:8 in arm64 UIKit); verify the native method before calling it.
+// The matching 23A343 simulator method is a zero-returning stub, so the optional guest adapter needs this native value.
+@interface UIDevice (LSBNativeFeedbackSupport)
+- (NSInteger)_feedbackSupportLevel;
+@end
+#endif
 
 static NSString *const DevicePreference = @"LSBSimulatorDeviceType";
 static NSString *const HapticsPreference = @"LSBExperimentalHapticsEnabled";
@@ -93,7 +104,7 @@ int LSBInstallGuestDeviceCapabilities(NSString *root, NSDictionary *profile) {
     return [data writeToURL:url options:NSDataWritingAtomic error:&writeError] ? 0 : fileError(writeError, EIO);
 }
 
-int LSBProjectGuestHapticsCapability(NSDictionary *original, CFTypeRef nativeAnswer, NSDictionary **output) {
+int LSBProjectGuestHapticsCapabilities(NSDictionary *original, CFTypeRef nativeAnswer, CFTypeRef nativeFeedbackLevel, NSDictionary **output) {
     if (!output) return EINVAL;
     *output = nil;
     if (![original isKindOfClass:NSDictionary.class] || ![original[@"capabilities"] isKindOfClass:NSDictionary.class]) return EINVAL;
@@ -103,9 +114,45 @@ int LSBProjectGuestHapticsCapability(NSDictionary *original, CFTypeRef nativeAns
     // This describes the bridged physical actuator, without changing the selected simulator's identity or display profile.
     NSMutableDictionary *profile = [original mutableCopy], *capabilities = [original[@"capabilities"] mutableCopy];
     capabilities[@"DeviceSupportsClosedLoopHaptics"] = supported;
+    // Never carry an older session's native level through an unknown/malformed query. Stock profiles have no LSB-only key.
+    [capabilities removeObjectForKey:@"LSBUIKitFeedbackSupportLevel"];
+    NSInteger feedbackLevel;
+    if (nativeFeedbackLevel && CFGetTypeID(nativeFeedbackLevel) == CFNumberGetTypeID() &&
+        !CFNumberIsFloatType((CFNumberRef)nativeFeedbackLevel) &&
+        CFNumberGetValue((CFNumberRef)nativeFeedbackLevel, kCFNumberNSIntegerType, &feedbackLevel) && feedbackLevel >= 0 && feedbackLevel <= 2)
+        capabilities[@"LSBUIKitFeedbackSupportLevel"] = @(feedbackLevel);
     profile[@"capabilities"] = capabilities.copy;
     *output = profile.copy;
     return 0;
+}
+
+int LSBProjectGuestHapticsCapability(NSDictionary *original, CFTypeRef nativeAnswer, NSDictionary **output) {
+    return LSBProjectGuestHapticsCapabilities(original, nativeAnswer, NULL, output);
+}
+
+static NSNumber *nativeFeedbackSupportLevel(void) {
+#if TARGET_OS_IOS && !TARGET_OS_SIMULATOR
+    static NSNumber *cachedLevel;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Method method = class_getInstanceMethod(UIDevice.class, @selector(_feedbackSupportLevel));
+        const char *signature = method ? method_getTypeEncoding(method) : NULL;
+        if (!signature || strcmp(signature, "q16@0:8")) {
+            fprintf(stderr, "[haptics] native UIKit feedback support=unknown method signature unavailable or incompatible\n");
+            return;
+        }
+        @try {
+            NSInteger level = UIDevice.currentDevice._feedbackSupportLevel;
+            if (level >= 0 && level <= 2) cachedLevel = @(level);
+            fprintf(stderr, "[haptics] native UIKit feedback support=%ld known=%d\n", (long)level, cachedLevel != nil);
+        } @catch (NSException *exception) {
+            fprintf(stderr, "[haptics] native UIKit feedback support=unknown exception=%s\n", exception.name.UTF8String);
+        }
+    });
+    return cachedLevel;
+#else
+    return nil; // Desktop profile tests and simulator builds have no native iPhone capability to publish.
+#endif
 }
 
 static CFBooleanRef nativeHapticsCapability(void) {
@@ -156,6 +203,6 @@ void LSBSaveConfiguredAudioOutputEnabled(BOOL enabled) {
 int LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *root, NSDictionary *profile, BOOL enabled) {
     if (!enabled) return LSBInstallGuestDeviceCapabilities(root, profile);
     NSDictionary *adapted = nil;
-    int error = LSBProjectGuestHapticsCapability(profile, nativeHapticsCapability(), &adapted);
+    int error = LSBProjectGuestHapticsCapabilities(profile, nativeHapticsCapability(), (__bridge CFTypeRef)nativeFeedbackSupportLevel(), &adapted);
     return error ? error : LSBInstallGuestDeviceCapabilities(root, adapted);
 }

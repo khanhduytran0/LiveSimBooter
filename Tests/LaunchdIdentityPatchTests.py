@@ -7,6 +7,7 @@ import json
 import struct
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -147,6 +148,38 @@ class PinnedBinaryTests(unittest.TestCase):
         self.assertEqual(0x17804 + 4 * self.original[0x3F25E + 18], 0x179F4)
         self.assertEqual(self.patched[0x3F25E:0x3F278], self.original[0x3F25E:0x3F278])
 
+    def test_extension_alive_check_in_preserves_owner_and_startup_contract(self):
+        self.assertEqual(PATCH.SITES[8], (0x1DAE4, 0xB9401428, 1, 8))
+        # Routine 716 selects the extension-only handler, then compares the caller to the unchanged stable job PID.
+        self.assertEqual(0x17804 + 4 * self.original[0x3F25E + 16], 0x17A08)
+        self.assertEqual(decode_branch(struct.unpack_from('<I', self.original, 0x17A14)[0], 0x17A14), 0x1DAC0)
+        self.assertEqual(struct.unpack_from('<3I', self.original, 0x1DAE4), (0xB9401428, 0xB943A009, 0x6B09011F))
+        self.assertEqual(struct.unpack_from('<I', self.original, 0x1DB70)[0], 0x52800020)  # owner mismatch -> EPERM
+        # Keep the extension flag gate, comparison/rejection, reply validation, startup timer cancellation and alive bit.
+        self.assertEqual(self.patched[0x1DAC0:0x1DAE4], self.original[0x1DAC0:0x1DAE4])
+        self.assertEqual(self.patched[0x1DAE8:0x1DB94], self.original[0x1DAE8:0x1DB94])
+        self.assertEqual(self.patched[0x17770:0x17A38], self.original[0x17770:0x17A38])
+        self.assertEqual(self.patched[0x3F25E:0x3F278], self.original[0x3F25E:0x3F278])
+
+    def test_expanded_cave_stays_in_original_text_padding(self):
+        cursor, text_extent, section_end = 32, None, 0
+        for _ in range(struct.unpack_from('<I', self.original, 16)[0]):
+            command, size = struct.unpack_from('<2I', self.original, cursor)
+            if command == 0x19 and self.original[cursor + 8:cursor + 24].rstrip(b'\0') == b'__TEXT':
+                file_offset, file_size = struct.unpack_from('<2Q', self.original, cursor + 40)
+                text_extent = file_offset + file_size
+                for index in range(struct.unpack_from('<I', self.original, cursor + 64)[0]):
+                    section = cursor + 72 + index * 80
+                    length = struct.unpack_from('<Q', self.original, section + 40)[0]
+                    offset = struct.unpack_from('<I', self.original, section + 48)[0]
+                    section_end = max(section_end, offset + length)
+            cursor += size
+        self.assertEqual((section_end, text_extent), (0x51B8C, 0x54000))
+        self.assertLessEqual(section_end, PATCH.CAVE_BEGIN)
+        self.assertLessEqual(PATCH.CAVE_END, text_extent)
+        self.assertFalse(any(self.original[PATCH.CAVE_BEGIN:PATCH.CAVE_END]))
+        self.assertEqual(self.patched[PATCH.CAVE_END:text_extent], self.original[PATCH.CAVE_END:text_extent])
+
     def test_requestor_domain_uses_managed_job_without_changing_native_pid_domains(self):
         self.assertEqual(PATCH.SITES[5], (0x2D130, 0xB9401440, 2, 0))
         # Keep the full token saved in x19 for the existing user-domain fallback; translate only managed-job lookup input.
@@ -189,6 +222,14 @@ class PinnedBinaryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Partial patch or mismatched owner-read instructions'):
             PATCH.patched_bytes(changed)
 
+    def test_prior_eight_site_revision_requires_original_input(self):
+        # Reproduce the previous layout: same first eight branches, their original symbol address, and smaller cave.
+        with mock.patch.object(PATCH, 'SITES', PATCH.SITES[:8]), mock.patch.object(PATCH, 'CAVE_END', 0x52D00), \
+             mock.patch.object(PATCH, 'SYMBOL_OFFSET', 0x52C00):
+            previous = PATCH.patched_bytes(self.original)
+        with self.assertRaisesRegex(ValueError, 'Partial patch or mismatched owner-read instructions'):
+            PATCH.patched_bytes(previous)
+
     def test_signature_moved_metadata_bounded_and_idempotent(self):
         old_start, old_size = PATCH.inspect_header(self.original)
         new_start, new_size = PATCH.inspect_header(self.patched)
@@ -220,7 +261,7 @@ class PinnedBinaryTests(unittest.TestCase):
                     PATCH.patched_bytes(changed)
 
     def test_reject_partial_or_tampered_patch(self):
-        for offset in (PATCH.SITES[1][0], PATCH.SITES[4][0], PATCH.SITES[5][0], PATCH.SITES[6][0], PATCH.SITES[7][0],
+        for offset in (PATCH.SITES[1][0], PATCH.SITES[4][0], PATCH.SITES[5][0], PATCH.SITES[6][0], PATCH.SITES[7][0], PATCH.SITES[8][0],
                        PATCH.CAVE_BEGIN + 72, PATCH.SYMBOL_OFFSET, PATCH.GOT_SLOT,
                        PATCH.CHAIN_TAIL, PATCH.ORIGINAL_SIGNATURE + 200, 0x4321, PATCH.FIXUPS_COMMAND + 8):
             with self.subTest(offset=hex(offset)):

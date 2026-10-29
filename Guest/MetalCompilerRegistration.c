@@ -106,8 +106,10 @@ int LSBRegisterMetalCompilerForExecutable(const char *enabled, const char *runti
     if (stat(root, &metadata)) return errno;
     if (!S_ISDIR(metadata.st_mode)) return ENOTDIR;
     if (!realpath(executablePath, executable)) return errno;
+    // WebKit's GPU extension specializes QuartzCore shaders in its own PID domain, independently of its UI application's import.
     const char *roles[] = {"usr/libexec/backboardd", "System/Library/CoreServices/SpringBoard.app/SpringBoard",
-                           "System/Library/CoreServices/iconservicesagent"};
+                           "System/Library/CoreServices/iconservicesagent",
+                           "System/Library/ExtensionKit/Extensions/GPUExtension.appex/com.apple.WebKit.GPU"};
     bool allowed = false;
     int error;
     for (unsigned i = 0; i < sizeof(roles) / sizeof(*roles); ++i) {
@@ -116,7 +118,7 @@ int LSBRegisterMetalCompilerForExecutable(const char *enabled, const char *runti
         if (!strcmp(executable, expected)) { allowed = true; break; }
     }
     // Cached Metal's virtual image path cannot import its XPC bundle into a physical app's PID domain. Register only
-    // validated app main executables; inherited options still exclude launchd, xpcproxy, nested services and the compiler.
+    // validated app main executables beyond the exact roles above; inherited options exclude launchd, xpcproxy and unrelated nested services.
     if (!allowed) {
         error = applicationMainExecutable(root, executable, &allowed);
         if (error) return error;

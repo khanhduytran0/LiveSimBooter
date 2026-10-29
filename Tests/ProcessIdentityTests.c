@@ -555,6 +555,86 @@ static void testCoreFoundationPreferencesIdentity(void) {
     assert(!nativeCoreFoundationPath[0]);
 }
 
+static void testNetworkRouteIdentity(void) {
+    enum { Size = 0xac8000, Caller = 0xac7984 };
+    unsigned char *bytes = calloc(1, Size);
+    assert(bytes);
+    struct mach_header_64 *image = (struct mach_header_64 *)bytes;
+    struct uuid_command *uuid = (struct uuid_command *)(image + 1);
+    struct segment_command_64 *text = (struct segment_command_64 *)(uuid + 1);
+    struct section_64 *section = (struct section_64 *)(text + 1);
+    *image = (struct mach_header_64){.magic = MH_MAGIC_64, .cputype = CPU_TYPE_ARM64, .cpusubtype = CPU_SUBTYPE_ARM64_ALL,
+        .filetype = MH_DYLIB, .ncmds = 2, .sizeofcmds = sizeof(*uuid) + sizeof(*text) + sizeof(*section)};
+    *uuid = (struct uuid_command){.cmd = LC_UUID, .cmdsize = sizeof(*uuid),
+        .uuid = {0x37, 0xe5, 0x9d, 0x23, 0x28, 0x0c, 0x36, 0x6b, 0xa7, 0xad, 0x3c, 0x26, 0xd8, 0x94, 0x50, 0x8e}};
+    *text = (struct segment_command_64){.cmd = LC_SEGMENT_64, .cmdsize = sizeof(*text) + sizeof(*section), .segname = "__TEXT",
+        .vmaddr = 0x1000, .vmsize = Size, .filesize = Size, .initprot = VM_PROT_READ | VM_PROT_EXECUTE, .nsects = 1};
+    *section = (struct section_64){.sectname = "__text", .segname = "__TEXT", .addr = 0x2000, .size = Size - 0x1000};
+    const struct { unsigned offset; uint32_t instruction; } pins[] = {
+        {0xac7980, 0x940eb4e0}, {0xac7984, 0xaa0003f5}, {0xac79e4, 0x290bdbe0},
+        {0xac7c80, 0x39413fe8}, {0xac7c84, 0x7100111f}, {0xac7c88, 0x54fffec1},
+        {0xac7c8c, 0xb9405fe8}, {0xac7c90, 0x6b15011f}, {0xac7c94, 0x54fffe61},
+        {0xac7c98, 0xb94063e8}, {0xac7c9c, 0x6b16011f}, {0xac7ca0, 0x54fffe01}
+    };
+    for (unsigned i = 0; i < sizeof(pins) / sizeof(*pins); ++i) memcpy(bytes + pins[i].offset, &pins[i].instruction, sizeof(uint32_t));
+    uintptr_t base = (uintptr_t)image;
+    intptr_t slide = (intptr_t)(base - text->vmaddr);
+    const struct mach_header *header = (const struct mach_header *)image;
+    assert(!callerNeedsNativeIdentity(base + Caller));
+    assert(!setenv("DYLD_ROOT_PATH", "/private/Group/RuntimeRoot", 1));
+    initializeIdentity();
+    const char *physical = "/private/Group/RuntimeRoot/System/Library/Frameworks/Network.framework/Network";
+    assert(!strcmp(nativeNetworkPath, physical));
+    const char *accepted[] = {networkInstallPath, physical};
+    for (unsigned i = 0; i < 2; ++i) {
+        rememberNativeIdentityImage(header, slide, accepted[i]);
+        assert(callerNeedsNativeIdentity(base + Caller));
+        for (int delta = -8; delta <= 8; ++delta) if (delta) assert(!callerNeedsNativeIdentity(base + Caller + delta));
+        assert(!callerNeedsNativeIdentity(base) && !callerNeedsNativeIdentity(base + 0xc2f744));
+        assert(LSBGetPID() == 123 && LSBGuestPID() == 123); // No broad Network or process identity change.
+        forgetNativeIdentityImage(header);
+        assert(!callerNeedsNativeIdentity(base + Caller));
+    }
+    const char *rejected[] = {"/Plugins/Network", "/System/Library/PrivateFrameworks/Network.framework/Network",
+        "/System/Library/Frameworks/Network.framework/NetworkHelper", "/OtherRoot/System/Library/Frameworks/Network.framework/Network",
+        "/private/Group/RuntimeRoot-other/System/Library/Frameworks/Network.framework/Network"};
+    for (unsigned i = 0; i < sizeof(rejected) / sizeof(*rejected); ++i) {
+        rememberNativeIdentityImage(header, slide, rejected[i]);
+        assert(!callerNeedsNativeIdentity(base + Caller));
+    }
+    rememberNativeIdentityImage(header, slide, networkInstallPath);
+    uuid->uuid[0] ^= 1;
+    rememberNativeIdentityImage(header, slide, networkInstallPath);
+    assert(!callerNeedsNativeIdentity(base + Caller)); // Failed revalidation revokes a previously accepted image.
+    uuid->uuid[0] ^= 1;
+    for (unsigned i = 0; i < sizeof(pins) / sizeof(*pins); ++i) {
+        bytes[pins[i].offset] ^= 1;
+        assert(!pinnedNetworkRouteImage(image, slide));
+        bytes[pins[i].offset] ^= 1;
+    }
+    section->size = 0xac7ca3 - 0x1000;
+    assert(!pinnedNetworkRouteImage(image, slide));
+    section->size = Size - 0x1000;
+    text->filesize = 0xac7ca3;
+    assert(!pinnedNetworkRouteImage(image, slide));
+    text->filesize = Size;
+    assert(!pinnedNetworkRouteImage(image, slide + 1));
+    image->cpusubtype = CPU_SUBTYPE_ARM64E;
+    assert(!pinnedNetworkRouteImage(image, slide));
+    image->cpusubtype = CPU_SUBTYPE_ARM64_ALL;
+    assert(pinnedNetworkRouteImage(image, slide));
+    text->vmaddr = base + 0x1000;
+    section->addr = text->vmaddr + 0x1000;
+    assert(pinnedNetworkRouteImage(image, -0x1000));
+    rememberNativeIdentityImage(header, -0x1000, networkInstallPath);
+    assert(callerNeedsNativeIdentity(base + Caller));
+    forgetNativeIdentityImage(header);
+    free(bytes);
+    assert(!unsetenv("DYLD_ROOT_PATH"));
+    initializeIdentity();
+    assert(!nativeNetworkPath[0]);
+}
+
 int main(void) {
     unsetenv("LSB_GUEST_PID");
     unsetenv("LSB_GUEST_PPID");
@@ -572,6 +652,7 @@ int main(void) {
     testUIFrameworkCallerIdentity();
     testCoreServicesSelfIdentity();
     testCoreFoundationPreferencesIdentity();
+    testNetworkRouteIdentity();
     testTaskNameSelfTranslation();
     setenv("LSB_GUEST_PPID", "0", 1);
     initializeIdentity();

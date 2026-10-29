@@ -22,6 +22,7 @@ enum { BaselineLaunchdChildren = 4, MaximumSelectedServices = 20 };
 _Static_assert(BaselineLaunchdChildren + MaximumSelectedServices < LSB_CHILD_STATUS_CAPACITY, "leave child-ledger slots for dynamic jobs");
 
 static LSBGuestDeviceType *configurationDeviceType;
+static NSString *const memoryWarningName = @"LiveSimBooter-memory-warnings";
 void LSBLaunchdConfigurationSetDeviceType(LSBGuestDeviceType *type) { configurationDeviceType = type; }
 
 static int readStockPlist(NSString *path, int readFailure, NSDictionary **output) {
@@ -347,6 +348,7 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
         NSString *build = root.stringByDeletingLastPathComponent;
         NSString *dataPath = [build stringByAppendingPathComponent:@LSB_DATA_DIRECTORY];
         NSString *configPath = [dataPath stringByAppendingPathComponent:@"var/run/LiveSimBooter-launchd-bootstrap.plist"];
+        NSString *memoryWarningPath = [[dataPath stringByAppendingPathComponent:@"var/run"] stringByAppendingPathComponent:memoryWarningName];
         NSString *logPath = [dataPath stringByAppendingPathComponent:@"Library/Logs/LiveSimBooter-launchd.log"];
         int selectionError = 0;
         NSString *directoryName = services ? serviceDirectoryName(serviceLabels, &selectionError) : backboard ? @"LiveSimBooter-BackboardDaemons" :
@@ -370,6 +372,11 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
             @"DYLD_FALLBACK_FRAMEWORK_PATH": [root stringByAppendingPathComponent:@"System/Library/Frameworks"],
             @"SIMULATOR_ROOT": root, @"IPHONE_SIMULATOR_ROOT": root, @"SIMULATOR_ARCHS": @"arm64",
             @"SIMULATOR_CAPABILITIES": [root stringByAppendingPathComponent:@"Library/Developer/CoreSimulator/DeviceType/capabilities.plist"],
+            // 23A343 libdispatch watches this regular file for NOTE_ATTRIB; its contents are unused. Retain the inode across preparations.
+            @"SIMULATOR_MEMORY_WARNINGS": memoryWarningPath,
+            // Guest-only compatibility opt-outs: disable JIT and Gigacage's heap-isolation mitigation (its simulator reservation is 64 GiB).
+            // Bootstrap.Child applies these to every guest job, so PID-domain __XPC_ forwarding aliases are unnecessary.
+            @"JSC_useJIT": @"false", @"GIGACAGE_ENABLED": @"false",
             // CoreSimulator 1171.7 formats this boot's Unix timestamp as %lu. SimulatorHID persists it as its generation key.
             @"SIMULATOR_BOOT_TIME": [NSString stringWithFormat:@"%lu", (unsigned long)NSDate.date.timeIntervalSince1970],
             // All guests share this simulated boot identity; native kern.bootsessionuuid may be denied inside the app sandbox.
@@ -537,6 +544,11 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
         for (unsigned i = 0; !error && i < 6; ++i) {
             directories[i + 1] = openDirectory(directories[parents[i]], names[i]);
             if (directories[i + 1] < 0) error = errno;
+        }
+        if (!error) {
+            int warningFD = openRegularLog(directories[4], memoryWarningName.fileSystemRepresentation);
+            if (warningFD < 0) error = errno;
+            else if (close(warningFD)) error = errno;
         }
         if (!error && backboard) {
             directories[8] = openDirectory(directories[5], "Preferences");

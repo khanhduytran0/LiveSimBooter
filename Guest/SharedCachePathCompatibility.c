@@ -65,14 +65,24 @@ static const char *sharedCachePath(const char *path) {
         strcmp(strrchr(root, '/'), "/RuntimeRoot") || stat(root, &metadata) || !S_ISDIR(metadata.st_mode)) return NULL;
     const char *logical = relativeToRoot(path, root);
     if (!logical && !strncmp(root, "/private/var/", 13)) logical = relativeToRoot(path, root + 8);
-    if (!logical) return NULL;
+    bool physicalInput = logical != NULL;
+    if (!logical) logical = path;
+    // In 23A343 this stock symlink targets Network.framework. Our canonical-image cache omits the alias, but Security dlopens it.
+    const char *aliasTarget = !strcmp(logical, "/usr/lib/libnetwork.dylib") ? "/System/Library/Frameworks/Network.framework/Network" : NULL;
+    if (!physicalInput && !aliasTarget) return NULL;
     size_t rootLength = strlen(root), logicalLength = strlen(logical);
     if (logicalLength >= PATH_MAX - rootLength) return NULL;
     char physical[PATH_MAX];
     memcpy(physical, root, rootLength);
     memcpy(physical + rootLength, logical, logicalLength + 1);
-    if (!absentWithoutSymlinkParents(physical, rootLength) || !_dyld_shared_cache_contains_path(logical)) return NULL;
-    return logical; // This points into the caller's string, never temporary storage used by the tail call below.
+    if (!absentWithoutSymlinkParents(physical, rootLength)) return NULL;
+    if (_dyld_shared_cache_contains_path(logical)) return logical;
+    if (!aliasTarget || !_dyld_shared_cache_contains_path(aliasTarget)) return NULL;
+    size_t targetLength = strlen(aliasTarget);
+    if (targetLength >= PATH_MAX - rootLength) return NULL;
+    memcpy(physical + rootLength, aliasTarget, targetLength + 1);
+    if (!absentWithoutSymlinkParents(physical, rootLength)) return NULL;
+    return aliasTarget; // Returned paths point into the caller's string or a literal, never temporary storage used by the tail call.
 }
 
 void *LSBSharedCacheDlopen(const char *path, int mode) {

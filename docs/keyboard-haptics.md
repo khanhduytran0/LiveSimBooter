@@ -1,8 +1,9 @@
 # Guest haptics
 
 The experimental bridge gives guest CoreHaptics an authenticated, session-owned native haptic relay. A public CoreHaptics
-engine produced a physically confirmed transient on the iPhone 15 with the pinned guest runtime. The separately verified keyboard-pattern correction below fixes AHAP loading
-and keyboard input; it does not itself establish physical haptic output.
+engine and public UIKit impact, selection and notification generators produced physically confirmed feedback on iPhone 15
+with the pinned guest runtime. The separately verified keyboard-pattern correction below fixes AHAP loading and keyboard
+input; it does not itself establish keyboard haptic output.
 
 ## Native relay and capability projection
 
@@ -45,8 +46,9 @@ In pinned simulator libMobileGestalt (`878A27E4-22E8-3E39-8CE9-62FEB8301B36`), c
 
 [DeviceConfiguration](../Host/DeviceConfiguration.m) queries the corresponding native MGCopyAnswer once per host lifetime.
 Only an actual CFBoolean true enables the projected capability. False, absent and malformed responses publish false.
-Only this key changes; simulator model, geometry and other capabilities remain intact, and the staged original stays immutable.
-Disabling haptics republishes that original profile, removing any earlier generated true value.
+The host also publishes its typed UIKit feedback level in the LSB-only field described below. Simulator model, geometry
+and other capabilities remain intact, and the staged original stays immutable. Disabling haptics republishes that original
+profile, removing the generated haptic values.
 
 ## Optional playback probe
 
@@ -93,8 +95,8 @@ Subsequent probes isolated these boundaries:
 
 The successful run used host PID 4076 and guest probe PID 4144 (repeat 4149), without LLDB. Its preflight NSXPC query
 verified that the peer PID was the native host. Shared-memory/event playback then used the stock guest CoreHaptics engine,
-not an independent host vibration call. This establishes the public engine path; ordinary UIKit feedback and keyboard
-haptic preferences still need separate interaction checks. `LSB_HAPTIC_TRACE=1` in the native host environment enables
+not an independent host vibration call. This establishes the public engine path. The user subsequently reported that ordinary
+UIKit feedback did not work; the separate simulator capability gate and its correction are described below. `LSB_HAPTIC_TRACE=1` in the native host environment enables
 bounded peer/connection lifecycle logs; failures remain bounded and visible without this tracing flag.
 
 The earlier direct-native endpoints and connection-mode patch are not the production path. No native AudioSession service
@@ -107,8 +109,52 @@ shared-memory reply. Broker tests cover session/generation admission and endpoin
 stock preservation, typed native capability projection and restoration. The device observation above is separate from these local checks.
 
 The final build was launched without forced feature environment variables. The user confirmed that both Haptic passthrough
-and Audio output applied from native Settings with simulator restarts; both preferences persisted as Booleans. Ordinary
-UIKit/keyboard feedback remains separate from the confirmed public CoreHaptics probe.
+and Audio output applied from native Settings with simulator restarts; both preferences persisted as Booleans. The UIKit
+feedback validation below is separate from that public CoreHaptics probe; keyboard preferences still control keyboard feedback.
+
+## UIKit feedback capability gate
+
+On 2026-10-29, the foreground guest UIKit probe (logical PID 7909, native PID 7910; host 7827) reported
+`_feedbackSupportLevel=0` alongside `CHHapticEngine.capabilitiesForHardware.supportsHaptics=1`. Public impact, selection and
+notification feedback calls returned without reaching the host relay. This reproduces the user's missing UI haptics without
+attributing it to an unsuccessful CoreHaptics transport.
+
+The original 23A343 UIKitCore image (`F3921C0A-1332-3779-97C7-62D9F3FA6B77`) implements
+`-[UIDevice(_UIFeedbackEngineSupport) _feedbackSupportLevel]` at `+0xaa0a24` as a constant-zero simulator stub, including an
+empty `dispatch_once` block. Its Objective-C encoding is `q16@0:8`: a signed 64-bit `NSInteger` return. UIKit's CoreHaptics
+engine selection requires level 2 at `+0xa93628`, and generator configuration checks the same level before enabling playback.
+Legacy click/preview configurations require level 1; impact, button, drag, edge and modulation configurations require level 2.
+The keyboard's `_updateMode` also requires level 2, together with its existing keyboard-haptics preference.
+
+The matching native UIKit implementation reads real hardware support and its `DisableLevel2Feedback` preference rather than
+returning a constant. With experimental haptics enabled, the host now publishes its actual typed native result in
+`capabilities.LSBUIKitFeedbackSupportLevel`. Only integer values 0–2 are accepted; Booleans, floating-point values and unknown
+results are rejected. This field does not change the selected simulated device identity. Disabled sessions restore the stock profile.
+
+The optional [guest helper](../Guest/HapticCompatibility.m) installs an override only for UIKit already present at process
+startup, only with the trusted haptics opt-in, an exact true closed-loop capability, and a valid positive native level. It checks
+UIDevice's own method, its encoding, the UIKit image UUID, the original implementation offset, and all 16 instructions of the
+simulator stub; only relocated address immediates are masked. It leaves UIKit's engine selection, feedback patterns, categories,
+user preferences and playback through the authenticated host relay intact. The helper does not link or load UIKit into daemons.
+Late loading of UIKit with `dlopen` is not covered: dyld image callbacks precede ObjC fixups, while ObjC image callbacks hold
+the runtime lock, so neither is used to mutate methods.
+
+[Focused tests](../Tests/HapticUIKitSupportTests.m) verify serialized capability types, invalid/missing values, the pinned
+zero-return contract, relocated address operands and rejection of changed UUIDs, instructions or executable bounds. A rebuilt
+cache's `__TEXT.fileoff` is cache-relative and need not be zero; the fixture covers that layout, and the complete validator
+was also run against the actual signed cache. The native build, guest helper build and integrated `sh Tests/run.sh` passed.
+
+The successful device run used iPhone16,2 / native iOS 26.1 build 23B50, host PID 8016 and foreground probe logical PID 8087 /
+native PID 8088, without LLDB. The guest remained iOS 26.0/23A343 with cache base `0x110000000`, UUID
+`73ED978A-FD25-3166-A57A-34E21BB7E5B8`; no cache rebuild was needed. The optional helper was rebuilt from this source, signed
+with the same development identity and identifier as the host, and published with guests stopped and a rollback retained.
+Post-copy checksums were skipped as requested. Both native and guest UIKit reported level 2, and the native relay admitted the
+probe. The user separately confirmed physical vibration from all three public UIKit buttons: medium impact, selection change,
+and notification success. This confirms startup-loaded UIKit's stock playback path, not every UI interaction or the guest's
+keyboard-haptics preference. Thermal pressure remained 0, and no debugger session was left attached.
+
+Local probe sources, signing/deployment receipts and logs are under ignored `tmp/ui-haptics-20261029/`; those files are evidence,
+not setup dependencies.
 
 ## Keyboard-pattern URL correction on the iOS 27 host
 

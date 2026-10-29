@@ -86,10 +86,12 @@ static void expect(const char *enabled, const char *root, const char *candidate,
     if (requested) assert(registeredFlags == 2);
 }
 
-static void expectRoles(const char *root, const char *backboardd, const char *springboard, const char *iconservices, int error, bool shouldRequest) {
+static void expectRoles(const char *root, const char *backboardd, const char *springboard, const char *iconservices, const char *gpu,
+                        int error, bool shouldRequest) {
     expect("1", root, backboardd, error, shouldRequest);
     expect("1", root, springboard, error, shouldRequest);
     expect("1", root, iconservices, error, shouldRequest);
+    expect("1", root, gpu, error, shouldRequest);
 }
 
 int main(void) {
@@ -107,6 +109,9 @@ int main(void) {
     makeAppInfo(springboardInfo, CFSTR("SpringBoard"), CFSTR("APPL"), kCFPropertyListXMLFormat_v1_0);
     char iconservices[PATH_MAX];
     join(iconservices, root, "System/Library/CoreServices/iconservicesagent"); makeFile(iconservices);
+    char gpu[PATH_MAX], gpuDirectory[PATH_MAX];
+    join(gpuDirectory, root, "System/Library/ExtensionKit/Extensions/GPUExtension.appex"); makeDirectory(gpuDirectory);
+    join(gpu, gpuDirectory, "com.apple.WebKit.GPU"); makeFile(gpu);
     join(bundle, root, "System/Library/Frameworks/Metal.framework/XPCServices/MTLCompilerService.xpc"); makeDirectory(bundle);
     join(info, bundle, "Info.plist"); makeFile(info);
     join(compiler, bundle, "MTLCompilerService"); makeFile(compiler);
@@ -144,6 +149,22 @@ int main(void) {
     join(candidate, root, "System/Library/CoreServices/iconservicesagent-other"); makeFile(candidate);
     expect("1", root, candidate, 0, false);
 
+    expect("1", root, gpu, 0, true);
+    assert(!strcmp(registeredPath, bundle));
+    join(candidate, alias, "System/Library/ExtensionKit/Extensions/GPUExtension.appex/com.apple.WebKit.GPU");
+    expect("1", alias, candidate, 0, true);
+    assert(!strcmp(registeredPath, bundle));
+    join(candidate, gpuDirectory, "com.apple.WebKit.GPU-other"); makeFile(candidate);
+    expect("1", root, candidate, 0, false);
+    char extension[PATH_MAX];
+    const char *otherExtensions[] = {"WebContent.appex", "GPUExtension.appex-other", "Unrelated.appex"};
+    for (unsigned i = 0; i < sizeof(otherExtensions) / sizeof(*otherExtensions); ++i) {
+        join(extension, root, "System/Library/ExtensionKit/Extensions");
+        join(candidate, extension, otherExtensions[i]); makeDirectory(candidate);
+        join(extension, candidate, i ? "com.apple.WebKit.GPU" : "com.apple.WebKit.WebContent"); makeFile(extension);
+        expect("1", root, extension, 0, false);
+    }
+
     // Inherited options never register compiler, proxy, launchd, unrelated, or merely prefix-matching executables.
     expect("1", root, compiler, 0, false);
     const char *otherRoles[] = {"launchd_sim", "xpcproxy_sim", "backboardd-other", "SpringBoard", "iconservicesagent", "df"};
@@ -173,28 +194,39 @@ int main(void) {
     expect("1", root, iconservices, 0, false);
     assert(!unlink(iconservices)); makeFile(iconservices);
 
+    char outsideGPU[PATH_MAX];
+    join(outsideGPU, outside, "System/Library/ExtensionKit/Extensions/GPUExtension.appex"); makeDirectory(outsideGPU);
+    join(candidate, outsideGPU, "com.apple.WebKit.GPU"); makeFile(candidate);
+    expect("1", root, candidate, 0, false);
+    assert(!unlink(gpu) && !symlink(candidate, gpu));
+    expect("1", root, gpu, 0, false);
+    assert(!unlink(gpu)); makeFile(gpu);
+    assert(!unlink(gpu) && !mkdir(gpu, 0700));
+    expect("1", root, gpu, EINVAL, false);
+    assert(!rmdir(gpu)); makeFile(gpu);
+
     // A bundle symlink escaping the canonical root is rejected even if its target contains plausible files.
     char moved[PATH_MAX];
     join(moved, outside, "MTLCompilerService.xpc");
     assert(!rename(bundle, moved) && !symlink(moved, bundle));
-    expectRoles(root, executable, springboard, iconservices, EPERM, false);
+    expectRoles(root, executable, springboard, iconservices, gpu, EPERM, false);
     assert(!unlink(bundle));
-    expectRoles(root, executable, springboard, iconservices, ENOENT, false);
+    expectRoles(root, executable, springboard, iconservices, gpu, ENOENT, false);
     assert(!rename(moved, bundle));
 
     // Required files are regular, readable and nonempty; a final symlink or special file is not followed or blocked on.
-    assert(!unlink(info)); expectRoles(root, executable, springboard, iconservices, ENOENT, false);
-    assert(!symlink(outsideFile, info)); expectRoles(root, executable, springboard, iconservices, ELOOP, false);
-    assert(!unlink(info) && !mkdir(info, 0700)); expectRoles(root, executable, springboard, iconservices, EINVAL, false);
-    assert(!rmdir(info) && !mkfifo(info, 0600)); expectRoles(root, executable, springboard, iconservices, EINVAL, false);
+    assert(!unlink(info)); expectRoles(root, executable, springboard, iconservices, gpu, ENOENT, false);
+    assert(!symlink(outsideFile, info)); expectRoles(root, executable, springboard, iconservices, gpu, ELOOP, false);
+    assert(!unlink(info) && !mkdir(info, 0700)); expectRoles(root, executable, springboard, iconservices, gpu, EINVAL, false);
+    assert(!rmdir(info) && !mkfifo(info, 0600)); expectRoles(root, executable, springboard, iconservices, gpu, EINVAL, false);
     assert(!unlink(info)); makeFile(info);
-    assert(!truncate(compiler, 0)); expectRoles(root, executable, springboard, iconservices, EINVAL, false);
+    assert(!truncate(compiler, 0)); expectRoles(root, executable, springboard, iconservices, gpu, EINVAL, false);
     makeFile(compiler);
-    assert(!unlink(compiler)); expectRoles(root, executable, springboard, iconservices, ENOENT, false);
-    assert(!symlink(outsideFile, compiler)); expectRoles(root, executable, springboard, iconservices, ELOOP, false);
+    assert(!unlink(compiler)); expectRoles(root, executable, springboard, iconservices, gpu, ENOENT, false);
+    assert(!symlink(outsideFile, compiler)); expectRoles(root, executable, springboard, iconservices, gpu, ELOOP, false);
     assert(!unlink(compiler)); makeFile(compiler);
-    expectRoles(root, executable, springboard, iconservices, 0, true);
-    assert(registrations == 9);
+    expectRoles(root, executable, springboard, iconservices, gpu, 0, true);
+    assert(registrations == 12);
 
     char app[PATH_MAX], appMain[PATH_MAX], appInfo[PATH_MAX];
     join(app, root, "Applications/Contacts.app"); makeDirectory(app);
@@ -281,7 +313,7 @@ int main(void) {
     assert(!unlink(compiler)); expect("1", root, appMain, ENOENT, false);
     makeFile(compiler);
     expect("1", root, appMain, 0, true);
-    assert(registrations == 15);
+    assert(registrations == 18);
     removeTree(canonical);
     puts("MetalCompilerRegistration: opt-in, canonical roles/app mains, contained bundle, regular files and exact registration passed");
     return 0;

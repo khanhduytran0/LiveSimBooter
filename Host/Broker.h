@@ -1,6 +1,6 @@
 #ifndef LSB_BROKER_H
 #define LSB_BROKER_H
-// Start once on the original main thread. The application's event loop continues processing broker callbacks.
+// Start on the original main thread, initially or after confirmed power off. The existing broker receiver is reused.
 // Returns zero after submitting the initial guest, or an errno value if startup fails.
 int LSBStartHost(int argc, const char *argv[], const char *envp[]);
 #ifdef __OBJC__
@@ -8,7 +8,18 @@ int LSBStartHost(int argc, const char *argv[], const char *envp[]);
 @class LSBFramebufferServer;
 @class NSString;
 @class LSBGuestDeviceType;
-// Main-thread native UI only. Apply stages a catalog profile and uses the existing owned-process drain before replacement.
+// Main-thread native UI only. Saved choices do not change an active session until its next restart.
+BOOL LSBHostSimulatorIsOff(void);
+BOOL LSBHostCanControlSimulator(void);
+BOOL LSBHostConfigurationNeedsRestart(void);
+int LSBHostSaveDeviceType(LSBGuestDeviceType *type);
+int LSBHostSaveHapticsEnabled(BOOL enabled);
+int LSBHostSaveAudioOutputEnabled(BOOL enabled);
+// A current child launch reaches authenticated CHECKIN before draining. Restart completes after old-process exit and new-session submission;
+// power off completes only after confirmed owned-process exit.
+void LSBHostRestartSimulator(void (^completion)(int error));
+void LSBHostPowerOffSimulator(void (^completion)(int error));
+// Compatibility apply operations stage a catalog profile and drain the owned session before replacement.
 LSBGuestDeviceType *LSBHostCurrentDeviceType(void);
 BOOL LSBHostCanApplyDeviceType(void);
 void LSBHostApplyDeviceType(LSBGuestDeviceType *type, void (^completion)(int error, BOOL restarted));

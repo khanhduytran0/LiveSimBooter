@@ -3,7 +3,7 @@
 #include <string.h>
 
 typedef struct {
-    const char *identifier, *name, *detail, *model, *product, *idiom;
+    const char *identifier, *name, *model, *product, *idiom;
     NSUInteger width, height, scale, pitch, subtype, homeButton;
     BOOL experimental, dynamicIsland;
 } LSBDeviceTypeDescriptor;
@@ -11,19 +11,19 @@ typedef struct {
 // Metadata from Apple's installed CoreSimulator DeviceTypes profile.plist and capabilities.plist; no Apple assets are embedded.
 // Use capabilities.displays[deviceName=primary]. iPhone 8 Plus renders at 1242x2208, unlike its physical ScreenDimensionsCapability.
 static const LSBDeviceTypeDescriptor descriptors[] = {
-    {"iphone-8", "iPhone 8", "Home button · 375 × 667 points · Experimental", "iPhone10,4", "D20", "phone",
+    {"iphone-8", "iPhone 8", "iPhone10,4", "D20", "phone",
         750, 1334, 2, 326, 569, 1, YES, NO},
-    {"iphone-8-plus", "iPhone 8 Plus", "Home button · 414 × 736 points · Experimental", "iPhone10,5", "D21", "phone",
+    {"iphone-8-plus", "iPhone 8 Plus", "iPhone10,5", "D21", "phone",
         1242, 2208, 3, 461, 570, 1, YES, NO},
-    {"iphone-se-2", "iPhone SE (2nd generation)", "Home button · 375 × 667 points", "iPhone12,8", "D79", "phone",
+    {"iphone-se-2", "iPhone SE (2nd generation)", "iPhone12,8", "D79", "phone",
         750, 1334, 2, 326, 569, 1, NO, NO},
-    {"iphone-11", "iPhone 11", "Home indicator · 414 × 896 points", "iPhone12,1", "N104", "phone",
+    {"iphone-11", "iPhone 11", "iPhone12,1", "N104", "phone",
         828, 1792, 2, 326, 1792, 2, NO, NO},
-    {"iphone-15-pro-max", "iPhone 15 Pro Max", "Dynamic Island · 430 × 932 points", "iPhone16,2", "D84", "phone",
+    {"iphone-15-pro-max", "iPhone 15 Pro Max", "iPhone16,2", "D84", "phone",
         1290, 2796, 3, 460, 2796, 2, NO, YES},
-    {"ipad-9", "iPad (9th generation)", "Home button · 810 × 1080 points", "iPad12,2", "J182", "pad",
+    {"ipad-9", "iPad (9th generation)", "iPad12,2", "J182", "pad",
         1620, 2160, 2, 264, 2160, 0, NO, NO},
-    {"ipad-a16", "iPad (A16)", "Home indicator · 820 × 1180 points", "iPad15,7", "J481", "pad",
+    {"ipad-a16", "iPad (A16)", "iPad15,7", "J481", "pad",
         1640, 2360, 2, 264, 2360, 2, NO, NO},
 };
 
@@ -37,7 +37,10 @@ static const LSBDeviceTypeDescriptor descriptors[] = {
     if (!self) return nil;
     _identifier = @(descriptor->identifier);
     _displayName = @(descriptor->name);
-    _detailText = @(descriptor->detail);
+    if (!strcmp(descriptor->identifier, "iphone-se-2"))
+        _displayName = NSLocalizedString(@"iPhone SE (2nd generation)", @"Device picker model name; preserve the iPhone SE product name");
+    else if (!strcmp(descriptor->identifier, "ipad-9"))
+        _displayName = NSLocalizedString(@"iPad (9th generation)", @"Device picker model name; preserve the iPad product name");
     _modelIdentifier = @(descriptor->model);
     _productClass = @(descriptor->product);
     _width = descriptor->width;
@@ -47,6 +50,16 @@ static const LSBDeviceTypeDescriptor descriptors[] = {
     _experimental = descriptor->experimental;
     _hasHomeButton = descriptor->homeButton == 0 || descriptor->homeButton == 1;
     _isPad = !strcmp(descriptor->idiom, "pad");
+    NSString *detailFormat;
+    if (_experimental)
+        detailFormat = NSLocalizedString(@"Home button · %1$lu × %2$lu points · Experimental", @"Device detail: width and height in logical screen points");
+    else if (_hasHomeButton)
+        detailFormat = NSLocalizedString(@"Home button · %1$lu × %2$lu points", @"Device detail: width and height in logical screen points");
+    else if (descriptor->dynamicIsland)
+        detailFormat = NSLocalizedString(@"Dynamic Island · %1$lu × %2$lu points", @"Device detail: width and height in logical screen points");
+    else
+        detailFormat = NSLocalizedString(@"Home indicator · %1$lu × %2$lu points", @"Device detail: width and height in logical screen points");
+    _detailText = [NSString stringWithFormat:detailFormat, (unsigned long)(_width / _scale), (unsigned long)(_height / _scale)];
     return self;
 }
 - (NSURL *)capabilitiesURLInRuntimeRoot:(NSURL *)root {

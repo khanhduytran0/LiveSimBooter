@@ -1,9 +1,11 @@
 # Simulator device types
 
 The native **Settings → Simulator Device** picker selects a fixed device profile. Selecting a row is a draft; **Apply**
-commits it. Before Start, Apply saves the selection for the next boot. During a graphical session, Apply closes its running
-guest apps, drains the host's owned guest and native-helper processes, installs the selected capabilities, and starts a fresh
-simulator session. The `data` root is preserved. The native IOSurface, Fish, and Settings tabs remain in place.
+commits the saved choice. While powered off, Apply saves the selection for the next boot. During a graphical session it
+offers **Restart** or **Later**. Later keeps the running session unchanged; its footer indicates that a restart is needed.
+The next Start, Settings Restart, or guest userspace reboot uses all saved device, haptic and audio choices together.
+Restart closes running guest apps, drains the host's owned guest and native-helper processes, installs the selected
+capabilities, and starts a fresh session. The `data` root and native IOSurface, Fish, and Settings tabs are preserved.
 
 The default remains **iPhone 15 Pro Max**. The simulated device is independent of the physical host iPhone.
 
@@ -92,9 +94,10 @@ The broker snapshots one profile for each session and uses it for guest environm
 surface dimensions, and dirty rectangles must match that session. On replacement, the IOSurface tab clears the previous
 presentation and recomputes its fitted display frame; rendering and touch coordinates already follow the actual surface viewport.
 
-Apply is unavailable while startup or another restart is in progress. Preflight, drain, and synchronous setup failures are
-reported. Successful Apply means the replacement session was queued and is starting; it does not confirm later guest boot
-or readiness. It uses the same owned-session teardown as [guest userspace reboot](guest-control.md), without erasing guest
+Apply is unavailable while startup or another session transition is in progress. Preflight, drain, and synchronous setup failures are
+reported. Saving a choice does not publish capabilities over a running guest. Successful Restart means the replacement session
+was queued and is starting; it does not confirm later guest boot or readiness. It uses the same owned-session teardown as
+[guest userspace reboot](guest-control.md), without erasing guest
 preferences, containers, or app data.
 
 ## Validation scope

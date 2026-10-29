@@ -11,6 +11,8 @@ Haptics default off. Enable the native Settings option and apply it to a fresh s
 with exactly `LSB_EXPERIMENTAL_HAPTICS=1`. The broker snapshots the choice for that session. A guest environment variable
 cannot enable a host service. Disabled sessions preserve the staged stock capability profile and do not load the optional
 Objective-C guest haptic helper. See [setup](agent-setup.md) for helper staging and [host services](simulator-host-services.md) for the service inventory.
+Settings can save this choice while powered off. While running, Restart applies it immediately through a session restart;
+Later preserves the current session and applies the saved choice on the next start/restart.
 
 [HapticServer](../Host/HapticServer.m) publishes only `com.apple.audio.hapticd` into the session's simulator bootstrap namespace.
 It admits current simulator jobs through the broker's full native audit-token check and owns at most 64 peer connections.

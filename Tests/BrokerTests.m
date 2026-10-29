@@ -33,6 +33,7 @@ static int testCopyXMLFromDEREntitlementsWithDictionary(const void *, size_t, vo
 static int testReadMachOCodeDirectoryHash(int, unsigned char [20]);
 static kern_return_t testTaskInfo(task_name_t, task_flavor_t, task_info_t, mach_msg_type_number_t *);
 static kern_return_t testBootstrapLookup(mach_port_t, const char *, mach_port_t *);
+static kern_return_t testBootstrapCheckIn(mach_port_t, const char *, mach_port_t *);
 static int testPeerDebuggerQuery(mach_port_t, const audit_token_t *, uint32_t, struct kinfo_proc *);
 static int testTaskCaptureCreate(LSBTaskPortCaptureOffer *);
 static int testTaskCaptureReceive(const LSBTaskPortCaptureOffer *, const audit_token_t *, mach_port_t *);
@@ -45,6 +46,7 @@ static int testTaskCaptureReceive(const LSBTaskPortCaptureOffer *, const audit_t
 #define LSBLaunchdUnregisterEndpointWithTimeout LSBTestUnregisterEndpoint
 #define task_info testTaskInfo
 #define bootstrap_look_up testBootstrapLookup
+#define bootstrap_check_in testBootstrapCheckIn
 #define handleMessage brokerHandleMessage
 #include "../Host/Broker.m"
 #undef handleMessage
@@ -53,6 +55,7 @@ static int testTaskCaptureReceive(const LSBTaskPortCaptureOffer *, const audit_t
 #undef LSBPeerDebuggerQuery
 #undef task_info
 #undef bootstrap_look_up
+#undef bootstrap_check_in
 #undef LSBLaunchdRegisterEndpointWithTimeout
 #undef LSBLaunchdUnregisterEndpointWithTimeout
 #undef LSBCopyXMLFromDEREntitlementsWithDictionary
@@ -131,6 +134,7 @@ static audit_token_t registeredAudits[8];
 static uint32_t registeredTimeouts[8];
 static void (^endpointHook)(unsigned index);
 static unsigned nativeConfigdLookupCalls;
+static unsigned bootstrapCheckIns;
 static kern_return_t nativeConfigdLookupError;
 static mach_port_t nativeConfigdEndpoint;
 static unsigned hapticCreates, hapticCloses, audioCreates, audioInvalidates;
@@ -254,6 +258,12 @@ static kern_return_t testBootstrapLookup(mach_port_t bootstrap, const char *name
         assert(!mach_port_mod_refs(mach_task_self(), nativeConfigdEndpoint, MACH_PORT_RIGHT_SEND, 1));
     *port = nativeConfigdEndpoint;
     return KERN_SUCCESS;
+}
+static kern_return_t testBootstrapCheckIn(mach_port_t bootstrap, const char *name, mach_port_t *port) {
+    (void)bootstrap; (void)name;
+    ++bootstrapCheckIns;
+    *port = MACH_PORT_NULL;
+    return KERN_FAILURE; // A resumed session must never attempt another native registration or start a second receiver.
 }
 
 int LSBTestRegisterEndpoint(mach_port_t service, const audit_token_t *audit, const char *name,
@@ -575,6 +585,9 @@ static void resetBroker(void) {
     // Invalidate queued timeout/death callbacks from a prior fixture instead of recycling its generation.
     ++rebootGeneration;
     sessionDraining = rebootDrainFailed = NO;
+    simulatorPoweredOff = sessionStartFailed = sessionPowerOffRequested = sessionControlRequested = pendingDevicePreference = NO;
+    sessionControlCompletion = nil;
+    bootstrapCheckIns = 0;
     rebootArguments = rebootEnvironment = nil;
     sessionDeviceType = pendingDeviceType = nil;
     sessionHapticsEnabled = pendingHapticsEnabled = pendingHapticsPreference = sessionAudioEnabled = NO;
@@ -5023,6 +5036,263 @@ static void testDeviceApplyFailureDoesNotOverlapSessions(void) {
     }
 }
 
+static void testDeferredSettingsCombineAtRestart(void) {
+    for (unsigned guestReboot = 0; guestReboot < 2; ++guestReboot) {
+        resetBroker();
+        NSString *directory = makeRebootRuntime();
+        rememberRebootInputs();
+        sessionDeviceType = LSBDefaultGuestDeviceType();
+        NSDictionary *original = deviceProfile(sessionDeviceType);
+        assert(!LSBInstallGuestDeviceCapabilities(runtimeRoot, original));
+        stageDeviceProfile(sessionDeviceType, original);
+        LSBGuestDeviceType *target = LSBGuestDeviceTypeForIdentifier(@"ipad-a16");
+        NSString *targetPath = stageDeviceProfile(target, deviceProfile(target));
+        LSBJob *launchd = terminalLaunchd();
+        enableIndigo = YES;
+        runningBoardError = 0;
+        testNativeHaptics = YES;
+        assert(LSBHostCanControlSimulator() && !LSBHostSimulatorIsOff() && !LSBHostConfigurationNeedsRestart());
+        assert(!LSBHostSaveDeviceType(target));
+        assert(!LSBHostSaveHapticsEnabled(YES));
+        assert(!LSBHostSaveAudioOutputEnabled(YES));
+        assert(devicePreferenceWrites == 1 && hapticsPreferenceWrites == 1 && audioPreferenceWrites == 1);
+        assert(LSBHostConfigurationNeedsRestart() && LSBHostCurrentDeviceType() == LSBDefaultGuestDeviceType());
+        assert(!LSBHostCurrentHapticsEnabled() && !LSBHostCurrentAudioOutputEnabled());
+        assert([activeDeviceProfile() isEqual:original] && jobs.count == 1 && !submittedLaunches && !deliveredSignals);
+        assert(!LSBHostSaveDeviceType(target) && !LSBHostSaveHapticsEnabled(YES) && !LSBHostSaveAudioOutputEnabled(YES));
+        assert(devicePreferenceWrites == 1 && hapticsPreferenceWrites == 1 && audioPreferenceWrites == 1);
+        __block unsigned calls = 0;
+        if (guestReboot) {
+            assert(!requestReboot(launchd)->error);
+            assert(!LSBHostCanControlSimulator());
+            recordChildExit(launchd.identifier, 0);
+        } else {
+            LSBHostRestartSimulator(^(int error) { assert(!error); ++calls; });
+            assert(sessionDraining && !calls && rebootPendingDeaths.count == 1 && !submittedLaunches);
+            assert(!LSBHostSimulatorIsOff() && !LSBHostCanApplyDeviceType());
+            assert(LSBHostSaveHapticsEnabled(NO) == EBUSY && LSBHostSaveDeviceType(sessionDeviceType) == EBUSY);
+            assert([activeDeviceProfile() isEqual:original]);
+            assert(!unlink(targetPath.fileSystemRepresentation)); // Explicit restart owns the validated combined snapshot.
+            LSBRunningBoardExitHandler exit = ((LSBRunningBoardMonitor *)rebootDeathMonitors[0]).completion;
+            exit(SIGKILL, 0);
+            exit(SIGKILL, 0);
+            assert(calls == 1);
+        }
+        assert(!sessionDraining && !rebootDrainFailed && submittedLaunches == 1 && startingJob.simulatorLaunchd);
+        assert(LSBHostCurrentDeviceType() == target && LSBHostCurrentHapticsEnabled() && LSBHostCurrentAudioOutputEnabled());
+        assert(!LSBHostConfigurationNeedsRestart() && !LSBHostSimulatorIsOff());
+        assert(devicePreferenceWrites == 1 && hapticsPreferenceWrites == 1 && audioPreferenceWrites == 1);
+        NSDictionary *profile = activeDeviceProfile();
+        assert([profile[@"capabilities"][@"modelIdentifier"] isEqual:target.modelIdentifier]);
+        assert(profile[@"capabilities"][@"DeviceSupportsClosedLoopHaptics"] == (__bridge id)kCFBooleanTrue);
+        assert([rebootConfiguration()[@"Child"][@"SIMULATOR_MODEL_IDENTIFIER"] isEqual:target.modelIdentifier]);
+        resetBroker();
+        assert([NSFileManager.defaultManager removeItemAtPath:directory error:NULL]);
+    }
+}
+
+static void testSavedSettingsValidationAndRestartPreflight(void) {
+    resetBroker();
+    NSString *directory = makeRebootRuntime();
+    jobs = nil;
+    LSBGuestDeviceType *device = LSBDefaultGuestDeviceType(), *target = LSBGuestDeviceTypeForIdentifier(@"iphone-8-plus");
+    assert(LSBHostSimulatorIsOff() && LSBHostCanApplyDeviceType() && !LSBHostCanControlSimulator());
+    assert(LSBHostSaveDeviceType(nil) == EINVAL);
+    assert(LSBHostSaveHapticsEnabled(YES) == ENOENT);
+    assert(LSBHostSaveAudioOutputEnabled(YES) == ENOENT);
+    NSString *staged = stageDeviceProfile(target, deviceProfile(target));
+    assert(!LSBHostSaveDeviceType(target) && !LSBHostSaveAudioOutputEnabled(YES));
+    assert(devicePreferenceWrites == 1 && audioPreferenceWrites == 1 && !hapticsPreferenceWrites);
+    assert(!jobs && !submittedLaunches && !LSBHostConfigurationNeedsRestart());
+    assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", "1", 1));
+    assert(LSBHostSaveHapticsEnabled(NO) == EPERM && !hapticsPreferenceWrites);
+    unsetenv("LSB_EXPERIMENTAL_HAPTICS");
+    assert(!setenv("LSB_AUDIO_OUTPUT", "1", 1));
+    assert(LSBHostSaveAudioOutputEnabled(NO) == EPERM && audioPreferenceWrites == 1);
+    unsetenv("LSB_AUDIO_OUTPUT");
+    jobs = [NSMutableArray new];
+    sessionDeviceType = device;
+    terminalLaunchd();
+    rememberRebootInputs();
+    enableIndigo = YES;
+    assert(LSBHostConfigurationNeedsRestart());
+    assert([[NSData data] writeToFile:staged atomically:YES]);
+    assert(LSBHostSaveHapticsEnabled(YES) == EINVAL && !hapticsPreferenceWrites);
+    __block unsigned calls = 0;
+    uint64_t generation = rebootGeneration;
+    LSBHostRestartSimulator(^(int error) { assert(error == EINVAL); ++calls; });
+    assert(calls == 1 && !sessionDraining && rebootGeneration == generation && jobs.count == 1 && !deliveredSignals);
+    assert(!pendingDeviceType && !sessionControlCompletion && LSBHostConfigurationNeedsRestart() && LSBHostCanControlSimulator());
+    resetBroker();
+    assert([NSFileManager.defaultManager removeItemAtPath:directory error:NULL]);
+}
+
+static void testPowerOffWaitsThenStartReusesBroker(void) {
+    resetBroker();
+    NSString *directory = makeRebootRuntime();
+    rememberRebootInputs();
+    sessionDeviceType = LSBDefaultGuestDeviceType();
+    NSDictionary *original = deviceProfile(sessionDeviceType);
+    assert(!LSBInstallGuestDeviceCapabilities(runtimeRoot, original));
+    stageDeviceProfile(sessionDeviceType, original);
+    LSBGuestDeviceType *target = LSBGuestDeviceTypeForIdentifier(@"iphone-8");
+    stageDeviceProfile(target, deviceProfile(target));
+    LSBJob *launchd = terminalLaunchd(), *child = managedJob(launchd, 6751);
+    enableIndigo = YES;
+    runningBoardError = 0;
+    NSMutableArray *retainedJobs = jobs;
+    __block unsigned calls = 0, confirmedFrameNotifications = 0;
+    id observer = [NSNotificationCenter.defaultCenter addObserverForName:LSBHostFramebufferDidChangeNotification object:nil queue:nil
+        usingBlock:^(NSNotification *notification) {
+            (void)notification;
+            if (LSBHostSimulatorIsOff()) ++confirmedFrameNotifications;
+        }];
+    LSBHostPowerOffSimulator(^(int error) { assert(!error && LSBHostSimulatorIsOff()); ++calls; });
+    assert(sessionDraining && rebootPendingDeaths.count == 2 && !jobs.count && !calls && !confirmedFrameNotifications);
+    assert(!LSBHostSimulatorIsOff() && !LSBHostCanControlSimulator() && !submittedLaunches);
+    __block unsigned rejected = 0;
+    LSBHostPowerOffSimulator(^(int error) { assert(error == EBUSY); ++rejected; });
+    LSBHostRestartSimulator(^(int error) { assert(error == EBUSY); ++rejected; });
+    const char *arguments[] = {"LiveSimBooter", "--launchd", NULL};
+    assert(LSBStartHost(2, arguments, NULL) == EALREADY && rejected == 2);
+    LSBRunningBoardExitHandler rootExit = ((LSBRunningBoardMonitor *)rebootDeathMonitors[0]).completion;
+    LSBRunningBoardExitHandler childExit = ((LSBRunningBoardMonitor *)rebootDeathMonitors[1]).completion;
+    rootExit(SIGKILL, 0);
+    assert(!calls && !LSBHostSimulatorIsOff() && rebootPendingDeaths.count == 1);
+    childExit(SIGKILL, 0);
+    assert(calls == 1 && confirmedFrameNotifications == 1 && LSBHostSimulatorIsOff() && LSBHostCanApplyDeviceType());
+    assert(!LSBHostCanControlSimulator() && !LSBHostConfigurationNeedsRestart() && !submittedLaunches && jobs == retainedJobs);
+    assert(!LSBHostSaveDeviceType(target) && !LSBHostSaveAudioOutputEnabled(YES));
+    assert(LSBHostCurrentDeviceType() == target && LSBHostCurrentAudioOutputEnabled() && !LSBHostConfigurationNeedsRestart());
+    assert([activeDeviceProfile() isEqual:original]); // Off edits remain preferences until Start.
+    assert(!LSBStartHost(2, arguments, NULL));
+    assert(!bootstrapCheckIns && jobs == retainedJobs && jobs.count == 1 && submittedLaunches == 1 && startingJob.simulatorLaunchd);
+    assert(startingJob.identifier > child.identifier && !LSBHostSimulatorIsOff() && sessionDeviceType == target && sessionAudioEnabled);
+    assert([activeDeviceProfile()[@"capabilities"][@"modelIdentifier"] isEqual:target.modelIdentifier]);
+    rootExit(SIGKILL, 0); childExit(SIGKILL, 0);
+    assert(calls == 1 && submittedLaunches == 1 && jobs.count == 1); // Stale old completions do not affect the new session.
+    [NSNotificationCenter.defaultCenter removeObserver:observer];
+    resetBroker();
+    assert([NSFileManager.defaultManager removeItemAtPath:directory error:NULL]);
+}
+
+static void testSessionControlFailureDoesNotBecomeOff(void) {
+    for (unsigned action = 0; action < 2; ++action) {
+        resetBroker();
+        NSString *directory = makeRebootRuntime();
+        rememberRebootInputs();
+        sessionDeviceType = LSBDefaultGuestDeviceType();
+        stageDeviceProfile(sessionDeviceType, deviceProfile(sessionDeviceType));
+        terminalLaunchd();
+        enableIndigo = YES;
+        runningBoardError = 0;
+        __block unsigned calls = 0;
+        void (^completion)(int) = ^(int error) { assert(error == EIO); ++calls; };
+        if (action) LSBHostRestartSimulator(completion); else LSBHostPowerOffSimulator(completion);
+        assert(!calls && sessionDraining && rebootPendingDeaths.count == 1);
+        LSBRunningBoardExitHandler exit = ((LSBRunningBoardMonitor *)rebootDeathMonitors[0]).completion;
+        exit(0, EIO);
+        assert(calls == 1 && rebootDrainFailed && sessionDraining && !jobs.count && !submittedLaunches);
+        assert(!LSBHostSimulatorIsOff() && !LSBHostCanControlSimulator() && !LSBHostCanApplyDeviceType());
+        assert(LSBHostSaveAudioOutputEnabled(YES) == EBUSY && !audioPreferenceWrites);
+        const char *arguments[] = {"LiveSimBooter", "--launchd", NULL};
+        assert(LSBStartHost(2, arguments, NULL));
+        exit(SIGKILL, 0);
+        completeUserspaceReboot(rebootGeneration);
+        assert(calls == 1 && !submittedLaunches && !bootstrapCheckIns);
+        resetBroker();
+        assert([NSFileManager.defaultManager removeItemAtPath:directory error:NULL]);
+    }
+}
+
+static void testSessionControlDuringChildLaunch(void) {
+    for (unsigned scenario = 0; scenario < 8; ++scenario) {
+        BOOL restart = (scenario & 1) != 0, alreadyBound = (scenario & 2) != 0, replacing = (scenario & 4) != 0;
+        resetBroker();
+        NSString *directory = makeRebootRuntime();
+        rememberRebootInputs();
+        sessionDeviceType = LSBDefaultGuestDeviceType();
+        stageDeviceProfile(sessionDeviceType, deviceProfile(sessionDeviceType));
+        LSBJob *launchd = terminalLaunchd(), *old = replacing ? managedJob(launchd, 6752) : nil;
+        enableIndigo = YES;
+        runningBoardError = 0;
+        int fd, queuedFD;
+        unsigned object, queuedObject;
+        LSBReceivedMessage *request = spawnRequest(&fd, &object);
+        if (replacing) { request->kind = LSB_REQUEST_EXEC; enqueueExec(request, old); }
+        else enqueueSpawn(request, launchd);
+        LSBJob *child = startingJob;
+        assert(child && child.phase == JobStarting && LSBHostCanControlSimulator() && LSBHostCanApplyDeviceType());
+        // Saving while an ordinary child starts changes only the next-session configuration.
+        assert(!LSBHostSaveAudioOutputEnabled(YES) && !sessionAudioEnabled);
+        if (alreadyBound) handleMessage(messageFor(LSB_REQUEST_CHECKIN, getpid(), 700, 0));
+        assert(LSBHostCanControlSimulator());
+        __block unsigned calls = 0;
+        void (^completion)(int) = ^(int error) { assert(!error); ++calls; };
+        if (restart) LSBHostRestartSimulator(completion); else LSBHostPowerOffSimulator(completion);
+        assert(!calls && !LSBHostCanControlSimulator() && !LSBHostCanApplyDeviceType());
+        assert(LSBHostSaveAudioOutputEnabled(NO) == EBUSY);
+        if (!alreadyBound) {
+            assert(sessionControlRequested && !sessionDraining && startingJob == child && !deliveredSignals);
+            enqueueSpawn(spawnRequest(&queuedFD, &queuedObject), launchd);
+            assert(submittedLaunches == 1 && startingJob == child);
+            handleMessage(messageFor(LSB_REQUEST_CHECKIN, getpid(), 700, 0));
+            assert(replyFor(queuedObject)->error == ECANCELED);
+            assertClosed(queuedFD);
+        }
+        assert(!sessionControlRequested && sessionDraining && !rebootDrainFailed && !jobs.count && !startingJob);
+        assertClosed(fd); // A fresh session may reuse this descriptor number after all old deaths arrive.
+        assert(rebootPendingDeaths.count == (replacing ? 3 : 2) && submittedLaunches == 1);
+        assert([rebootPendingDeaths containsObject:@(child.identifier)] && [rebootPendingDeaths containsObject:@(launchd.identifier)]);
+        if (replacing) assert([rebootPendingDeaths containsObject:@(old.identifier)]); // The old exec PID was never retired by READY.
+        handleMessage(messageFor(LSB_REQUEST_READY, getpid(), 700, child.identifier));
+        assert(replies[replyCount - 1].error && !calls && submittedLaunches == 1);
+        recordChildExit(child.identifier, SIGKILL);
+        recordChildExit(launchd.identifier, SIGKILL);
+        if (replacing) {
+            assert(!calls && rebootPendingDeaths.count == 1 && !LSBHostSimulatorIsOff());
+            recordChildExit(old.identifier, SIGKILL);
+        }
+        assert(calls == 1 && !sessionDraining && !rebootDrainFailed && !sessionControlRequested);
+        assert(restart ? submittedLaunches == 2 && startingJob.simulatorLaunchd && sessionAudioEnabled :
+            submittedLaunches == 1 && LSBHostSimulatorIsOff());
+        resetBroker();
+        assert([NSFileManager.defaultManager removeItemAtPath:directory error:NULL]);
+    }
+}
+
+static void testQueuedSessionControlHandshakeFailure(void) {
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        resetBroker();
+        NSString *directory = makeRebootRuntime();
+        LSBJob *launchd = terminalLaunchd(), *other = failure == 3 ? managedJob(launchd, 6753) : nil;
+        enableIndigo = YES;
+        int fd;
+        unsigned object;
+        enqueueSpawn(spawnRequest(&fd, &object), launchd);
+        LSBJob *child = startingJob;
+        __block unsigned calls = 0;
+        LSBHostPowerOffSimulator(^(int error) { assert(error == EIO); ++calls; });
+        assert(sessionControlRequested && !sessionDraining && !calls);
+        if (!failure) finishJob(child, EIO); // An unbound timeout may still launch later.
+        else if (other) recordMonitorError(other.identifier, EIO);
+        else {
+            if (failure == 1) monitorCreateError = EIO;
+            else taskCaptureCreateError = EIO; // The audited child and monitor already exist when capture preparation fails.
+            handleMessage(messageFor(LSB_REQUEST_CHECKIN, getpid(), 701, 0));
+            assert(child.phase == JobDispatched && child.pid == getpid());
+        }
+        assert(calls == 1 && launchLaneFailed && !sessionControlRequested && !sessionControlCompletion && !sessionDraining);
+        assert(!LSBHostSimulatorIsOff() && !LSBHostCanControlSimulator() && !LSBHostCanApplyDeviceType());
+        assert(submittedLaunches == 1 && !deliveredSignals && jobs.count == (other ? 2 : 1) && findJob(launchd.identifier));
+        startNextJob();
+        assert(calls == 1 && submittedLaunches == 1);
+        if (!other) assertClosed(fd); // The still-pending child retains its plan until cleanup; it is never replaced by a new launch.
+        resetBroker();
+        assert([NSFileManager.defaultManager removeItemAtPath:directory error:NULL]);
+    }
+}
+
 int main(void) {
     @autoreleasepool {
         alarm(10);
@@ -5061,6 +5331,12 @@ int main(void) {
         testHapticsPublicationFailureKeepsPreference();
         testAudioColdApplyAndForceOverride();
         testAudioApplyUsesImmutableSessionDecision();
+        testDeferredSettingsCombineAtRestart();
+        testSavedSettingsValidationAndRestartPreflight();
+        testPowerOffWaitsThenStartReusesBroker();
+        testSessionControlFailureDoesNotBecomeOff();
+        testSessionControlDuringChildLaunch();
+        testQueuedSessionControlHandshakeFailure();
         testDirectConfigdWaitsForSelectedBridge();
         testNativeMetalReadyGatesLaunchd();
         testNativeMetalOwnerLifecycle();

@@ -78,6 +78,11 @@ inside the existing native host. The persistent tabs remain open. The host regen
 boot UUID, Metal helpers, IOSurface/framebuffer/HID services and launchd-owned Fish using the original host arguments and environment.
 It preserves the data root; this is a restart, not a data reset. A normal launchd exit or crash does not trigger automatic restart.
 
+Native Settings also provides **Restart** and **Power Off**. Restart and the guest userspace reboot both apply any saved
+device, haptic and audio choices deferred with Later. Power Off drains the same owned processes but does not enqueue a
+replacement session. The host broker remains alive; tapping Start on IOSurface starts a new session without registering a
+second broker receiver. Settings remain editable while powered off. Neither action reboots or powers off the physical iPhone.
+
 The 23A343 launchd adapter pins UUID `C3EC5C45-8C85-3D11-B59C-62C4248F5EF9`, instruction contexts and exact callsites. It records
 an accepted reboot only at the successful routine-821 reply, then notifies the broker at launchd's final clean `exit(0)`.
 The stock simulator launchctl does not recognize the literal `userspace` argument and falls back to its SYSTEM reboot flag;

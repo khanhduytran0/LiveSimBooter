@@ -148,15 +148,18 @@ static BOOL enableIndigo;
 static BOOL enableSpringBoardMetal;
 static NSArray<NSData *> *rebootArguments, *rebootEnvironment;
 static BOOL sessionDraining, rebootDrainFailed;
+static BOOL simulatorPoweredOff, sessionStartFailed, sessionPowerOffRequested, sessionControlRequested;
 static uint64_t rebootGeneration;
 static NSMutableSet<NSNumber *> *rebootPendingDeaths;
 static NSMutableArray<LSBRunningBoardMonitor *> *rebootDeathMonitors;
 static NSMutableArray<dispatch_source_t> *rebootExitSources;
 static LSBGuestDeviceType *sessionDeviceType, *pendingDeviceType;
 static NSDictionary *pendingDeviceCapabilities;
+static BOOL pendingDevicePreference;
 static BOOL sessionHapticsEnabled, pendingHapticsEnabled, pendingHapticsPreference;
 static BOOL sessionAudioEnabled, pendingAudioEnabled, pendingAudioPreference;
 static void (^deviceChangeCompletion)(int, BOOL);
+static void (^sessionControlCompletion)(int);
 // Allow every launchd child to overlap its exec replacement, plus launchd and the backboardd, SpringBoard and public Metal helpers.
 enum { BrokerJobCapacity = 2 * LSB_CHILD_STATUS_CAPACITY + 4, DisplayRegistrationTimeoutSeconds = 30,
        RetiredIdentityCapacity = 256, AuditResolutionLogLimit = 32 };
@@ -184,30 +187,99 @@ static BOOL authenticatedSimulatorJob(LSBJob *job, const audit_token_t *expected
 static LSBJob *enqueueNativeMetalHelper(BOOL publicAccess, const char *name, int *result);
 static void registerReplacementSpringBoardMetal(LSBJob *active, LSBJob *helper);
 static void finishJob(LSBJob *job, int error);
+static int snapshotSavedSessionConfiguration(void);
+
+static void notifySessionStateChanged(void) {
+    if (sessionStateNotificationScheduled) return;
+    sessionStateNotificationScheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        sessionStateNotificationScheduled = NO;
+        [NSNotificationCenter.defaultCenter postNotificationName:LSBHostSessionStateDidChangeNotification object:nil];
+    });
+}
 
 LSBTerminalSession *LSBHostTerminal(void) { return hostTerminal; }
-LSBGuestDeviceType *LSBHostCurrentDeviceType(void) { return jobs ? sessionDeviceType ?: LSBConfiguredGuestDeviceType() : LSBConfiguredGuestDeviceType(); }
-BOOL LSBHostCurrentHapticsEnabled(void) { return jobs ? sessionHapticsEnabled : LSBExperimentalHapticsEnabled(); }
-BOOL LSBHostCurrentAudioOutputEnabled(void) { return jobs ? sessionAudioEnabled : LSBExperimentalAudioOutputEnabled(); }
-BOOL LSBHostCanApplyDeviceType(void) {
-    if (sessionDraining || deviceChangeCompletion || launchLaneFailed || startingJob) return NO;
-    if (!jobs) return YES;
-    for (LSBJob *job in jobs) if (job.simulatorLaunchd && !job.parentIdentifier && job.phase == JobRunning) return enableIndigo;
+LSBGuestDeviceType *LSBHostCurrentDeviceType(void) {
+    return jobs && !simulatorPoweredOff ? sessionDeviceType ?: LSBConfiguredGuestDeviceType() : LSBConfiguredGuestDeviceType();
+}
+BOOL LSBHostCurrentHapticsEnabled(void) { return jobs && !simulatorPoweredOff ? sessionHapticsEnabled : LSBExperimentalHapticsEnabled(); }
+BOOL LSBHostCurrentAudioOutputEnabled(void) { return jobs && !simulatorPoweredOff ? sessionAudioEnabled : LSBExperimentalAudioOutputEnabled(); }
+BOOL LSBHostSimulatorIsOff(void) {
+    return !sessionDraining && !rebootDrainFailed && !sessionStartFailed && !launchLaneFailed && !startingJob && !jobs.count &&
+        (!jobs || simulatorPoweredOff);
+}
+BOOL LSBHostCanControlSimulator(void) {
+    if (sessionDraining || rebootDrainFailed || deviceChangeCompletion || sessionControlRequested || sessionControlCompletion ||
+        launchLaneFailed || sessionStartFailed) return NO;
+    for (LSBJob *job in jobs)
+        if (job.simulatorLaunchd && !job.parentIdentifier && job.phase == JobRunning && !job.rebootRequested) return enableIndigo;
     return NO;
+}
+BOOL LSBHostCanApplyDeviceType(void) { return LSBHostSimulatorIsOff() || LSBHostCanControlSimulator(); }
+BOOL LSBHostConfigurationNeedsRestart(void) {
+    return jobs && !simulatorPoweredOff &&
+        (LSBConfiguredGuestDeviceType() != LSBHostCurrentDeviceType() || LSBExperimentalHapticsEnabled() != sessionHapticsEnabled ||
+         LSBExperimentalAudioOutputEnabled() != sessionAudioEnabled);
+}
+static int validateSavedConfiguration(LSBGuestDeviceType *type) {
+    if (!NSThread.isMainThread) return EPERM;
+    if (!type || type != LSBGuestDeviceTypeForIdentifier(type.identifier)) return EINVAL;
+    if (!LSBHostCanApplyDeviceType()) return EBUSY;
+    int error = runtimeRoot ? 0 : prepareRuntimeRoot();
+    NSDictionary *capabilities = nil;
+    return error ? error : LSBCopyStagedGuestDeviceCapabilities(runtimeRoot, type, &capabilities);
+}
+int LSBHostSaveDeviceType(LSBGuestDeviceType *type) {
+    int error = validateSavedConfiguration(type);
+    if (!error && type != LSBConfiguredGuestDeviceType()) { LSBSaveConfiguredGuestDeviceType(type); notifySessionStateChanged(); }
+    return error;
+}
+int LSBHostSaveHapticsEnabled(BOOL enabled) {
+    if (LSBHapticsForcedByEnvironment()) return EPERM;
+    int error = validateSavedConfiguration(LSBConfiguredGuestDeviceType());
+    if (!error && enabled != LSBExperimentalHapticsEnabled()) { LSBSaveConfiguredHapticsEnabled(enabled); notifySessionStateChanged(); }
+    return error;
+}
+int LSBHostSaveAudioOutputEnabled(BOOL enabled) {
+    if (LSBAudioOutputForcedByEnvironment()) return EPERM;
+    int error = validateSavedConfiguration(LSBConfiguredGuestDeviceType());
+    if (!error && enabled != LSBExperimentalAudioOutputEnabled()) { LSBSaveConfiguredAudioOutputEnabled(enabled); notifySessionStateChanged(); }
+    return error;
+}
+void LSBHostRestartSimulator(void (^completion)(int)) {
+    int error = !NSThread.isMainThread ? EPERM : !LSBHostCanControlSimulator() ? EBUSY :
+        !rebootArguments.count ? ENOTSUP : snapshotSavedSessionConfiguration();
+    if (error) { if (completion) completion(error); return; }
+    sessionControlCompletion = [completion copy];
+    sessionControlRequested = YES;
+    startNextJob();
+}
+void LSBHostPowerOffSimulator(void (^completion)(int)) {
+    int error = !NSThread.isMainThread ? EPERM : !LSBHostCanControlSimulator() ? EBUSY : 0;
+    if (error) { if (completion) completion(error); return; }
+    sessionControlCompletion = [completion copy];
+    sessionPowerOffRequested = YES;
+    sessionControlRequested = YES;
+    startNextJob();
 }
 static void finishDeviceChange(int error) {
     void (^completion)(int, BOOL) = deviceChangeCompletion;
+    void (^controlCompletion)(int) = sessionControlCompletion;
     deviceChangeCompletion = nil;
+    sessionControlCompletion = nil;
+    sessionControlRequested = NO;
     pendingDeviceType = nil;
     pendingDeviceCapabilities = nil;
-    pendingHapticsPreference = pendingAudioPreference = NO;
+    pendingDevicePreference = pendingHapticsPreference = pendingAudioPreference = sessionPowerOffRequested = NO;
+    notifySessionStateChanged();
     if (completion) completion(error, YES);
+    if (controlCompletion) controlCompletion(error);
 }
 static void applySessionConfiguration(LSBGuestDeviceType *type, BOOL hapticsEnabled, BOOL audioEnabled, BOOL saveHaptics, BOOL saveAudio,
                                       void (^completion)(int, BOOL)) {
     if (!NSThread.isMainThread) { if (completion) completion(EPERM, NO); return; }
     if (!type || type != LSBGuestDeviceTypeForIdentifier(type.identifier)) { if (completion) completion(EINVAL, NO); return; }
-    if (!LSBHostCanApplyDeviceType()) { if (completion) completion(EBUSY, NO); return; }
+    if (!LSBHostCanApplyDeviceType() || startingJob) { if (completion) completion(EBUSY, NO); return; }
     if (type == LSBHostCurrentDeviceType() && hapticsEnabled == LSBHostCurrentHapticsEnabled() && audioEnabled == LSBHostCurrentAudioOutputEnabled()) {
         if (completion) completion(0, NO);
         return;
@@ -216,7 +288,7 @@ static void applySessionConfiguration(LSBGuestDeviceType *type, BOOL hapticsEnab
     NSDictionary *capabilities = nil;
     if (!error) error = LSBCopyStagedGuestDeviceCapabilities(runtimeRoot, type, &capabilities);
     if (error) { if (completion) completion(error, NO); return; }
-    if (!jobs) {
+    if (LSBHostSimulatorIsOff()) {
         // The Start gate has not opened. Persist the validated choice; installation happens before the first guest.
         LSBSaveConfiguredGuestDeviceType(type);
         if (saveHaptics) LSBSaveConfiguredHapticsEnabled(hapticsEnabled);
@@ -225,6 +297,7 @@ static void applySessionConfiguration(LSBGuestDeviceType *type, BOOL hapticsEnab
         return;
     }
     pendingDeviceType = type;
+    pendingDevicePreference = YES;
     pendingDeviceCapabilities = capabilities;
     pendingHapticsEnabled = hapticsEnabled;
     pendingHapticsPreference = saveHaptics;
@@ -774,6 +847,11 @@ static int resolveAuditPID(const audit_token_t *audit, pid_t *result) {
 
 static void finishJob(LSBJob *job, int error) {
     if (!findJob(job.identifier) || job.finishing) return;
+    if (sessionControlRequested && !sessionDraining && (job == startingJob || (job.pid > 0 && error))) {
+        // Failed handshakes or lost monitors can retire live extensions. Do not remove them and then mistake the remaining jobs for death proof.
+        launchLaneFailed = YES;
+        finishDeviceChange(error ? error : EIO);
+    }
     job.finishing = YES;
     [job.audioOutput invalidate]; job.audioOutput = nil;
     [job.haptics close]; job.haptics = nil;
@@ -978,14 +1056,17 @@ static void extensionEvent(uint64_t identifier, pid_t pid, int error, void *cont
 
 static void startNextJob(void) {
     // Coalesce recursive queue transitions and notify UIKit after the main-thread transaction has settled.
-    if (!sessionStateNotificationScheduled) {
-        sessionStateNotificationScheduled = YES;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            sessionStateNotificationScheduled = NO;
-            [NSNotificationCenter.defaultCenter postNotificationName:LSBHostSessionStateDidChangeNotification object:nil];
-        });
+    notifySessionStateChanged();
+    if (finishingDepth || sessionDraining) return;
+    if (sessionControlRequested) {
+        // Keep the current launch bound to its plan, but submit no further children. CHECKIN installs an authenticated death monitor
+        // before advancing here, so the drain can include the child before READY (and before an exec replacement retires its old PID).
+        if (!startingJob || (startingJob.phase == JobDispatched && startingJob.pid > 0 &&
+            startingJob.audit.val[5] == (uint32_t)startingJob.pid && (startingJob.exitMonitor || startingJob.runningBoardMonitor)))
+            beginUserspaceReboot(nil);
+        return;
     }
-    if (startingJob || finishingDepth || sessionDraining) return;
+    if (startingJob) return;
     if (launchLaneFailed) {
         for (LSBJob *job in [jobs copy]) if (job.phase == JobQueued) { finishJob(job, EBUSY); return; }
         return;
@@ -1741,6 +1822,7 @@ static void handleMessage(LSBReceivedMessage *message) {
             int sent = LSBTransportReply(message, error, 0, 0, NULL, NULL, NULL);
             if (!error && !sent) {
                 sender.rebootRequested = YES;
+                notifySessionStateChanged();
                 fprintf(stderr, "[broker] Simulator reboot armed by launchd pid=%d; waiting for clean exit\n", sender.pid);
             }
             disposeMessage(message);
@@ -1973,6 +2055,7 @@ static void handleMessage(LSBReceivedMessage *message) {
             }
             fprintf(stderr, "[broker] check-in request=%llu pid=%d error=%d\n", identifier, pid, error);
             if (error) finishJob(job, error);
+            else if (sessionControlRequested) startNextJob();
             return;
         }
         case LSB_REQUEST_READY: {
@@ -2278,6 +2361,25 @@ static int snapshotRebootInputs(int argc, const char *argv[], const char *envp[]
     return 0;
 }
 
+static int snapshotSavedSessionConfiguration(void) {
+    LSBGuestDeviceType *type = LSBConfiguredGuestDeviceType();
+    BOOL haptics = LSBExperimentalHapticsEnabled(), audio = LSBExperimentalAudioOutputEnabled();
+    NSDictionary *capabilities = nil;
+    int error = LSBCopyStagedGuestDeviceCapabilities(runtimeRoot, type, &capabilities);
+    if (error == ENOENT && type == LSBDefaultGuestDeviceType() && !haptics && !sessionHapticsEnabled) {
+        // Retain the original default-profile/command-line fallback, but never reuse a generated haptics profile when disabling it.
+        error = LSBCopyGuestDeviceCapabilities(runtimeRoot, type, &capabilities);
+        if (error == ENOENT) error = 0;
+    }
+    if (error) return error;
+    pendingDeviceType = type;
+    pendingDeviceCapabilities = capabilities;
+    pendingHapticsEnabled = haptics;
+    pendingAudioEnabled = audio;
+    pendingDevicePreference = pendingHapticsPreference = pendingAudioPreference = NO;
+    return 0;
+}
+
 static void completeUserspaceReboot(uint64_t generation) {
     if (!sessionDraining || generation != rebootGeneration || finishingDepth || rebootPendingDeaths.count) return;
     for (LSBRunningBoardMonitor *monitor in rebootDeathMonitors) LSBRunningBoardMonitorCancel(monitor);
@@ -2297,15 +2399,36 @@ static void completeUserspaceReboot(uint64_t generation) {
         finishDeviceChange(queueError);
         return;
     }
+    // Only confirmed deaths allow the native UI to show the Start gate. The broker's receive right and receiver stay alive.
+    if (sessionPowerOffRequested) {
+        memset(retiredIdentities, 0, sizeof(retiredIdentities));
+        retiredIdentityCount = 0;
+        retiredIdentitiesFull = NO;
+        sessionDraining = NO;
+        simulatorPoweredOff = YES;
+        enableIndigo = enableSpringBoardMetal = NO;
+        [NSNotificationCenter.defaultCenter postNotificationName:LSBHostFramebufferDidChangeNotification object:nil];
+        [NSNotificationCenter.defaultCenter postNotificationName:LSBHostTerminalDidChangeNotification object:nil];
+        [NSNotificationCenter.defaultCenter postNotificationName:LSBHostIndigoDidChangeNotification object:nil];
+        fprintf(stderr, "[broker] Simulator powered off after retiring all owned processes\n");
+        finishDeviceChange(0);
+        return;
+    }
+    if (!pendingDeviceType) {
+        // Guest `launchctl reboot userspace` must pick up every deferred native Settings choice too.
+        int error = snapshotSavedSessionConfiguration();
+        if (error) { rebootDrainFailed = YES; finishDeviceChange(error); return; }
+    }
     if (pendingDeviceType) {
-        int deviceError = LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(runtimeRoot, pendingDeviceCapabilities, pendingHapticsEnabled);
+        int deviceError = pendingDeviceCapabilities ?
+            LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(runtimeRoot, pendingDeviceCapabilities, pendingHapticsEnabled) : 0;
         if (deviceError) { rebootDrainFailed = YES; finishDeviceChange(deviceError); return; }
         sessionDeviceType = pendingDeviceType;
         sessionHapticsEnabled = pendingHapticsEnabled;
         sessionAudioEnabled = pendingAudioEnabled;
         if (pendingAudioPreference) LSBSaveConfiguredAudioOutputEnabled(sessionAudioEnabled);
         if (pendingHapticsPreference) LSBSaveConfiguredHapticsEnabled(sessionHapticsEnabled);
-        LSBSaveConfiguredGuestDeviceType(sessionDeviceType);
+        if (pendingDevicePreference) LSBSaveConfiguredGuestDeviceType(sessionDeviceType);
     }
     LSBLaunchdConfigurationSetDeviceType(sessionDeviceType);
     const char *arguments[LSB_MAX_VECTOR + 1] = {0}, *environment[LSB_MAX_VECTOR + 1] = {0};
@@ -2329,16 +2452,20 @@ static void completeUserspaceReboot(uint64_t generation) {
     retiredIdentityCount = 0;
     retiredIdentitiesFull = NO;
     sessionDraining = NO;
+    simulatorPoweredOff = NO;
     fprintf(stderr, "[broker] Starting fresh simulator session after userspace reboot\n");
     error = enqueueInitialJob(initial, role);
-    if (error) fprintf(stderr, "[broker] Fresh simulator service setup failed: %s\n", strerror(error));
+    if (error) { sessionStartFailed = YES; fprintf(stderr, "[broker] Fresh simulator service setup failed: %s\n", strerror(error)); }
     finishDeviceChange(error);
 }
 
 static void beginUserspaceReboot(LSBJob *exitedLaunchd) {
     if (sessionDraining) return;
     sessionDraining = YES;
+    sessionControlRequested = NO;
     rebootDrainFailed = NO;
+    simulatorPoweredOff = NO;
+    notifySessionStateChanged();
     uint64_t generation = ++rebootGeneration;
     rebootPendingDeaths = [NSMutableSet new];
     rebootDeathMonitors = [NSMutableArray new];
@@ -2389,6 +2516,7 @@ static void beginUserspaceReboot(LSBJob *exitedLaunchd) {
     hostTerminal = nil;
     [NSNotificationCenter.defaultCenter postNotificationName:LSBHostTerminalDidChangeNotification object:nil];
     [NSNotificationCenter.defaultCenter postNotificationName:LSBHostIndigoDidChangeNotification object:nil];
+    [NSNotificationCenter.defaultCenter postNotificationName:LSBHostFramebufferDidChangeNotification object:nil];
     --finishingDepth;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         if (generation != rebootGeneration || !sessionDraining || !rebootPendingDeaths.count) return;
@@ -2404,13 +2532,21 @@ static void beginUserspaceReboot(LSBJob *exitedLaunchd) {
     completeUserspaceReboot(generation);
 }
 
+static int failSessionStart(int error) {
+    sessionStartFailed = YES;
+    simulatorPoweredOff = NO;
+    notifySessionStateChanged();
+    return error;
+}
+
 int LSBStartHost(int argc, const char *argv[], const char *envp[]) {
     @autoreleasepool {
         if (![NSThread isMainThread]) return EPERM;
-        if (jobs) return EALREADY;
+        if (jobs && !LSBHostSimulatorIsOff()) return EALREADY;
+        if (sessionDraining || rebootDrainFailed || sessionStartFailed || launchLaneFailed || jobs.count) return EBUSY;
         if (argc < 1 || !argv || !argv[0]) return EINVAL;
         int error = snapshotRebootInputs(argc, argv, envp);
-        if (!error) error = prepareRuntimeRoot();
+        if (!error && !runtimeRoot) error = prepareRuntimeRoot();
         if (!error) {
             sessionDeviceType = LSBConfiguredGuestDeviceType();
             sessionHapticsEnabled = LSBExperimentalHapticsEnabled();
@@ -2423,47 +2559,51 @@ int LSBStartHost(int argc, const char *argv[], const char *envp[]) {
             if (!error && capabilities) error = LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(runtimeRoot, capabilities, sessionHapticsEnabled);
             LSBLaunchdConfigurationSetDeviceType(sessionDeviceType);
         }
-        if (error) { fprintf(stderr, "[broker] Startup failed: %s\n", strerror(error)); return error; }
+        if (error) { fprintf(stderr, "[broker] Startup failed: %s\n", strerror(error)); return failSessionStart(error); }
         LSBReceivedMessage *initial = calloc(1, sizeof(*initial));
-        if (!initial) return ENOMEM;
+        if (!initial) return failSessionStart(ENOMEM);
         uint32_t executionRole = LSB_EXECUTION_SIMULATOR;
         error = initialPlan(initial, argc, argv, envp);
         if (!error) error = initialExecutionRole(argc, argv, &executionRole);
-        if (error) { disposeMessage(initial); fprintf(stderr, "[broker] Invalid initial plan: %s\n", strerror(error)); return error; }
-        mach_port_t service = MACH_PORT_NULL;
-        char serviceName[LSB_BROKER_SERVICE_BYTES];
-        error = LSBStoreBrokerServiceName(LSBRuntimeStorage.sharedStorage.appGroupIdentifier.UTF8String, serviceName);
-        if (error) { disposeMessage(initial); return error; }
-        kern_return_t status = bootstrap_check_in(bootstrap_port, serviceName, &service);
-        if (status) { disposeMessage(initial); fprintf(stderr, "[broker] bootstrap_check_in: %d\n", status); return EIO; }
-        jobs = [NSMutableArray new];
+        if (error) { disposeMessage(initial); fprintf(stderr, "[broker] Invalid initial plan: %s\n", strerror(error)); return failSessionStart(error); }
+        if (!jobs) {
+            // Registration and its receiver live for the native host lifetime, including powered-off intervals.
+            mach_port_t service = MACH_PORT_NULL;
+            char serviceName[LSB_BROKER_SERVICE_BYTES];
+            error = LSBStoreBrokerServiceName(LSBRuntimeStorage.sharedStorage.appGroupIdentifier.UTF8String, serviceName);
+            if (error) { disposeMessage(initial); return failSessionStart(error); }
+            kern_return_t status = bootstrap_check_in(bootstrap_port, serviceName, &service);
+            if (status) { disposeMessage(initial); fprintf(stderr, "[broker] bootstrap_check_in: %d\n", status); return failSessionStart(EIO); }
+            jobs = [NSMutableArray new];
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                unsigned receiveFailures = 0;
+                for (;;) {
+                    LSBReceivedMessage *message = calloc(1, sizeof(*message));
+                    if (!message) abort();
+                    int receiveError = LSBTransportReceive(service, message);
+                    if (receiveError) {
+                        free(message);
+                        // Report the first failed receive in a burst, then at most once per second under a malformed-message flood.
+                        if (!(receiveFailures++ % 100)) fprintf(stderr, "[broker] receive failed: error=%d port=%u\n", receiveError, service);
+                        mach_port_type_t type = 0;
+                        if (mach_port_type(mach_task_self(), service, &type) || !(type & MACH_PORT_TYPE_RECEIVE)) {
+                            fprintf(stderr, "[broker] Receive right is no longer valid; stopping receiver\n");
+                            return;
+                        }
+                        usleep(10000);
+                        continue;
+                    }
+                    receiveFailures = 0;
+                    dispatch_async(dispatch_get_main_queue(), ^{ @autoreleasepool { handleMessage(message); } });
+                }
+            });
+        }
+        simulatorPoweredOff = NO;
         hostTerminal.signalHandler = ^int(pid_t foreground, int number) { return signalTerminal(foreground, number); };
         if (hostTerminal) [NSNotificationCenter.defaultCenter postNotificationName:LSBHostTerminalDidChangeNotification object:nil];
         [hostTerminal start];
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            unsigned receiveFailures = 0;
-            for (;;) {
-                LSBReceivedMessage *message = calloc(1, sizeof(*message));
-                if (!message) abort();
-                int receiveError = LSBTransportReceive(service, message);
-                if (receiveError) {
-                    free(message);
-                    // Report the first failed receive in a burst, then at most once per second under a malformed-message flood.
-                    if (!(receiveFailures++ % 100)) fprintf(stderr, "[broker] receive failed: error=%d port=%u\n", receiveError, service);
-                    mach_port_type_t type = 0;
-                    if (mach_port_type(mach_task_self(), service, &type) || !(type & MACH_PORT_TYPE_RECEIVE)) {
-                        fprintf(stderr, "[broker] Receive right is no longer valid; stopping receiver\n");
-                        return;
-                    }
-                    usleep(10000);
-                    continue;
-                }
-                receiveFailures = 0;
-                dispatch_async(dispatch_get_main_queue(), ^{ @autoreleasepool { handleMessage(message); } });
-            }
-        });
         error = enqueueInitialJob(initial, executionRole);
-        if (error) fprintf(stderr, "[broker] Initial service setup failed: %s\n", strerror(error));
+        if (error) { fprintf(stderr, "[broker] Initial service setup failed: %s\n", strerror(error)); return failSessionStart(error); }
         return error;
     }
 }

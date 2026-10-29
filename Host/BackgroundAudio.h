@@ -10,5 +10,7 @@ FOUNDATION_EXPORT NSNotificationName const LSBBackgroundAudioDidChangeNotificati
 @property (nonatomic, readonly, getter=isEnabled) BOOL enabled;
 @property (nonatomic, readonly, getter=isPlaying) BOOL playing;
 @property (nonatomic, readonly, copy) NSString *statusText;
+// An interruption or error to append to the Settings explanation; nil for ordinary Off/Playing states.
+@property (nonatomic, readonly, copy) NSString *statusDetail;
 - (void)setEnabled:(BOOL)enabled;
 @end

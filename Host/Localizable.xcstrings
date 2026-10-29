@@ -1,0 +1,1183 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "%@\n\n%@": {
+      "comment": "Settings footer: explanatory paragraph, then current status.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@\n\n%2$@"
+          }
+        }
+      }
+    },
+    "%@\n\nFull width preserves the screen’s aspect ratio and fits within the available height.": {
+      "comment": "Device settings footer: current status followed by the Full Width explanation.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@\n\nFull width preserves the screen’s aspect ratio and fits within the available height."
+          }
+        }
+      }
+    },
+    "%ld · %@": {
+      "comment": "Performance HUD row: numeric mode identifier, then localized mode name.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$ld · %2$@"
+          }
+        }
+      }
+    },
+    "Apply": {
+      "comment": "Save the selected simulated device.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apply"
+          }
+        }
+      }
+    },
+    "Applying simulator configuration": {
+      "comment": "Accessibility label for the device settings progress indicator.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Applying simulator configuration"
+          }
+        }
+      }
+    },
+    "Audio output": {
+      "comment": "Switch for simulator audio playback on the physical device.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio output"
+          }
+        }
+      }
+    },
+    "Audio playback stopped: %@": {
+      "comment": "Background audio error",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio playback stopped: %@"
+          }
+        }
+      }
+    },
+    "Audio unavailable": {
+      "comment": "Fallback background audio failure reason",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio unavailable"
+          }
+        }
+      }
+    },
+    "Backdrop": {
+      "comment": "Performance HUD mode for backdrop rendering.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Backdrop"
+          }
+        }
+      }
+    },
+    "Background execution": {
+      "comment": "Settings section heading for native background audio.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background execution"
+          }
+        }
+      }
+    },
+    "Basic": {
+      "comment": "Performance HUD mode: basic statistics.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Basic"
+          }
+        }
+      }
+    },
+    "Changes can be saved now and applied with Restart or Later.": {
+      "comment": "Settings footer describing the restart prompt choices.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Changes can be saved now and applied with Restart or Later."
+          }
+        }
+      }
+    },
+    "Checking the previous request; it will not be repeated.": {
+      "comment": "Checking a timed-out display setting without applying it twice.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking the previous request; it will not be repeated."
+          }
+        }
+      }
+    },
+    "Choose a device, then tap Apply to save its screen resolution. While running, choose Restart or Later.": {
+      "comment": "Device picker instructions.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a device, then tap Apply to save its screen resolution. While running, choose Restart or Later."
+          }
+        }
+      }
+    },
+    "Choose…": {
+      "comment": "Placeholder when no simulated device name is available.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose…"
+          }
+        }
+      }
+    },
+    "Could not save audio output: %s (%d).": {
+      "comment": "Settings error: system error description and numeric error code.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not save audio output: %1$s (%2$d)."
+          }
+        }
+      }
+    },
+    "Could not save device type: %s (%d).": {
+      "comment": "Settings error: system error description and numeric error code.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not save device type: %1$s (%2$d)."
+          }
+        }
+      }
+    },
+    "Could not save haptic passthrough: %s (%d).": {
+      "comment": "Settings error: system error description and numeric error code.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not save haptic passthrough: %1$s (%2$d)."
+          }
+        }
+      }
+    },
+    "Could not start runtime: %s. Close and reopen the app to try again.": {
+      "comment": "Runtime startup error; %s is a system error",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not start runtime: %s. Close and reopen the app to try again."
+          }
+        }
+      }
+    },
+    "Device": {
+      "comment": "Settings row that opens the simulated device picker.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Device"
+          }
+        }
+      }
+    },
+    "Display": {
+      "comment": "Performance HUD mode for display statistics.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Display"
+          }
+        }
+      }
+    },
+    "Dynamic Island · %1$lu × %2$lu points": {
+      "comment": "Device detail: width and height in logical screen points",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dynamic Island · %1$lu × %2$lu points"
+          }
+        }
+      }
+    },
+    "Enabled by the host launch environment.": {
+      "comment": "Settings footer when a feature is forced on by the native host environment.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enabled by the host launch environment."
+          }
+        }
+      }
+    },
+    "Esc": {
+      "comment": "Terminal shortcut sending the Escape key",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Esc"
+          }
+        }
+      }
+    },
+    "Experimental audio": {
+      "comment": "Settings section heading for optional simulator audio output.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Experimental audio"
+          }
+        }
+      }
+    },
+    "Experimental haptics": {
+      "comment": "Settings section heading for optional haptic passthrough.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Experimental haptics"
+          }
+        }
+      }
+    },
+    "FPS only": {
+      "comment": "Performance HUD mode showing only frames per second.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "FPS only"
+          }
+        }
+      }
+    },
+    "Fish": {
+      "comment": "Simulator shell tab; preserve the Fish shell name",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fish"
+          }
+        }
+      }
+    },
+    "Frequencies": {
+      "comment": "Performance HUD mode for clock frequencies.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Frequencies"
+          }
+        }
+      }
+    },
+    "Full": {
+      "comment": "Performance HUD mode: complete statistics.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Full"
+          }
+        }
+      }
+    },
+    "Glitches": {
+      "comment": "Performance HUD mode for rendering glitches.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Glitches"
+          }
+        }
+      }
+    },
+    "Haptic passthrough": {
+      "comment": "Switch for simulator haptic feedback on the physical device.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Haptic passthrough"
+          }
+        }
+      }
+    },
+    "Home button · %1$lu × %2$lu points": {
+      "comment": "Device detail: width and height in logical screen points",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Home button · %1$lu × %2$lu points"
+          }
+        }
+      }
+    },
+    "Home button · %1$lu × %2$lu points · Experimental": {
+      "comment": "Device detail: width and height in logical screen points",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Home button · %1$lu × %2$lu points · Experimental"
+          }
+        }
+      }
+    },
+    "Home indicator · %1$lu × %2$lu points": {
+      "comment": "Device detail: width and height in logical screen points",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Home indicator · %1$lu × %2$lu points"
+          }
+        }
+      }
+    },
+    "IOSurface": {
+      "comment": "Simulator display tab; preserve the IOSurface API name",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "IOSurface"
+          }
+        }
+      }
+    },
+    "Later": {
+      "comment": "Keep saved simulator settings without restarting now.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Later"
+          }
+        }
+      }
+    },
+    "No confirmed reply. Tap Refresh to check again; the previous change will not be repeated.": {
+      "comment": "Display settings request timed out with unknown result.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No confirmed reply. Tap Refresh to check again; the previous change will not be repeated."
+          }
+        }
+      }
+    },
+    "Off": {
+      "comment": "Background audio is disabled Performance HUD mode: no overlay.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off"
+          }
+        }
+      }
+    },
+    "Off by default. Play simulator audio through this device. %@": {
+      "comment": "Audio settings description followed by a complete sentence about applying saved choices.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off by default. Play simulator audio through this device. %@"
+          }
+        }
+      }
+    },
+    "Off by default. Use this device's haptic feedback. %@": {
+      "comment": "Haptic settings description followed by a complete sentence about applying saved choices.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off by default. Use this device's haptic feedback. %@"
+          }
+        }
+      }
+    },
+    "Open Settings after the simulator starts to read its current display options.": {
+      "comment": "Initial simulator display settings footer.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Settings after the simulator starts to read its current display options."
+          }
+        }
+      }
+    },
+    "Particles": {
+      "comment": "Performance HUD mode for particle rendering.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Particles"
+          }
+        }
+      }
+    },
+    "Paste": {
+      "comment": "Terminal shortcut that pastes clipboard text",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paste"
+          }
+        }
+      }
+    },
+    "Paused by an audio interruption": {
+      "comment": "Background audio status",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused by an audio interruption"
+          }
+        }
+      }
+    },
+    "Performance HUD": {
+      "comment": "Title of the performance heads-up display setting.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Performance HUD"
+          }
+        }
+      }
+    },
+    "Play silence to keep the host's audio session active in the background. Off by default. This may increase battery use. Other audio can continue playing.": {
+      "comment": "Description of native silent background audio, independent of simulator audio output.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play silence to keep the host's audio session active in the background. Off by default. This may increase battery use. Other audio can continue playing."
+          }
+        }
+      }
+    },
+    "Playback stopped; audio session could not deactivate: %@": {
+      "comment": "Background audio error",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Playback stopped; audio session could not deactivate: %@"
+          }
+        }
+      }
+    },
+    "Playing silence": {
+      "comment": "Background audio status",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Playing silence"
+          }
+        }
+      }
+    },
+    "Power": {
+      "comment": "Performance HUD mode for power usage.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Power"
+          }
+        }
+      }
+    },
+    "Power Off": {
+      "comment": "Stop the simulator session without deleting its data.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Power Off"
+          }
+        }
+      }
+    },
+    "Power Off and Restart close running simulator apps. App data is preserved.": {
+      "comment": "Session settings footer describing the two control buttons.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Power Off and Restart close running simulator apps. App data is preserved."
+          }
+        }
+      }
+    },
+    "Powering off the simulator…": {
+      "comment": "Simulator session operation in progress.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Powering off the simulator…"
+          }
+        }
+      }
+    },
+    "Press the simulated device's Home button.": {
+      "comment": "Accessibility hint for the virtual Home button",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Press the simulated device's Home button."
+          }
+        }
+      }
+    },
+    "Refresh simulator settings": {
+      "comment": "Accessibility label for the Settings refresh button.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh simulator settings"
+          }
+        }
+      }
+    },
+    "Restart": {
+      "comment": "Restart the simulator session.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restart"
+          }
+        }
+      }
+    },
+    "Restart Simulator?": {
+      "comment": "Title of the prompt to apply saved simulator settings.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restart Simulator?"
+          }
+        }
+      }
+    },
+    "Restarting the simulator…": {
+      "comment": "Simulator session operation in progress.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restarting the simulator…"
+          }
+        }
+      }
+    },
+    "Runtime startup failed: %s. Close and reopen the app to try again.": {
+      "comment": "Terminal startup error; %s is a system error",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Runtime startup failed: %s. Close and reopen the app to try again."
+          }
+        }
+      }
+    },
+    "Save the selected device, then choose whether to restart now or later.": {
+      "comment": "Accessibility hint for the device picker Apply button.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save the selected device, then choose whether to restart now or later."
+          }
+        }
+      }
+    },
+    "Save this choice; restart now or later if the simulator is running.": {
+      "comment": "Accessibility hint for optional simulator features.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save this choice; restart now or later if the simulator is running."
+          }
+        }
+      }
+    },
+    "Saved changes are waiting for a simulator restart.": {
+      "comment": "Settings footer for unapplied saved choices.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved changes are waiting for a simulator restart."
+          }
+        }
+      }
+    },
+    "Saved changes are waiting for a simulator restart. Running apps will close; app data is preserved.": {
+      "comment": "Session settings footer explaining a pending restart.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved changes are waiting for a simulator restart. Running apps will close; app data is preserved."
+          }
+        }
+      }
+    },
+    "Saved choices will apply when you tap Start on IOSurface.": {
+      "comment": "Settings footer while the simulator is off; IOSurface is a tab name.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved choices will apply when you tap Start on IOSurface."
+          }
+        }
+      }
+    },
+    "Saved device.": {
+      "comment": "Accessibility hint for the currently saved device choice.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved device."
+          }
+        }
+      }
+    },
+    "Select, then tap Apply.": {
+      "comment": "Accessibility hint for another device choice.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Select, then tap Apply."
+          }
+        }
+      }
+    },
+    "Settings": {
+      "comment": "Native host settings tab Title of the native Settings tab.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Settings"
+          }
+        }
+      }
+    },
+    "Silent background audio": {
+      "comment": "Switch to keep the native host active by playing silence.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Silent background audio"
+          }
+        }
+      }
+    },
+    "Simulator Device": {
+      "comment": "Title of the simulated device picker.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simulator Device"
+          }
+        }
+      }
+    },
+    "Simulator Home": {
+      "comment": "Accessibility label for the virtual Home button",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simulator Home"
+          }
+        }
+      }
+    },
+    "Simulator control failed: %s (%d). Reopen the host if it cannot recover.": {
+      "comment": "Session error: system error description and numeric error code; host means the native LiveSimBooter app.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simulator control failed: %1$s (%2$d). Reopen the host if it cannot recover."
+          }
+        }
+      }
+    },
+    "Simulator device": {
+      "comment": "Settings section heading for device selection and display sizing.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simulator device"
+          }
+        }
+      }
+    },
+    "Simulator display": {
+      "comment": "Settings section heading for live display controls.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simulator display"
+          }
+        }
+      }
+    },
+    "Simulator is off. Tap Start on IOSurface when ready. App data is preserved.": {
+      "comment": "Session settings footer while off; IOSurface is a tab name.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simulator is off. Tap Start on IOSurface when ready. App data is preserved."
+          }
+        }
+      }
+    },
+    "Simulator is powered off.": {
+      "comment": "Simulator display status after power off",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simulator is powered off."
+          }
+        }
+      }
+    },
+    "Simulator is starting or changing state. Session controls will become available when ready.": {
+      "comment": "Session settings footer while controls are unavailable.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simulator is starting or changing state. Session controls will become available when ready."
+          }
+        }
+      }
+    },
+    "Simulator request failed: %s (%d).": {
+      "comment": "Display request error: system error description and numeric error code.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simulator request failed: %1$s (%2$d)."
+          }
+        }
+      }
+    },
+    "Simulator session": {
+      "comment": "Settings section heading for Power Off and Restart.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simulator session"
+          }
+        }
+      }
+    },
+    "Simulator terminal": {
+      "comment": "Accessibility label for the simulator shell terminal",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simulator terminal"
+          }
+        }
+      }
+    },
+    "Start": {
+      "comment": "Button that starts the simulator runtime",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start"
+          }
+        }
+      }
+    },
+    "Start the simulator from the IOSurface tab.": {
+      "comment": "Terminal status when the simulator is powered off; IOSurface is a tab name",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start the simulator from the IOSurface tab."
+          }
+        }
+      }
+    },
+    "Start the simulator to change its live display settings.": {
+      "comment": "Settings footer while the simulator is off.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start the simulator to change its live display settings."
+          }
+        }
+      }
+    },
+    "Tab": {
+      "comment": "Terminal shortcut sending the Tab key",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tab"
+          }
+        }
+      }
+    },
+    "Terminal attached.": {
+      "comment": "Terminal status after connecting to the shell",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terminal attached."
+          }
+        }
+      }
+    },
+    "Terminal closed without output.": {
+      "comment": "Terminal status when the shell exits without producing output",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terminal closed without output."
+          }
+        }
+      }
+    },
+    "Terminal closed.": {
+      "comment": "Terminal status after the shell exits",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terminal closed."
+          }
+        }
+      }
+    },
+    "Terminal shortcuts": {
+      "comment": "Accessibility label for the terminal keyboard shortcut bar",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terminal shortcuts"
+          }
+        }
+      }
+    },
+    "The audio player did not start.": {
+      "comment": "Background audio error",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The audio player did not start."
+          }
+        }
+      }
+    },
+    "The host launch environment controls this setting.": {
+      "comment": "Settings error for a feature forced by the native host environment.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The host launch environment controls this setting."
+          }
+        }
+      }
+    },
+    "The original device capabilities profile is missing. Stage the device profiles during setup.": {
+      "comment": "Settings error when the original simulator device profile has not been installed.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The original device capabilities profile is missing. Stage the device profiles during setup."
+          }
+        }
+      }
+    },
+    "The simulator display helper or render server is not ready. Start the simulator, then refresh.": {
+      "comment": "Display settings unavailable until guest services are ready.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The simulator display helper or render server is not ready. Start the simulator, then refresh."
+          }
+        }
+      }
+    },
+    "The simulator helper restarted. Refresh to read the new session.": {
+      "comment": "Display settings session changed during a request.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The simulator helper restarted. Refresh to read the new session."
+          }
+        }
+      }
+    },
+    "The simulator is starting, restarting, or powering off. Wait, then try again.": {
+      "comment": "Settings error when a session transition prevents saving a change.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The simulator is starting, restarting, or powering off. Wait, then try again."
+          }
+        }
+      }
+    },
+    "This runtime has no simulator display.": {
+      "comment": "Status for a runtime without a graphical display",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This runtime has no simulator display."
+          }
+        }
+      }
+    },
+    "Unable to play silence: %1$@. Deactivation failed: %2$@": {
+      "comment": "Background audio playback and cleanup failure reasons",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to play silence: %1$@. Deactivation failed: %2$@"
+          }
+        }
+      }
+    },
+    "Unable to play silence: %@": {
+      "comment": "Background audio error",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to play silence: %@"
+          }
+        }
+      }
+    },
+    "Unavailable": {
+      "comment": "A simulator display setting could not be read.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unavailable"
+          }
+        }
+      }
+    },
+    "Unknown error": {
+      "comment": "Fallback when the system provides no error description",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unknown error"
+          }
+        }
+      }
+    },
+    "Use Full Width": {
+      "comment": "Switch to expand the simulator display within the available view.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use Full Width"
+          }
+        }
+      }
+    },
+    "Values read back from the simulator. The HUD resets when backboardd restarts.": {
+      "comment": "Display settings confirmed; backboardd is the simulator display daemon's name.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Values read back from the simulator. The HUD resets when backboardd restarts."
+          }
+        }
+      }
+    },
+    "Visualize touches": {
+      "comment": "Switch to show simulator touch markers.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Visualize touches"
+          }
+        }
+      }
+    },
+    "Waiting for launchd to start Fish…": {
+      "comment": "Terminal status while the simulator starts the Fish shell; preserve launchd and Fish",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for launchd to start Fish…"
+          }
+        }
+      }
+    },
+    "Waiting for the simulator…": {
+      "comment": "Display settings request in progress.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for the simulator…"
+          }
+        }
+      }
+    },
+    "Waiting to resume": {
+      "comment": "Background audio status",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting to resume"
+          }
+        }
+      }
+    },
+    "Your changes are saved. Restart now to apply them? Running simulator apps will close.": {
+      "comment": "Message for the saved-settings restart prompt.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your changes are saved. Restart now to apply them? Running simulator apps will close."
+          }
+        }
+      }
+    },
+    "iPad (9th generation)": {
+      "comment": "Device picker model name; preserve the iPad product name",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iPad (9th generation)"
+          }
+        }
+      }
+    },
+    "iPhone SE (2nd generation)": {
+      "comment": "Device picker model name; preserve the iPhone SE product name",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iPhone SE (2nd generation)"
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}

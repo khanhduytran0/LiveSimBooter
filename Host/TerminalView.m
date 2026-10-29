@@ -418,7 +418,7 @@
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
         self.backgroundColor = UIColor.blackColor;
-        self.accessibilityLabel = @"Simulator terminal";
+        self.accessibilityLabel = NSLocalizedString(@"Simulator terminal", @"Accessibility label for the simulator shell terminal");
         self.pasteConfiguration = [[UIPasteConfiguration alloc] initWithTypeIdentifiersForAcceptingClass:NSString.class];
         _font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
         _cellWidth = [@"M" sizeWithAttributes:@{NSFontAttributeName: _font}].width;
@@ -477,8 +477,10 @@
     controls.directionalLockEnabled = YES;
     controls.showsVerticalScrollIndicator = NO;
     controls.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
-    controls.accessibilityLabel = @"Terminal shortcuts";
-    NSArray *labels = @[@"Esc", @"Tab", @"^C", @"^D", @"←", @"↓", @"↑", @"→", @"↵", @"Paste"];
+    controls.accessibilityLabel = NSLocalizedString(@"Terminal shortcuts", @"Accessibility label for the terminal keyboard shortcut bar");
+    NSArray *labels = @[NSLocalizedString(@"Esc", @"Terminal shortcut sending the Escape key"),
+        NSLocalizedString(@"Tab", @"Terminal shortcut sending the Tab key"), @"^C", @"^D", @"←", @"↓", @"↑", @"→", @"↵",
+        NSLocalizedString(@"Paste", @"Terminal shortcut that pastes clipboard text")];
     UIStackView *previous = nil;
     for (NSArray<NSNumber *> *indices in @[@[@0, @1, @2, @3, @8, @9], @[@4, @5, @6, @7]]) {
         UIStackView *page = [UIStackView new];

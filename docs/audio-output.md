@@ -1,7 +1,8 @@
 # Experimental simulator audio output
 
-Enable **Settings → Experimental audio → Audio output** to restart the simulator with the bridge enabled. It defaults off;
-the preference persists independently of Silent background audio. Exactly `LSB_AUDIO_OUTPUT=1` in the native host launch
+Enable **Settings → Experimental audio → Audio output** to save the bridge setting. While running, choose Restart or Later;
+while powered off, it applies on the next Start. It defaults off and persists independently of Silent background audio.
+Exactly `LSB_AUDIO_OUTPUT=1` in the native host launch
 environment forces it on for diagnostics. The broker supplies the per-session guest flag.
 
 The optional `libLiveSimAudio.dylib` exposes a fixed output-only CoreAudio HAL device to simulator guests when

@@ -22,7 +22,9 @@ there is no automatic migration. Keep the owning store installed and entitled to
 After setup, open the app and tap **Start** on the **IOSurface** tab. Keep the native host in the foreground for baseline use.
 The persistent **IOSurface**, **Fish**, and **Settings** tabs share one simulator session; switching tabs does not restart guests.
 Fish belongs to simulator launchd, and Settings provides the guest performance HUD and touch-marker controls.
-The [device picker](docs/device-types.md) changes the simulated model and resolution, then restarts the guest session.
+Device, haptic and audio choices can be saved while the simulator is off. During a session, choose **Restart** or **Later**
+to apply them. Settings also provides **Power Off** and **Restart**; Power Off returns IOSurface to Start without closing the host.
+The [device picker](docs/device-types.md) changes the simulated model and resolution on the next start or restart.
 Silent background audio is optional and disabled by default.
 
 Explicit guest arguments, such as `--launchd-services` or `/bin/df`, retain automatic startup for development tests.

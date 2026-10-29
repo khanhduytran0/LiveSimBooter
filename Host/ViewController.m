@@ -43,13 +43,14 @@ static void showStatus(UIViewController *controller, NSString *text) {
 @interface LSBSurfaceViewController : UIViewController
 @property BOOL visible;
 @property BOOL startupAttempted;
+@property int startupError;
 @property (nonatomic, copy) void (^startupResultHandler)(int);
 @property (nonatomic, strong) UIStackView *startOverlay;
 @property (nonatomic, strong) UILabel *startupStatus;
 @property (nonatomic, strong) UIButton *startButton;
 @property (nonatomic, strong) id indigoObserver;
 @property (nonatomic, strong) id framebufferObserver;
-@property (nonatomic, strong) id deviceSettingsObserver, inactiveObserver, activeObserver;
+@property (nonatomic, strong) id deviceSettingsObserver, inactiveObserver, activeObserver, sessionObserver;
 @property (nonatomic, strong) LSBSimulatorDisplayView *simulatorDisplay;
 @property (nonatomic, strong) LSBVirtualHomeButton *homeButton;
 @property (nonatomic, strong) LSBIndigoHIDServer *pressedHomeServer;
@@ -62,7 +63,8 @@ static void showStatus(UIViewController *controller, NSString *text) {
     [_pressedHomeServer releaseHomeButton];
     if (_indigoObserver) [NSNotificationCenter.defaultCenter removeObserver:_indigoObserver];
     if (_framebufferObserver) [NSNotificationCenter.defaultCenter removeObserver:_framebufferObserver];
-    for (id observer in @[_deviceSettingsObserver ?: NSNull.null, _inactiveObserver ?: NSNull.null, _activeObserver ?: NSNull.null])
+    for (id observer in @[_deviceSettingsObserver ?: NSNull.null, _inactiveObserver ?: NSNull.null, _activeObserver ?: NSNull.null,
+                         _sessionObserver ?: NSNull.null])
         if (observer != NSNull.null) [NSNotificationCenter.defaultCenter removeObserver:observer];
     _framebuffer.frameHandler = nil;
 }
@@ -96,8 +98,8 @@ static void showStatus(UIViewController *controller, NSString *text) {
                                                  LSBGuestDeviceSettings.sharedController.fullWidth, needsHome, &layout);
     if (!fits || !needsHome || !CGRectEqualToRect(self.homeButton.frame, layout.homeButtonFrame)) [self releaseHomeButton];
     self.simulatorDisplay.frame = fits ? layout.displayFrame : CGRectZero;
-    self.homeButton.hidden = !fits || !needsHome;
-    self.homeButton.enabled = fits && needsHome && self.visible && self.simulatorDisplay.indigoServer != nil &&
+    self.homeButton.hidden = !fits || !needsHome || LSBHostSimulatorIsOff();
+    self.homeButton.enabled = !self.homeButton.hidden && self.visible && self.simulatorDisplay.indigoServer != nil &&
                               UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
     self.homeButton.frame = fits ? layout.homeButtonFrame : CGRectZero;
 }
@@ -125,13 +127,12 @@ static void showStatus(UIViewController *controller, NSString *text) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     self.visible = YES;
-    self.simulatorDisplay.presentationEnabled = YES;
-    self.simulatorDisplay.userInteractionEnabled = YES;
+    [self updateSessionState];
     [self.view setNeedsLayout];
 }
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
-    [self.simulatorDisplay becomeFirstResponder];
+    if (!LSBHostSimulatorIsOff()) [self.simulatorDisplay becomeFirstResponder];
 }
 - (void)viewWillDisappear:(BOOL)animated {
     self.visible = NO;
@@ -144,6 +145,7 @@ static void showStatus(UIViewController *controller, NSString *text) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.startupError = LSBInitialGuestStartupError();
     UILabel *status = [UILabel new];
     status.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     status.adjustsFontForContentSizeCategory = YES;
@@ -151,7 +153,7 @@ static void showStatus(UIViewController *controller, NSString *text) {
     status.textAlignment = NSTextAlignmentCenter;
     status.hidden = YES;
     UIButtonConfiguration *configuration = UIButtonConfiguration.filledButtonConfiguration;
-    configuration.title = @"Start";
+    configuration.title = NSLocalizedString(@"Start", @"Button that starts the simulator runtime");
     configuration.buttonSize = UIButtonConfigurationSizeLarge;
     __weak LSBSurfaceViewController *weakSelf = self;
     UIButton *button = [UIButton buttonWithConfiguration:configuration primaryAction:[UIAction actionWithHandler:^(UIAction *action) {
@@ -174,24 +176,46 @@ static void showStatus(UIViewController *controller, NSString *text) {
         [overlay.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-24],
         [overlay.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor]
     ]];
+    self.sessionObserver = [NSNotificationCenter.defaultCenter addObserverForName:LSBHostSessionStateDidChangeNotification object:nil
+        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; [weakSelf updateSessionState]; }];
+    [self updateSessionState];
+}
+- (void)updateSessionState {
+    BOOL off = LSBHostSimulatorIsOff();
+    self.simulatorDisplay.hidden = off;
+    self.simulatorDisplay.presentationEnabled = self.visible && !off;
+    self.simulatorDisplay.userInteractionEnabled = self.visible && !off;
+    self.startOverlay.hidden = !off && !self.startupError;
+    if (self.startupError) {
+        self.startupStatus.text = [NSString stringWithFormat:
+            NSLocalizedString(@"Could not start runtime: %s. Close and reopen the app to try again.", @"Runtime startup error; %s is a system error"),
+            strerror(self.startupError)];
+        self.startupStatus.hidden = NO;
+        self.startButton.hidden = YES;
+    } else if (off) {
+        [self releaseHomeButton];
+        [self.simulatorDisplay resignFirstResponder];
+        self.startupStatus.text = NSLocalizedString(@"Simulator is powered off.", @"Simulator display status after power off");
+        self.startupStatus.hidden = !LSBInitialGuestStartupWasAttempted();
+        self.startButton.hidden = NO;
+        self.startButton.enabled = YES;
+        [self.view bringSubviewToFront:self.startOverlay];
+    }
+    [self.view setNeedsLayout];
 }
 - (void)startInitialRuntime {
-    if (self.startupAttempted) return;
+    if (self.startupAttempted && !LSBHostSimulatorIsOff()) return;
     self.startupAttempted = YES;
     self.startButton.enabled = NO;
     int error = LSBStartInitialGuest();
+    self.startupError = error;
     if (self.startupResultHandler) self.startupResultHandler(error);
-    if (error) {
-        self.startupStatus.text = [NSString stringWithFormat:@"Could not start runtime: %s. Close and reopen the app to try again.", strerror(error)];
-        self.startupStatus.hidden = NO;
-        self.startButton.hidden = YES;
+    [self updateSessionState];
+    if (error || self.simulatorDisplay) return;
+    if (!LSBHostUsesSimulatorDisplay()) {
+        showStatus(self, NSLocalizedString(@"This runtime has no simulator display.", @"Status for a runtime without a graphical display"));
         return;
     }
-    [self.startOverlay removeFromSuperview];
-    self.startOverlay = nil;
-    self.startupStatus = nil;
-    self.startButton = nil;
-    if (!LSBHostUsesSimulatorDisplay()) { showStatus(self, @"This runtime has no simulator display."); return; }
     LSBSimulatorDisplayView *display = [[LSBSimulatorDisplayView alloc] initWithFrame:CGRectZero];
     display.indigoServer = LSBHostIndigoHIDServer();
     display.presentationEnabled = self.visible;
@@ -212,8 +236,8 @@ static void showStatus(UIViewController *controller, NSString *text) {
     homeConfiguration.background = background;
     LSBVirtualHomeButton *home = [[LSBVirtualHomeButton alloc] initWithFrame:CGRectZero];
     home.configuration = homeConfiguration;
-    home.accessibilityLabel = @"Simulator Home";
-    home.accessibilityHint = @"Press the simulated device's Home button.";
+    home.accessibilityLabel = NSLocalizedString(@"Simulator Home", @"Accessibility label for the virtual Home button");
+    home.accessibilityHint = NSLocalizedString(@"Press the simulated device's Home button.", @"Accessibility hint for the virtual Home button");
     home.accessibilityIdentifier = @"simulator-home-button";
     [home addTarget:self action:@selector(homeButtonDown:) forControlEvents:UIControlEventTouchDown];
     [home addTarget:self action:@selector(homeButtonUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside |
@@ -259,6 +283,7 @@ static void showStatus(UIViewController *controller, NSString *text) {
 @property BOOL receivedTerminalOutput;
 @property (nonatomic, strong) id terminalObserver;
 @property (nonatomic, strong) id closeObserver;
+@property (nonatomic, strong) id sessionObserver;
 @property (nonatomic, strong) LSBTerminalView *terminal;
 @property (nonatomic, strong) LSBTerminalSession *session;
 @end
@@ -267,11 +292,16 @@ static void showStatus(UIViewController *controller, NSString *text) {
 - (void)dealloc {
     if (_terminalObserver) [NSNotificationCenter.defaultCenter removeObserver:_terminalObserver];
     if (_closeObserver) [NSNotificationCenter.defaultCenter removeObserver:_closeObserver];
+    if (_sessionObserver) [NSNotificationCenter.defaultCenter removeObserver:_sessionObserver];
     _session.outputHandler = nil;
 }
 - (NSString *)waitingStatus {
-    if (self.startupError) return [NSString stringWithFormat:@"Runtime startup failed: %s. Close and reopen the app to try again.", strerror(self.startupError)];
-    return LSBInitialGuestStartupWasAttempted() ? @"Waiting for launchd to start Fish…" : @"Start the simulator from the IOSurface tab.";
+    if (self.startupError) return [NSString stringWithFormat:
+        NSLocalizedString(@"Runtime startup failed: %s. Close and reopen the app to try again.", @"Terminal startup error; %s is a system error"),
+        strerror(self.startupError)];
+    return LSBHostSimulatorIsOff() ?
+        NSLocalizedString(@"Start the simulator from the IOSurface tab.", @"Terminal status when the simulator is powered off; IOSurface is a tab name") :
+        NSLocalizedString(@"Waiting for launchd to start Fish…", @"Terminal status while the simulator starts the Fish shell; preserve launchd and Fish");
 }
 - (void)runtimeStartupFinished:(int)error {
     self.startupError = error;
@@ -281,6 +311,7 @@ static void showStatus(UIViewController *controller, NSString *text) {
     LSBTerminalSession *session = LSBHostTerminal();
     if (_session == session) {
         if (session.closed) [self terminalClosed];
+        else if (!session) self.terminal.statusText = [self waitingStatus];
         return;
     }
     _session.outputHandler = nil;
@@ -288,7 +319,7 @@ static void showStatus(UIViewController *controller, NSString *text) {
     self.receivedTerminalOutput = NO;
     self.terminal.inputHandler = nil;
     self.terminal.resizeHandler = nil;
-    self.terminal.statusText = session ? @"Terminal attached." : [self waitingStatus];
+    self.terminal.statusText = session ? NSLocalizedString(@"Terminal attached.", @"Terminal status after connecting to the shell") : [self waitingStatus];
     if (!session) return;
     __weak LSBFishViewController *weakSelf = self;
     self.terminal.inputHandler = ^(NSData *data) {
@@ -314,11 +345,13 @@ static void showStatus(UIViewController *controller, NSString *text) {
     self.terminal.inputHandler = nil;
     self.terminal.resizeHandler = nil;
     [self.terminal resignFirstResponder];
-    self.terminal.statusText = self.receivedTerminalOutput ? @"Terminal closed." : @"Terminal closed without output.";
+    self.terminal.statusText = self.receivedTerminalOutput ? NSLocalizedString(@"Terminal closed.", @"Terminal status after the shell exits") :
+        NSLocalizedString(@"Terminal closed without output.", @"Terminal status when the shell exits without producing output");
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.blackColor;
+    self.startupError = LSBInitialGuestStartupError();
     LSBTerminalView *terminal = [[LSBTerminalView alloc] initWithFrame:CGRectZero];
     terminal.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:terminal];
@@ -344,6 +377,8 @@ static void showStatus(UIViewController *controller, NSString *text) {
             LSBFishViewController *controller = weakSelf;
             if (controller && notification.object == controller.session) [controller terminalClosed];
         }];
+    self.sessionObserver = [NSNotificationCenter.defaultCenter addObserverForName:LSBHostSessionStateDidChangeNotification object:nil
+        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; [weakSelf bindTerminal]; }];
 }
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
@@ -366,14 +401,17 @@ static void showStatus(UIViewController *controller, NSString *text) {
     [super viewDidLoad];
     // The scene keeps the display and terminal connections. Tab selection never starts or stops a process.
     LSBSurfaceViewController *surface = [LSBSurfaceViewController new];
-    surface.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"IOSurface" image:[UIImage systemImageNamed:@"iphone"] tag:0];
+    surface.tabBarItem = [[UITabBarItem alloc] initWithTitle:NSLocalizedString(@"IOSurface", @"Simulator display tab; preserve the IOSurface API name")
+        image:[UIImage systemImageNamed:@"iphone"] tag:0];
     LSBFishViewController *fish = [LSBFishViewController new];
     __weak LSBFishViewController *weakFish = fish;
     surface.startupResultHandler = ^(int error) { [weakFish runtimeStartupFinished:error]; };
-    fish.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Fish" image:[UIImage systemImageNamed:@"terminal"] tag:1];
+    fish.tabBarItem = [[UITabBarItem alloc] initWithTitle:NSLocalizedString(@"Fish", @"Simulator shell tab; preserve the Fish shell name")
+        image:[UIImage systemImageNamed:@"terminal"] tag:1];
     LSBSettingsViewController *settings = [LSBSettingsViewController new];
     UINavigationController *settingsNavigation = [[UINavigationController alloc] initWithRootViewController:settings];
-    settingsNavigation.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Settings" image:[UIImage systemImageNamed:@"gearshape"] tag:2];
+    settingsNavigation.tabBarItem = [[UITabBarItem alloc] initWithTitle:NSLocalizedString(@"Settings", @"Native host settings tab")
+        image:[UIImage systemImageNamed:@"gearshape"] tag:2];
     self.viewControllers = @[surface, fish, settingsNavigation];
     // Restoring an explicit opt-in is the only startup path that may activate audio.
     (void)LSBBackgroundAudio.sharedController;
@@ -381,6 +419,7 @@ static void showStatus(UIViewController *controller, NSString *text) {
     // Install both consumers before asynchronous check-in/output, without focusing the hidden terminal.
     [surface loadViewIfNeeded];
     [fish loadViewIfNeeded];
-    if (LSBInitialGuestStartsAutomatically() || LSBInitialGuestStartupWasAttempted()) [surface startInitialRuntime];
+    BOOL attempted = LSBInitialGuestStartupWasAttempted();
+    if ((!attempted && LSBInitialGuestStartsAutomatically()) || (attempted && !LSBHostSimulatorIsOff())) [surface startInitialRuntime];
 }
 @end

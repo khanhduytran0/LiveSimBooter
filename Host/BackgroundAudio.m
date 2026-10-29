@@ -32,10 +32,12 @@ static NSString *const EnabledPreference = @"LSBSilentBackgroundAudioEnabled";
 - (BOOL)isPlaying { return _playing; }
 - (NSString *)statusText {
     if (_failure) return _failure;
-    if (!_enabled) return @"Off";
-    if (_interrupted) return @"Paused by an audio interruption";
-    return _playing ? @"Playing silence" : @"Waiting to resume";
+    if (!_enabled) return NSLocalizedString(@"Off", @"Background audio is disabled");
+    if (_interrupted) return NSLocalizedString(@"Paused by an audio interruption", @"Background audio status");
+    return _playing ? NSLocalizedString(@"Playing silence", @"Background audio status") :
+        NSLocalizedString(@"Waiting to resume", @"Background audio status");
 }
+- (NSString *)statusDetail { return _failure ?: (_enabled && (_interrupted || !_playing) ? self.statusText : nil); }
 - (void)publish {
     [NSNotificationCenter.defaultCenter postNotificationName:LSBBackgroundAudioDidChangeNotification object:self];
 }
@@ -50,7 +52,8 @@ static NSString *const EnabledPreference = @"LSBSilentBackgroundAudioEnabled";
     NSError *error = nil;
     // Do not even construct the native backend when this preference has never been enabled.
     if (_playback && ![_playback stopWithError:&error])
-        _failure = [NSString stringWithFormat:@"Playback stopped; audio session could not deactivate: %@", error.localizedDescription ?: @"Unknown error"];
+        _failure = [NSString stringWithFormat:NSLocalizedString(@"Playback stopped; audio session could not deactivate: %@", @"Background audio error"),
+            error.localizedDescription ?: NSLocalizedString(@"Unknown error", @"Fallback when the system provides no error description")];
     [self publish];
 }
 - (void)resumeIfEnabled {
@@ -63,8 +66,11 @@ static NSString *const EnabledPreference = @"LSBSilentBackgroundAudioEnabled";
     if (!_playing) {
         NSError *stopError = nil;
         [_playback stopWithError:&stopError];
-        _failure = [NSString stringWithFormat:@"Unable to play silence: %@", error.localizedDescription ?: @"Audio unavailable"];
-        if (stopError) _failure = [_failure stringByAppendingFormat:@". Deactivation failed: %@", stopError.localizedDescription];
+        NSString *reason = error.localizedDescription ?: NSLocalizedString(@"Audio unavailable", @"Fallback background audio failure reason");
+        _failure = [NSString stringWithFormat:NSLocalizedString(@"Unable to play silence: %@", @"Background audio error"), reason];
+        if (stopError) _failure = [NSString stringWithFormat:
+            NSLocalizedString(@"Unable to play silence: %1$@. Deactivation failed: %2$@", @"Background audio playback and cleanup failure reasons"),
+            reason, stopError.localizedDescription];
     }
     [self publish];
 }
@@ -91,7 +97,8 @@ static NSString *const EnabledPreference = @"LSBSilentBackgroundAudioEnabled";
     if (!_enabled) return;
     _playing = NO;
     [_playback stopWithError:NULL];
-    _failure = [NSString stringWithFormat:@"Audio playback stopped: %@", error.localizedDescription ?: @"Unknown error"];
+    _failure = [NSString stringWithFormat:NSLocalizedString(@"Audio playback stopped: %@", @"Background audio error"),
+        error.localizedDescription ?: NSLocalizedString(@"Unknown error", @"Fallback when the system provides no error description")];
     [self publish];
 }
 @end

@@ -97,7 +97,7 @@ Stage its seven original profiles below to enable Home-button/Home-indicator iPh
 
 Normal startup and device-picker apply publish the staged stock capability values unchanged. The active file is serialized as
 a binary plist and replaced atomically; staged originals remain untouched. Experimental haptics default off. The native Settings
-choice, or exactly `LSB_EXPERIMENTAL_HAPTICS=1` in the **native host launch environment**, enables a session-owned haptic relay,
+choice on the next start/restart, or exactly `LSB_EXPERIMENTAL_HAPTICS=1` in the **native host launch environment**, enables a session-owned haptic relay,
 the optional guest constructor helper, and projection of `DeviceSupportsClosedLoopHaptics` from actual native MobileGestalt.
 Only exact CFBoolean true enables that capability; unknown or malformed answers become false. An enabled session also
 publishes the native UIKit feedback level as the typed integer `LSBUIKitFeedbackSupportLevel` for the pinned guest UIKit adapter.
@@ -106,8 +106,9 @@ confirmed on iPhone 15, as were public UIKit impact, selection and notification 
 the guest preference and needs a separate interaction check.
 Other profile fields and staged originals stay unchanged. See [haptic evidence and limits](keyboard-haptics.md).
 
-Audio output also defaults off and has its own native Settings switch. The switch restarts the simulator to apply the choice;
-exactly `LSB_AUDIO_OUTPUT=1` in the native host environment forces it on for diagnostics. It is independent of Silent
+Audio output also defaults off and has its own native Settings switch. Audio and haptic choices can be saved while off;
+while running, the UI offers Restart or Later. The next start/restart applies all saved choices together.
+Exactly `LSB_AUDIO_OUTPUT=1` in the native host environment forces it on for diagnostics. It is independent of Silent
 background audio. AudioQueue, AVAudioEngine and AVAudioPlayer tone probes have physically confirmed output; see
 [audio output and its limits](audio-output.md).
 

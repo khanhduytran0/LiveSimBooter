@@ -10,5 +10,10 @@ static inline bool LSBHostArgumentsRequestAutomaticStart(int argc, const char *c
 int LSBRunHostApplication(int argc, const char *argv[], const char *envp[]);
 bool LSBInitialGuestStartsAutomatically(void);
 bool LSBInitialGuestStartupWasAttempted(void);
-// Main-thread, once-only startup. Failure remains latched because the broker may already own its service and callbacks.
+int LSBInitialGuestStartupError(void);
+// A successful powered-off session may start again. Failures remain latched because broker ownership can be incomplete.
+static inline bool LSBHostShouldAttemptGuestStart(bool attempted, int priorError, bool poweredOff) {
+    return !attempted || (!priorError && poweredOff);
+}
+// Main-thread startup, including a later Start after confirmed Power Off.
 int LSBStartInitialGuest(void);

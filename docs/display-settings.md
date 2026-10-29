@@ -7,6 +7,50 @@ while a request is pending, and report failures in the section footer. There is 
 **Silent background audio** is a separate native switch, off by default. It keeps the host's audio session active by
 playing silence and can increase battery use. It does not depend on the simulator display helper.
 
+Device, Haptic passthrough and Audio output choices are editable before the first Start and after Power Off. These controls
+show saved choices separately from the running session. Changing one during a session offers **Restart** or **Later**;
+Later saves it for the next start/restart, and multiple deferred changes apply together. Changing a choice back to the
+current session value clears its restart requirement. A host launch-environment override still locks its corresponding switch.
+The live HUD and touch-marker controls require a running simulator; an unavailable display helper does not block saving
+device, haptic or audio choices.
+
+The **Simulator session** section contains **Power Off** and **Restart**. Power Off waits for the owned guest and helper processes
+to exit, clears framebuffer/terminal connections, and restores Start on IOSurface. The native host and saved data remain.
+Restart uses the same confirmed process-death drain, then boots with the saved choices. Controls are unavailable during a
+session transition. Ordinary child launches do not toggle their availability. A requested Power Off or Restart pauses new
+launch dispatch and waits for any already-submitted child to establish its audited identity and exit monitor before draining.
+If process retirement fails or times out, the host reports the failure and does not overlap old and new guests. Unchanged
+status notifications do not redraw Settings; actual updates replace only the affected sections without animation.
+
+## Session-settings verification, 2026-10-29
+
+The cold-start UI test used iPhone16,2 on native iOS 26.1 / 23B50 with simulator iOS 26.0 / 23A343 and the existing cache at
+`0x110000000`, UUID `73ED978A-FD25-3166-A57A-34E21BB7E5B8`. No debugger was attached. Before Start, process inspection found
+only the native host. The user confirmed that Haptic passthrough and Audio output were editable while off and that Start
+booted SpringBoard. The initial implementation toggled Settings availability during individual daemon launches; this was
+separate from a session restart and caused visible flashing. After the availability and redraw fixes, the user confirmed stable
+controls during boot, Later preserving the running session, and Restart returning to SpringBoard. The native host stayed at
+PID 8533 (historical test identity); the rebuilt host UUID was `9AE0BA4F-3F9E-3F25-8BF7-BACE0EA82BB2`.
+
+Power Off restored the Start button. Independent process inspection then found only that same host, with no guest or native
+Metal helper remaining. Starting again from IOSurface returned to SpringBoard and reconnected Fish, confirmed by the user.
+Native thermal pressure was 0 and no debugger was attached. Runtime binaries and the cache were
+unchanged; this test deployed the rebuilt native app and retained the working native Metal backend.
+
+Focused local tests cover saved-versus-active configuration, combining deferred changes, malformed profile preflight,
+confirmed-death shutdown, receiver reuse on Start, stale callbacks, failed drains and unchanged-model notification suppression.
+They also cover Restart/Power Off before and after child CHECKIN, including exec replacements and failure paths that must
+keep the next session from starting. The integrated `sh Tests/run.sh` suite and signed native build passed. These tests do
+not substitute for device confirmation of each UI operation.
+
+## Native UI localization
+
+[Host/Localizable.xcstrings](../Host/Localizable.xcstrings) contains the native UI's English source text and translator comments.
+Add translations there with Xcode; labels, accessibility text, status messages and errors use `NSLocalizedString`.
+Keep formatting arguments intact, and keep protocol identifiers, preference keys, accessibility identifiers and terminal escape
+sequences untranslated. UI behavior must use state rather than comparing translated text. The catalog belongs only to the
+native host target, not LiveProcess or the supplied simulator runtime.
+
 ## Controls and lifetime
 
 | Mode | Performance HUD |

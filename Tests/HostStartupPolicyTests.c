@@ -17,6 +17,11 @@ int main(void) {
     assert(!LSBHostArgumentsRequestAutomaticStart(-1, icon));
     assert(!LSBHostArgumentsRequestAutomaticStart(2, NULL));
     assert(!LSBHostArgumentsRequestAutomaticStart(2, icon));
+    assert(LSBHostShouldAttemptGuestStart(false, 0, true));
+    assert(!LSBHostShouldAttemptGuestStart(true, 0, false)); // Never overlap the running/starting/draining broker.
+    assert(LSBHostShouldAttemptGuestStart(true, 0, true)); // Successful Power Off allows Start in the same native host.
+    assert(!LSBHostShouldAttemptGuestStart(true, 5, true)); // A partial startup failure stays latched.
+    assert(!LSBHostShouldAttemptGuestStart(true, 5, false));
     puts("Host startup policy: icon launches wait; explicit guest/test arguments start automatically.");
     return 0;
 }

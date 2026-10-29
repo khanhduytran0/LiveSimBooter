@@ -4,12 +4,14 @@
 
 FOUNDATION_EXPORT NSNotificationName const LSBGuestDeviceSettingsDidChangeNotification;
 
-// Main-thread UI state. Selection is a draft until Apply; restarting uses the broker's owned-session drain.
+// Main-thread settings state. Device selection remains a UI draft until saved; saves never start or restart a session.
 @interface LSBGuestDeviceSettings : NSObject
 @property (class, nonatomic, readonly) LSBGuestDeviceSettings *sharedController;
 @property (nonatomic, readonly, copy) NSArray<LSBGuestDeviceType *> *deviceTypes;
+// Configured choices, which may differ from the running session until an explicit restart.
 @property (nonatomic, readonly, copy) NSString *currentIdentifier, *statusText;
-@property (nonatomic, readonly) BOOL pending, canApply, outcomeUnknown;
+@property (nonatomic, readonly) BOOL pending, canApply, simulatorOff, needsRestart, canControlSimulator;
+@property (nonatomic, readonly, copy) NSString *sessionStatusText;
 // Saved host-presentation preference; effective only for home-button devices and iPads. It never restarts a guest.
 @property (nonatomic, readonly) BOOL fullWidth;
 @property (nonatomic, readonly) BOOL hapticsEnabled, hapticsForced;
@@ -18,8 +20,11 @@ FOUNDATION_EXPORT NSNotificationName const LSBGuestDeviceSettingsDidChangeNotifi
 @property (nonatomic, readonly, copy) NSString *audioOutputStatusText;
 - (instancetype)initWithDefaults:(NSUserDefaults *)defaults;
 - (void)refresh;
-- (void)applyDeviceIdentifier:(NSString *)identifier;
+// Return YES only when a changed choice was successfully saved. Errors remain in the corresponding footer.
+- (BOOL)saveDeviceIdentifier:(NSString *)identifier;
+- (BOOL)saveHapticsEnabled:(BOOL)enabled;
+- (BOOL)saveAudioOutputEnabled:(BOOL)enabled;
 - (void)setFullWidth:(BOOL)enabled;
-- (void)applyHapticsEnabled:(BOOL)enabled;
-- (void)applyAudioOutputEnabled:(BOOL)enabled;
+- (void)restartSimulator;
+- (void)powerOffSimulator;
 @end

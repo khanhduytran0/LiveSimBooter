@@ -59,9 +59,10 @@ bool LSBInitialGuestStartsAutomatically(void) {
 }
 
 bool LSBInitialGuestStartupWasAttempted(void) { return initialGuestStarted; }
+int LSBInitialGuestStartupError(void) { return startupError; }
 
 int LSBStartInitialGuest(void) {
-    if (initialGuestStarted) return startupError;
+    if (!LSBHostShouldAttemptGuestStart(initialGuestStarted, startupError, LSBHostSimulatorIsOff())) return startupError;
     initialGuestStarted = YES;
     startupError = LSBStartHost(launchArgumentCount, launchArguments, launchEnvironment);
     if (startupError) fprintf(stderr, "LiveSimBooter: runtime startup failed: %s\n", strerror(startupError));

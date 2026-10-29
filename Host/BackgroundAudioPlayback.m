@@ -69,7 +69,7 @@ static NSData *silentWave(void) {
     self.needsDeactivation = YES;
     if ([self.player play]) return YES;
     if (error) *error = [NSError errorWithDomain:@"LSBBackgroundAudio" code:1
-        userInfo:@{NSLocalizedDescriptionKey: @"The audio player did not start."}];
+        userInfo:@{NSLocalizedDescriptionKey: NSLocalizedString(@"The audio player did not start.", @"Background audio error")}];
     return NO;
 }
 - (BOOL)stopWithError:(NSError **)error {

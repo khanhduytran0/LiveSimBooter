@@ -10,7 +10,18 @@
 NSNotificationName const LSBGuestDisplaySettingsDidChangeNotification = @"LSBGuestDisplaySettingsDidChange";
 
 NSArray<NSString *> *LSBPerformanceHUDNames(void) {
-    return @[@"Off", @"Basic", @"Backdrop", @"Particles", @"Full", @"Frequencies", @"Power", @"FPS only", @"Display", @"Glitches"];
+    return @[
+        NSLocalizedString(@"Off", @"Performance HUD mode: no overlay."),
+        NSLocalizedString(@"Basic", @"Performance HUD mode: basic statistics."),
+        NSLocalizedString(@"Backdrop", @"Performance HUD mode for backdrop rendering."),
+        NSLocalizedString(@"Particles", @"Performance HUD mode for particle rendering."),
+        NSLocalizedString(@"Full", @"Performance HUD mode: complete statistics."),
+        NSLocalizedString(@"Frequencies", @"Performance HUD mode for clock frequencies."),
+        NSLocalizedString(@"Power", @"Performance HUD mode for power usage."),
+        NSLocalizedString(@"FPS only", @"Performance HUD mode showing only frames per second."),
+        NSLocalizedString(@"Display", @"Performance HUD mode for display statistics."),
+        NSLocalizedString(@"Glitches", @"Performance HUD mode for rendering glitches.")
+    ];
 }
 
 @implementation LSBGuestDisplaySettings {
@@ -35,7 +46,8 @@ NSArray<NSString *> *LSBPerformanceHUDNames(void) {
     _timeoutNS = (uint64_t)(MAX(0.05, MIN(20.0, timeout)) * 1000000000);
     _queue = dispatch_queue_create("com.kdt.LiveSimBooter.display-settings", DISPATCH_QUEUE_SERIAL);
     _hudMode = _touches = -1;
-    _statusText = @"Open Settings after the simulator starts to read its current display options.";
+    _statusText = NSLocalizedString(@"Open Settings after the simulator starts to read its current display options.",
+        @"Initial simulator display settings footer.");
     return self;
 }
 - (void)publish {
@@ -110,7 +122,9 @@ NSArray<NSString *> *LSBPerformanceHUDNames(void) {
     if (_pending) return;
     if (_outcomeUnknown && operation != LSBDSettingsRead) return;
     _pending = YES;
-    _statusText = _outcomeUnknown ? @"Checking the previous request; it will not be repeated." : @"Waiting for the simulator…";
+    _statusText = _outcomeUnknown ?
+        NSLocalizedString(@"Checking the previous request; it will not be repeated.", @"Checking a timed-out display setting without applying it twice.") :
+        NSLocalizedString(@"Waiting for the simulator…", @"Display settings request in progress.");
     [self publish];
     dispatch_async(_queue, ^{
         LSBDSettingsResponse response;
@@ -121,12 +135,18 @@ NSArray<NSString *> *LSBPerformanceHUDNames(void) {
             self->_outcomeUnknown = unknown;
             self->_hudMode = response.hudError ? -1 : response.hudMode;
             self->_touches = response.touchesError ? -1 : response.touches;
-            if (unknown) self->_statusText = @"No confirmed reply. Tap Refresh to check again; the previous change will not be repeated.";
+            if (unknown) self->_statusText =
+                NSLocalizedString(@"No confirmed reply. Tap Refresh to check again; the previous change will not be repeated.",
+                    @"Display settings request timed out with unknown result.");
             else if (error == ENOENT || error == ENOTCONN)
-                self->_statusText = @"The simulator display helper or render server is not ready. Start the simulator, then refresh.";
-            else if (error == ESTALE) self->_statusText = @"The simulator helper restarted. Refresh to read the new session.";
-            else if (error) self->_statusText = [NSString stringWithFormat:@"Simulator request failed: %s (%d).", strerror(error), error];
-            else self->_statusText = @"Values read back from the simulator. The HUD resets when backboardd restarts.";
+                self->_statusText = NSLocalizedString(@"The simulator display helper or render server is not ready. Start the simulator, then refresh.",
+                    @"Display settings unavailable until guest services are ready.");
+            else if (error == ESTALE) self->_statusText =
+                NSLocalizedString(@"The simulator helper restarted. Refresh to read the new session.", @"Display settings session changed during a request.");
+            else if (error) self->_statusText = [NSString stringWithFormat:NSLocalizedString(@"Simulator request failed: %s (%d).",
+                @"Display request error: system error description and numeric error code."), strerror(error), error];
+            else self->_statusText = NSLocalizedString(@"Values read back from the simulator. The HUD resets when backboardd restarts.",
+                @"Display settings confirmed; backboardd is the simulator display daemon's name.");
             [self publish];
         });
     });

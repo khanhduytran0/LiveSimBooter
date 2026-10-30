@@ -329,7 +329,7 @@ launchd. Each child's own shared ledger carries its current parent PID, so getpp
 Replacing a parent through SETEXEC preserves its existing children and does not trigger adoption. With no live simulator
 launchd, or after launchd exits, the explicit fallback is guest parent PID 0 with no simulated wait owner.
 
-If launchd's 64 child slots are full, copied adoption records wait for space and new spawns receive EAGAIN. Parent metadata
+If launchd's 120 child slots are full, copied adoption records wait for space and new spawns receive EAGAIN. Parent metadata
 updates immediately, but a specific waitpid for a deferred orphan can return ECHILD until its record is imported. The retry
 queue does not retain whole old ledgers. Unknown exit-monitor failures do not invent an exit status.
 

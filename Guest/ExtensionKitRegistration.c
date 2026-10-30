@@ -12,7 +12,7 @@
 #include <unistd.h>
 
 // iOS 26 libxpc imports this bundle into the calling process's PID domain. It provides no success result.
-// BoardServices Discovery resolves this domain directly, without the CFBundle resource path adapter.
+// BoardServices Discovery and Launch resolve this domain directly, without the CFBundle resource path adapter.
 extern void xpc_add_bundle(const char *path, uint64_t flags);
 
 static int appendPath(char output[PATH_MAX], const char *root, const char *suffix) {
@@ -43,7 +43,9 @@ int LSBRegisterExtensionKitForExecutable(const char *enabled, const char *runtim
     if (!S_ISDIR(metadata.st_mode)) return ENOTDIR;
     if (!realpath(executablePath, executable)) return errno;
     // An inherited option cannot register a domain for launchd, xpcproxy, the service, or an unrelated executable.
-    const char *roles[] = {"System/Library/CoreServices/SpringBoard.app/SpringBoard", "Applications/PosterBoard.app/PosterBoard"};
+    // 23A343 chronod's widget-provider startup resolves extensionkitservice's Launch endpoint in its own PID domain.
+    const char *roles[] = {"System/Library/CoreServices/SpringBoard.app/SpringBoard", "Applications/PosterBoard.app/PosterBoard",
+                          "System/Library/PrivateFrameworks/ChronoCore.framework/Support/chronod"};
     bool recognized = false;
     int error;
     for (unsigned i = 0; i < sizeof(roles) / sizeof(*roles); ++i) {

@@ -18,7 +18,7 @@
 
 // Keep the initial service selection bounded independently of slots needed later for apps, helpers and adopted children.
 // Backboardd, cfprefsd and the terminal/settings helpers are direct launchd children alongside the selected services.
-enum { BaselineLaunchdChildren = 4, MaximumSelectedServices = 20 };
+enum { BaselineLaunchdChildren = 4, MaximumSelectedServices = 24 };
 _Static_assert(BaselineLaunchdChildren + MaximumSelectedServices < LSB_CHILD_STATUS_CAPACITY, "leave child-ledger slots for dynamic jobs");
 
 static LSBGuestDeviceType *configurationDeviceType;
@@ -301,6 +301,11 @@ static int addServiceJobs(NSString *root, const char *const labels[], NSMutableD
         if ([label isEqualToString:@"com.apple.PosterBoard"] &&
             [effectiveProgram isEqualToString:@"/Applications/PosterBoard.app/PosterBoard"]) {
             // Poster provider discovery needs its own PID-domain service, just like SpringBoard's ExtensionKit clients.
+            safeEnvironment[@"LSB_REGISTER_EXTENSIONKIT"] = @"1";
+        }
+        if ([label isEqualToString:@"com.apple.chronod"] &&
+            [effectiveProgram isEqualToString:@"/System/Library/PrivateFrameworks/ChronoCore.framework/Support/chronod"]) {
+            // Widget sessions resolve ExtensionKit's Launch endpoint in chronod's own PID domain.
             safeEnvironment[@"LSB_REGISTER_EXTENSIONKIT"] = @"1";
         }
         if (safeEnvironment.count) job[@"EnvironmentVariables"] = safeEnvironment;

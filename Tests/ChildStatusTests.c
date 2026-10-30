@@ -51,12 +51,16 @@ static void testCapacityAndDiscard(void) {
     LSBChildTicket tickets[LSB_CHILD_STATUS_CAPACITY], extra;
     for (unsigned i = 0; i < LSB_CHILD_STATUS_CAPACITY; ++i) tickets[i] = running((pid_t)i + 1, 1);
     assert(LSBChildStatusReserve(&ledger, &extra) == EAGAIN);
-    // Jobs beyond the old 16-child limit must retain full observation, wait and reuse behavior.
-    LSBChildTicket last = tickets[LSB_CHILD_STATUS_CAPACITY - 1];
+    // A live 65th child must be visible without consuming/reaping it, even while every ledger slot is occupied.
     LSBChildObservation observation;
-    pid_t pid;
-    int status;
-    assert(last.index >= 16);
+    pid_t pid = -1;
+    int status = -1;
+    assert(tickets[64].index == 64);
+    assert(!LSBChildStatusObserve(&ledger, 65, &observation) && observation.ticket.index == 64 && !observation.exited);
+    assert(LSBChildStatusTryWait(&ledger, 65, 0, &pid, &status) == EAGAIN && pid == -1 && status == -1);
+    // The last slot must retain full observation, exec replacement, wait and reuse behavior too.
+    LSBChildTicket last = tickets[LSB_CHILD_STATUS_CAPACITY - 1];
+    assert(last.index >= 64);
     assert(!LSBChildStatusPublishExec(&ledger, last, 9000));
     assert(!LSBChildStatusObserveIndex(&ledger, last.index, &observation));
     assert(observation.nativePID == 9000 && observation.execGeneration == 1);
@@ -87,12 +91,20 @@ static void testCapacityAndDiscard(void) {
 
 static void testLedgerABI(void) {
     LSBChildStatusInitialize(&ledger);
-    assert(sizeof(ledger) <= LSB_CHILD_STATUS_MAP_SIZE && ledger.capacity == 64);
-    // Both an old peer and a corrupt new header must fail before any slot is scanned.
-    ledger.version = 3;
-    ledger.capacity = 16;
+    assert(sizeof(ledger) == 3872 && sizeof(ledger) <= LSB_CHILD_STATUS_MAP_SIZE && ledger.capacity == 120);
+    // Both former layouts and either mismatched version/capacity must fail before any slot is scanned.
+    for (unsigned version = 3; version <= 4; ++version) {
+        ledger.version = version;
+        ledger.capacity = version == 3 ? 16 : 64;
+        assert(LSBChildStatusValidate(&ledger) == EPROTO);
+        LSBChildTicket ticket = {.index = UINT32_MAX, .generation = UINT64_MAX};
+        assert(LSBChildStatusReserve(&ledger, &ticket) == EINVAL);
+        assert(ticket.index == UINT32_MAX && ticket.generation == UINT64_MAX);
+    }
+    ledger.capacity = LSB_CHILD_STATUS_CAPACITY;
     assert(LSBChildStatusValidate(&ledger) == EPROTO);
     ledger.version = LSB_CHILD_STATUS_VERSION;
+    ledger.capacity = 64;
     assert(LSBChildStatusValidate(&ledger) == EPROTO);
     ledger.capacity = LSB_CHILD_STATUS_CAPACITY;
     assert(!LSBChildStatusValidate(&ledger));
@@ -481,6 +493,6 @@ int main(void) {
     testObserverBounds();
     testParentAndImport();
     testSharedAcrossProcesses();
-    puts("ChildStatus: stable guest/native PID, exec observations, pinned/reaped EXIT, observer bounds, adoption import, discard races, concurrent reuse and shared mapping passed");
+    puts("ChildStatus: 120-child capacity, ABI rejection, exec observations, pinned/reaped EXIT, adoption, discard races, concurrent reuse and shared mapping passed");
     return 0;
 }

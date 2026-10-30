@@ -469,8 +469,8 @@ static NSDictionary *snapshotDirectory(NSString *directory) {
 }
 
 static void testServiceCapacity(LSBReceivedMessage *message, NSString *root, NSString *dataPath, NSString *configPath) {
-    enum { capacity = 20 };
-    assert(capacity + 3 < LSB_CHILD_STATUS_CAPACITY);
+    enum { capacity = 24 };
+    assert(capacity + 4 < LSB_CHILD_STATUS_CAPACITY);
     NSString *stockDirectory = [root stringByAppendingPathComponent:@"System/Library/LaunchDaemons"];
     char names[capacity + 1][64];
     const char *selected[capacity + 2] = {0};
@@ -573,16 +573,15 @@ static void testIconServicesGraphics(LSBReceivedMessage *message, NSString *root
     }
 }
 
-static void testPosterBoardDiscovery(LSBReceivedMessage *message, NSString *root, NSString *configPath) {
-    NSString *program = @"/Applications/PosterBoard.app/PosterBoard";
+static void testExtensionKitDiscovery(LSBReceivedMessage *message, NSString *root, NSString *configPath, NSString *role, NSString *program) {
     NSArray<NSDictionary *> *cases = @[
-        @{@"Label": @"com.apple.PosterBoard", @"ProgramArguments": @[program], @"expected": @YES},
-        @{@"Label": @"com.apple.PosterBoard", @"Program": program, @"expected": @YES},
-        @{@"Label": @"com.apple.PosterBoard", @"Program": program, @"ProgramArguments": @[@"different-argv0"], @"expected": @YES},
-        @{@"Label": @"com.apple.PosterBoard", @"Program": @"/bin/df", @"ProgramArguments": @[program], @"expected": @NO},
-        @{@"Label": @"com.apple.PosterBoard", @"ProgramArguments": @[[program stringByAppendingString:@"Other"]], @"expected": @NO},
-        @{@"Label": @"com.apple.posterboard", @"ProgramArguments": @[program], @"expected": @NO},
-        @{@"Label": @"com.kdt.other-poster", @"ProgramArguments": @[program], @"expected": @NO}
+        @{@"Label": role, @"ProgramArguments": @[program], @"expected": @YES},
+        @{@"Label": role, @"Program": program, @"expected": @YES},
+        @{@"Label": role, @"Program": program, @"ProgramArguments": @[@"different-argv0"], @"expected": @YES},
+        @{@"Label": role, @"Program": @"/bin/df", @"ProgramArguments": @[program], @"expected": @NO},
+        @{@"Label": role, @"ProgramArguments": @[[program stringByAppendingString:@"Other"]], @"expected": @NO},
+        @{@"Label": [role stringByAppendingString:@"Other"], @"ProgramArguments": @[program], @"expected": @NO},
+        @{@"Label": @"com.kdt.other-extension-host", @"ProgramArguments": @[program], @"expected": @NO}
     ];
     for (NSDictionary *test in cases) {
         NSString *label = test[@"Label"], *filename = [label stringByAppendingString:@".plist"];
@@ -791,7 +790,9 @@ static void testServiceJobs(LSBReceivedMessage *message, NSString *root, NSStrin
     testServiceCapacity(message, root, dataPath, configPath);
     testSpringBoardResources(message, root, configPath);
     testIconServicesGraphics(message, root, configPath);
-    testPosterBoardDiscovery(message, root, configPath);
+    testExtensionKitDiscovery(message, root, configPath, @"com.apple.PosterBoard", @"/Applications/PosterBoard.app/PosterBoard");
+    testExtensionKitDiscovery(message, root, configPath, @"com.apple.chronod",
+        @"/System/Library/PrivateFrameworks/ChronoCore.framework/Support/chronod");
     testLaunchAngelJobs(message, root, dataPath, configPath);
 }
 

@@ -2713,7 +2713,8 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
         @"com.apple.fontservicesd", @"com.apple.containermanagerd.system", @"com.apple.distnoted.xpc.daemon", @"com.apple.configd_sim",
         @"com.apple.trustd", @"com.apple.sleepd", @"com.apple.systemstatusd", @"com.apple.SpringBoard",
         @"com.apple.iconservices.iconservicesagent", @"com.apple.TextInput.kbd",
-        @"com.apple.assistantd", @"com.apple.PosterBoard", @"com.apple.DragUI.druid"];
+        @"com.apple.assistantd", @"com.apple.PosterBoard", @"com.apple.DragUI.druid", @"com.apple.pluginkit.pkd", @"com.apple.chronod",
+        @"com.apple.navd", @"com.apple.geod"];
     // iOS 26.0 23A343 trustd uses the stock certificate store and one guest Mach service; no native trust service is exposed.
     NSDictionary *trustEnvironment = @{@"DEBUGSCOPE":
         @"-policy-node,policy-set,policy,alloc,trust,bind,profile,trace,dbconn,OTR,serverxpc,sqlite3,error_thee_well, ringSigning",
@@ -2733,10 +2734,42 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
         @"com.apple.siri.pommes_search_xpc_service", @"com.apple.siri.tether", @"com.apple.siri.vocabularyupdates"];
     NSMutableDictionary *assistantServices = [NSMutableDictionary dictionary];
     for (NSString *name in assistantServiceNames) assistantServices[name] = @YES;
+    NSDictionary *chronoServices = @{@"com.apple.chrono.widgetcenterconnection": @YES, @"com.apple.chrono.controlcenter": @YES,
+        @"com.apple.chronoservices": @YES, @"com.apple.aps.chrono.PushNotifications": @YES,
+        @"com.apple.aps.chrono.PushNotifications.dev": @YES, @"com.apple.chronod.replicator": @YES};
+    // iOS 26.0 23A343 Maps widget dependencies remain stock guest services, without a native location-service bridge.
+    NSDictionary *navigationServices = @{@"com.apple.maps.virtualgarage.server": @YES, @"com.apple.navd": @YES,
+        @"com.apple.navd.commuteroute": @YES, @"com.apple.navd.commutewindow": @YES, @"com.apple.navd.recentLocationsService": @YES,
+        @"com.apple.navd.routegenius": @YES, @"com.apple.navigationListener": @YES, @"com.apple.navigationServer": @YES,
+        @"com.apple.navigationService": @YES};
+    NSDictionary *geoServices = @{@"com.apple.geod": @YES, @"com.apple.geod.cachedelete": @YES,
+        @"com.apple.private.alloy.geoservices-idswake": @YES};
     for (NSString *label in selected) {
         NSString *jobDirectory = daemons;
         NSString *program = [label isEqual:@"com.apple.SpringBoard"] ? @"/System/Library/CoreServices/SpringBoard.app/SpringBoard" : @"/bin/df";
         NSDictionary *job = @{@"Label": label, @"ProgramArguments": @[program]};
+        if ([label isEqual:@"com.apple.pluginkit.pkd"]) job = @{@"Label": label, @"Program": @"/usr/libexec/pkd",
+            @"ProgramArguments": @[@"/usr/libexec/pkd"], @"MachServices": @{@"com.apple.pluginkit.pkd": @YES},
+            @"POSIXSpawnType": @"Adaptive", @"EnableTransactions": @YES, @"EnablePressuredExit": @YES};
+        if ([label isEqual:@"com.apple.chronod"]) job = @{@"Label": label,
+            @"ProgramArguments": @[@"/System/Library/PrivateFrameworks/ChronoCore.framework/Support/chronod"], @"MachServices": chronoServices,
+            @"EnvironmentVariables": @{@"MallocStackLoggingDirectory": @"/private/var/tmp/com.apple.chrono"},
+            @"POSIXSpawnType": @"Interactive", @"KeepAlive": @{@"Crashed": @YES}, @"RunAtLoad": @NO, @"UserName": @"mobile",
+            @"EnablePressuredExit": @YES, @"LaunchEvents": @{@"com.apple.notifyd.matching": @{}}};
+        if ([label isEqual:@"com.apple.navd"]) job = @{@"Label": label,
+            @"ProgramArguments": @[@"/System/Library/PrivateFrameworks/MapsSupport.framework/navd"], @"MachServices": navigationServices,
+            @"POSIXSpawnType": @"Adaptive", @"UserName": @"mobile", @"EnablePressuredExit": @YES, @"RunAtLoad": @YES,
+            @"KeepAlive": @{@"PathState": @{@"/var/mobile/Library/Caches/GeoServices/Navd/working": @YES}},
+            @"LaunchEvents": @{@"com.apple.notifyd.matching": @{
+                @"com.apple.purplebuddy.setupdone": @{@"Notification": @"com.apple.purplebuddy.setupdone"},
+                @"com.apple.mobile.keybagd.first_unlock": @{@"Notification": @"com.apple.mobile.keybagd.first_unlock"},
+                @"com.apple.navd.backgroundCommute.startPredicting": @{@"Notification": @"com.apple.navd.backgroundCommute.startPredicting"}}}};
+        if ([label isEqual:@"com.apple.geod"]) job = @{@"Label": label,
+            @"ProgramArguments": @[@"/System/Library/PrivateFrameworks/GeoServices.framework/geod"], @"MachServices": geoServices,
+            @"POSIXSpawnType": @"Adaptive", @"UserName": @"mobile", @"EnablePressuredExit": @YES, @"StartInterval": @432000.0,
+            @"LaunchEvents": @{@"com.apple.bg.system.task": @{@"com.apple.geod.telemetry.daily": @{@"Priority": @"Maintenance",
+                @"RepeatingTask": @{@"Interval": @86400}, @"RequiresExternalPower": @YES,
+                @"RequiresNetworkConnectivity": @NO, @"RequiresUserInactivity": @YES}}}};
         if ([label isEqual:@"com.apple.TextInput.kbd"]) job = @{@"Label": label, @"ProgramArguments": @[@"/System/Library/TextInput/kbd"],
             @"MachServices": @{@"com.apple.TextInput": @YES, @"com.apple.TextInput.preferences": @YES},
             @"EnvironmentVariables": @{@"MallocNanoZone": @"0"}};
@@ -2808,6 +2841,42 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
         assert([assistant[@"MachServices"] isEqual:assistantServices] && [assistant[@"MachServices"][@"com.apple.assistant.dictation"] boolValue]);
         assert([assistant[@"RunAtLoad"] boolValue] && ![assistant[@"KeepAlive"] boolValue] && ![assistant[@"EnableTransactions"] boolValue]);
         assert(!assistant[@"UserName"] && !assistant[@"ProcessType"] && !assistant[@"KeepAlive "]);
+        for (NSString *label in @[@"com.apple.pluginkit.pkd", @"com.apple.chronod"]) {
+            NSDictionary *widget = [NSDictionary dictionaryWithContentsOfFile:
+                [jobDirectory stringByAppendingPathComponent:[label stringByAppendingString:@".plist"]]];
+            BOOL chrono = [label isEqual:@"com.apple.chronod"];
+            assert(([widget[@"MachServices"] isEqual:chrono ? chronoServices : @{@"com.apple.pluginkit.pkd": @YES}]));
+            if (chrono) assert(([widget[@"EnvironmentVariables"] isEqual:@{@"MallocStackLoggingDirectory": @"/private/var/tmp/com.apple.chrono",
+                @"LSB_REGISTER_EXTENSIONKIT": @"1"}]));
+            else assert(!widget[@"EnvironmentVariables"]);
+            for (NSString *key in @[@"RunAtLoad", @"KeepAlive", @"EnableTransactions"]) {
+                assert(CFGetTypeID((__bridge CFTypeRef)widget[key]) == CFBooleanGetTypeID());
+                assert([widget[key] boolValue] == [key isEqual:@"RunAtLoad"]);
+            }
+            for (NSString *key in @[@"POSIXSpawnType", @"UserName", @"EnablePressuredExit", @"LaunchEvents"]) assert(!widget[key]);
+        }
+        for (NSString *label in @[@"com.apple.navd", @"com.apple.geod"]) {
+            NSDictionary *maps = [NSDictionary dictionaryWithContentsOfFile:
+                [jobDirectory stringByAppendingPathComponent:[label stringByAppendingString:@".plist"]]];
+            BOOL navigation = [label isEqual:@"com.apple.navd"];
+            NSString *program = navigation ? @"/System/Library/PrivateFrameworks/MapsSupport.framework/navd" :
+                @"/System/Library/PrivateFrameworks/GeoServices.framework/geod";
+            assert(([maps[@"ProgramArguments"] isEqual:@[program]]));
+            assert([maps[@"MachServices"] isEqual:navigation ? navigationServices : geoServices]);
+            for (NSString *name in maps[@"MachServices"]) {
+                assert(CFGetTypeID((__bridge CFTypeRef)maps[@"MachServices"][name]) == CFBooleanGetTypeID());
+                assert([maps[@"MachServices"][name] boolValue]);
+            }
+            for (NSString *key in @[@"RunAtLoad", @"KeepAlive", @"EnableTransactions"]) {
+                assert(CFGetTypeID((__bridge CFTypeRef)maps[key]) == CFBooleanGetTypeID());
+                assert([maps[key] boolValue] == [key isEqual:@"RunAtLoad"]);
+            }
+            for (NSString *key in @[@"EnvironmentVariables", @"POSIXSpawnType", @"UserName", @"EnablePressuredExit", @"LaunchEvents", @"StartInterval"])
+                assert(!maps[key]);
+            assert([maps[@"WorkingDirectory"] isEqual:@"/private/var/mobile/"]);
+            assert(([maps[@"StandardOutPath"] isEqual:[NSString stringWithFormat:@"/private/var/mobile/Library/Logs/%@.log", label]]));
+            assert([maps[@"StandardErrorPath"] isEqual:maps[@"StandardOutPath"]]);
+        }
         NSDictionary *trust = [NSDictionary dictionaryWithContentsOfFile:[jobDirectory stringByAppendingPathComponent:@"com.apple.trustd.plist"]];
         assert(([trust[@"ProgramArguments"] isEqual:@[@"/usr/libexec/trustd"]]));
         assert(([trust[@"MachServices"] isEqual:@{@"com.apple.trustd": @YES}]));
@@ -2853,6 +2922,8 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
     NSString *customConfiguration = [NSString stringWithUTF8String:initial->plan.strings + initial->plan.argv[1]];
     NSString *customJobs = [NSDictionary dictionaryWithContentsOfFile:customConfiguration][@"Bootstrap"][@"Paths"][0];
     assert(![manager fileExistsAtPath:[customJobs stringByAppendingPathComponent:@"com.apple.trustd.plist"]]);
+    for (NSString *label in @[@"com.apple.navd", @"com.apple.geod"])
+        assert(![manager fileExistsAtPath:[customJobs stringByAppendingPathComponent:[label stringByAppendingString:@".plist"]]]);
     assert(!enqueueInitialJob(initial, LSB_EXECUTION_SIMULATOR));
     assert(jobs.lastObject.simulatorLaunchd && !jobs.lastObject.nativeConfigdSelected); // Guest environment cannot request a native bridge.
     resetBroker();
@@ -3915,27 +3986,29 @@ static RecordedReply *requestNativeChildPID(audit_token_t caller, pid_t target) 
     return reply;
 }
 
-static void testPeerIdentitySnapshotsAndAuthentication(void) {
+static void testPeerIdentitySnapshotsAndAuthentication(NSString *daemon) {
     resetBroker();
     char temporary[] = "/tmp/LSBBrokerPeerIdentity.XXXXXX", canonical[PATH_MAX];
     assert(mkdtemp(temporary) && realpath(temporary, canonical));
     NSString *directory = [NSString stringWithUTF8String:canonical];
     runtimeRoot = [directory stringByAppendingPathComponent:@"RuntimeRoot"];
     NSFileManager *manager = NSFileManager.defaultManager;
-    for (NSString *path in @[@"usr/libexec/runningboardd", @"System/Library/CoreServices/SpringBoard.app/SpringBoard", @"bin/df"]) {
+    for (NSString *path in @[daemon, @"System/Library/CoreServices/SpringBoard.app/SpringBoard", @"bin/df"]) {
         NSString *physical = [runtimeRoot stringByAppendingPathComponent:path];
         assert([manager createDirectoryAtPath:physical.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:NULL]);
         assert([[@"fixture" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:physical atomically:YES]);
     }
-    NSString *alias = [[NSString stringWithUTF8String:temporary] stringByAppendingString:@"/RuntimeRoot/usr/libexec/runningboardd"];
+    NSString *alias = [[[NSString stringWithUTF8String:temporary] stringByAppendingPathComponent:@"RuntimeRoot"] stringByAppendingPathComponent:daemon];
     LSBJob *caller = runIdentityJob(alias.fileSystemRepresentation, getpid() + 100, 1500, 0xa1);
     LSBJob *target = runIdentityJob("/System/Library/CoreServices/SpringBoard.app/SpringBoard", getpid() + 101, 1501, 0xb2);
-    assert(!strcmp(caller.peerIdentity.executablePath, "/usr/libexec/runningboardd"));
+    assert(!strcmp(caller.peerIdentity.executablePath, [[@"/" stringByAppendingString:daemon] UTF8String]));
     assert(!requestProcessIdentity(caller.audit, target.pid)->error);
     audit_token_t targetAudit = target.audit;
     assert(!memcmp(&identityReply.audit, &targetAudit, sizeof(targetAudit)));
     assert(identityReply.shortInfo[63] == 0xb2 && LSBPeerProcessIdentityPID(&identityReply) == (unsigned)target.pid);
     assert(!strcmp(identityReply.executablePath, "/System/Library/CoreServices/SpringBoard.app/SpringBoard"));
+    assert(requestProcessList(caller.audit)->error == EPERM);
+    assert(requestProcessTask(caller.audit, target.guestPID)->error == EPERM);
     assert(requestProcessIdentity(target.audit, caller.pid)->error == EACCES);
     for (unsigned word = 0; word < 8; ++word) {
         audit_token_t altered = caller.audit;
@@ -3965,7 +4038,7 @@ static void testPeerIdentitySnapshotsAndAuthentication(void) {
         caller.executionRole = LSB_EXECUTION_SIMULATOR;
     }
     LSBPeerProcessIdentity original = caller.peerIdentity, altered = original;
-    strcpy(altered.executablePath, "/Plugins/runningboardd");
+    strlcpy(altered.executablePath, [[@"/Plugins/" stringByAppendingString:daemon.lastPathComponent] UTF8String], sizeof(altered.executablePath));
     caller.peerIdentity = altered;
     assert(requestProcessIdentity(caller.audit, target.pid)->error == EACCES);
     caller.peerIdentity = original;
@@ -5480,7 +5553,8 @@ int main(void) {
         testGuestEntitlementsSnapshotsAndAuthentication();
         testGuestEntitlementsPathBoundaries();
         testPeerIdentityKernelValidation();
-        testPeerIdentitySnapshotsAndAuthentication();
+        testPeerIdentitySnapshotsAndAuthentication(@"usr/libexec/runningboardd");
+        testPeerIdentitySnapshotsAndAuthentication(@"usr/libexec/pkd");
         testProcessListEntitlementsAndAuthentication();
         testTaskCaptureStartupAndCleanup();
         testTaskEntitlementSnapshot();

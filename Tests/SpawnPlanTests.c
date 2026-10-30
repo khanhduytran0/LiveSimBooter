@@ -363,17 +363,22 @@ static void schedulerHints(void) {
     LSBAdditionalSpawnAttributes additional;
     posix_spawnattr_t attributes;
     assert(!posix_spawnattr_init(&attributes));
-    // The exact widget launch seen on iOS 26: CLOEXEC_DEFAULT, SETSIGDEF, SETSIGMASK, APP_DEFAULT, UI_FOCAL.
+    // Stock 23A343 app and WidgetKit launches preserve CLOEXEC_DEFAULT, SETSIGDEF and SETSIGMASK.
     short flags = POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
     assert(flags == 0x400c && !posix_spawnattr_setflags(&attributes, flags));
     sigset_t mask = 0, defaults = 0;
     assert(!sigaddset(&mask, SIGUSR1) && !sigaddset(&defaults, SIGTERM));
     assert(!posix_spawnattr_setsigmask(&attributes, &mask) && !posix_spawnattr_setsigdefault(&attributes, &defaults));
     static const struct { uint32_t type, role; int error; } cases[] = {
-        {0, 0, 0}, {0x600, 0, 0}, {0x100, 0, 0}, {0x100, 1, 0}, {0x100, 2, 0},
+        {0, 0, 0}, {0x600, 0, 0}, {0x100, 0, 0}, {0x100, 1, 0}, {0x100, 2, 0}, {0x200, 0, 0}, {0x400, 0, 0},
         {0, 1, ENOTSUP}, {0, 2, ENOTSUP}, {0x600, 1, ENOTSUP}, {0x600, 2, ENOTSUP},
         {0x100, 3, ENOTSUP}, {0x100, 4, ENOTSUP}, {0x100, 5, ENOTSUP}, {0x100, 6, ENOTSUP}, {0x100, 7, ENOTSUP},
-        {0x101, 1, ENOTSUP}, {0x200, 0, ENOTSUP}, {0x300, 0, ENOTSUP}, {0x700, 0, ENOTSUP}, {UINT32_MAX, 0, ENOTSUP}
+        {0x200, 1, ENOTSUP}, {0x200, 2, ENOTSUP}, {0x200, 3, ENOTSUP}, {0x200, 4, ENOTSUP},
+        {0x200, 5, ENOTSUP}, {0x200, 6, ENOTSUP}, {0x200, 7, ENOTSUP}, {0x200, UINT32_MAX, ENOTSUP},
+        {0x400, 1, ENOTSUP}, {0x400, 2, ENOTSUP}, {0x400, 3, ENOTSUP}, {0x400, 4, ENOTSUP},
+        {0x400, 5, ENOTSUP}, {0x400, 6, ENOTSUP}, {0x400, 7, ENOTSUP}, {0x400, UINT32_MAX, ENOTSUP},
+        {0x101, 1, ENOTSUP}, {0x201, 0, ENOTSUP}, {0x300, 0, ENOTSUP}, {0x401, 0, ENOTSUP},
+        {0x500, 0, ENOTSUP}, {0x700, 0, ENOTSUP}, {UINT32_MAX, 0, ENOTSUP}
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
         memcpy((char *)attributes + 0x24, &cases[i].type, sizeof(cases[i].type));
@@ -391,6 +396,58 @@ static void schedulerHints(void) {
     assert(readAttributes(plan, &attributes, &additional) == ENOTSUP);
     assert(!posix_spawnattr_destroy(&attributes));
     free(plan);
+}
+
+static void extensionSchedulerTransportCase(uint32_t type, char *job) {
+    posix_spawnattr_t attributes;
+    assert(!posix_spawnattr_init(&attributes));
+    memcpy((char *)attributes + 0x24, &type, sizeof(type));
+    assert(!posix_spawnattr_setflags(&attributes, 0x400c));
+    unsigned char snapshot[0x100];
+    memcpy(snapshot, attributes, sizeof(snapshot));
+    pid_t session = 0, group = 0, afterSession = 0, afterGroup = 0;
+    int sessionError = LSBProcessSessionSnapshot(&session, &group);
+    pid_t nativeSession = getsid(0), nativeGroup = getpgrp();
+    char *argv[] = {"xpcproxy_sim", job, NULL}, *environment[] = {NULL};
+    const int results[] = {0, EACCES};
+    for (unsigned i = 0; i < sizeof(results) / sizeof(results[0]); ++i) {
+        transportFailure = results[i];
+        unsigned calls = transportCalls, replacements = execCalls;
+        pid_t pid = 123;
+        errno = EDOM;
+        assert(LSBPosixSpawn(&pid, "/usr/libexec/xpcproxy_sim", NULL, &attributes, argv, environment) == results[i]);
+        assert(errno == EDOM && pid == (results[i] ? 123 : 4242));
+        assert(transportCalls == calls + 1 && execCalls == replacements && capturedSpawnFlags == 0x400c);
+        assert(!memcmp(snapshot, attributes, sizeof(snapshot)));
+        assert(LSBProcessSessionSnapshot(&afterSession, &afterGroup) == sessionError);
+        assert(session == afterSession && group == afterGroup && getsid(0) == nativeSession && getpgrp() == nativeGroup);
+    }
+    transportFailure = 0;
+    // Recognizing extension scheduler hints must not accept suspension, session creation or visible roles, even on SETEXEC.
+    const short unsupported[] = {0x400c | POSIX_SPAWN_START_SUSPENDED, 0x400c | POSIX_SPAWN_SETSID};
+    for (unsigned i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); ++i) {
+        assert(!posix_spawnattr_setflags(&attributes, unsupported[i]));
+        unsigned calls = transportCalls;
+        pid_t pid = 123;
+        errno = EDOM;
+        assert(LSBPosixSpawn(&pid, "/usr/libexec/xpcproxy_sim", NULL, &attributes, argv, environment) == ENOTSUP);
+        assert(errno == EDOM && pid == 123 && transportCalls == calls);
+    }
+    assert(!posix_spawnattr_setflags(&attributes, 0x400c | POSIX_SPAWN_SETEXEC));
+    for (uint32_t role = 1; role <= 2; ++role) {
+        memcpy((char *)attributes + 0x58, &role, sizeof(role));
+        unsigned calls = transportCalls, replacements = execCalls;
+        pid_t pid = 123;
+        errno = EDOM;
+        assert(LSBPosixSpawn(&pid, "/usr/libexec/xpcproxy_sim", NULL, &attributes, argv, environment) == ENOTSUP);
+        assert(errno == EDOM && pid == 123 && transportCalls == calls && execCalls == replacements);
+    }
+    assert(!posix_spawnattr_destroy(&attributes));
+}
+
+static void extensionSchedulerTransport(void) {
+    extensionSchedulerTransportCase(0x200, "com.apple.mobilecal.CalendarWidgetExtension.test");
+    extensionSchedulerTransportCase(0x400, "com.apple.CalendarWidget.IntentsExtension");
 }
 
 static void allocatorHintAndInheritedAppRole(void) {
@@ -634,6 +691,7 @@ static void simulatedSessionRejectsProcessGroup(void) {
 int main(void) {
     if (getenv("LSB_TEST_SESSION_GROUP")) {
         simulatedSessionRejectsProcessGroup();
+        runChild(extensionSchedulerTransport, "widget and Intents extension hints preserve logical sessions");
         runChild(allocatorHintAndInheritedAppRole, "allocator hint and inherited app role preserve logical sessions");
         return 0;
     }
@@ -650,6 +708,7 @@ int main(void) {
     runChild(attributesAndFailure, "signal attributes and action errors");
     runChild(defaultProcessGroup, "default extension process group");
     runChild(schedulerHints, "recognized app scheduler hints preserve signal attributes and reject unsupported policies");
+    runChild(extensionSchedulerTransport, "extension hints reach spawn transport without changing sessions or broadening flags");
     runChild(allocatorHintAndInheritedAppRole, "allocator hint and inherited app role reach exec transport without changing sessions");
     strcpy(workingDirectory, "/tmp/LiveSimBooter-spawn-tests.XXXXXX");
     assert(mkdtemp(workingDirectory));

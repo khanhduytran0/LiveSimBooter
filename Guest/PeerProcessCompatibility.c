@@ -26,7 +26,9 @@ extern kern_return_t mach_vm_write(vm_map_t task, mach_vm_address_t address, vm_
 static const char runningBoardExecutable[] = "/usr/libexec/runningboardd";
 static const char launchdExecutable[] = "/sbin/launchd_sim";
 static const char servicesInstallPath[] = "/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices";
-static bool peerInspectionEnabled, launchdInspectionEnabled;
+static const char pluginDaemonExecutable[] = "/usr/libexec/pkd";
+static const char pluginDaemonInstallPath[] = "/System/Library/PrivateFrameworks/PlugInKitDaemon.framework/PlugInKitDaemon";
+static bool peerInspectionEnabled, launchdInspectionEnabled, pluginPathInspectionEnabled;
 static _Atomic(bool) workspaceShmPolicyReady;
 _Static_assert(ATOMIC_BOOL_LOCK_FREE == 2, "Early sandbox checks must not require runtime initialization");
 static char peerRuntimeRoot[PATH_MAX];
@@ -48,7 +50,7 @@ static bool canonicalPath(const char *path) {
 }
 
 static void configurePeerScope(const char *enabled, const char *launchd, const char *root, const char *executable) {
-    peerInspectionEnabled = launchdInspectionEnabled = false;
+    peerInspectionEnabled = launchdInspectionEnabled = pluginPathInspectionEnabled = false;
     peerRuntimeRoot[0] = '\0';
     servicesPhysicalPath[0] = '\0';
     if (!canonicalPath(root) || !canonicalPath(executable)) return;
@@ -58,7 +60,13 @@ static void configurePeerScope(const char *enabled, const char *launchd, const c
     if (launchd && !strcmp(launchd, "1") && !strcmp(executable + rootSize, launchdExecutable)) {
         installPath = launchdExecutable;
         launchdInspectionEnabled = true;
-    } else if (enabled && !strcmp(enabled, "1") && !strcmp(executable + rootSize, runningBoardExecutable)) installPath = servicesInstallPath;
+    } else if (enabled && !strcmp(enabled, "1")) {
+        if (!strcmp(executable + rootSize, runningBoardExecutable)) installPath = servicesInstallPath;
+        else if (!strcmp(executable + rootSize, pluginDaemonExecutable)) {
+            installPath = pluginDaemonInstallPath;
+            pluginPathInspectionEnabled = true;
+        }
+    }
     if (!installPath || rootSize + strlen(installPath) + 1 > sizeof(servicesPhysicalPath)) return;
     memcpy(servicesPhysicalPath, root, rootSize);
     strcpy(servicesPhysicalPath + rootSize, installPath);
@@ -74,7 +82,7 @@ static void forgetPeerCaller(const struct mach_header *image) {
 }
 
 static void rememberPeerCaller(const struct mach_header *image, intptr_t slide, const char *path) {
-    const char *installPath = launchdInspectionEnabled ? launchdExecutable : servicesInstallPath;
+    const char *installPath = launchdInspectionEnabled ? launchdExecutable : pluginPathInspectionEnabled ? pluginDaemonInstallPath : servicesInstallPath;
     if (!peerInspectionEnabled || !image || image->magic != MH_MAGIC_64 || !path ||
         (strcmp(path, installPath) && strcmp(path, servicesPhysicalPath))) return;
     const struct mach_header_64 *header = (const struct mach_header_64 *)image;
@@ -120,7 +128,9 @@ static bool peerCallerAllowed(uintptr_t caller) {
     return false;
 }
 
-bool LSBPeerProcessCallerEnabled(uintptr_t caller) { return !launchdInspectionEnabled && peerCallerAllowed(caller); }
+bool LSBPeerProcessCallerEnabled(uintptr_t caller) {
+    return !launchdInspectionEnabled && !pluginPathInspectionEnabled && peerCallerAllowed(caller);
+}
 
 static bool peerQueryAllowed(uintptr_t caller, int pid) {
     return peerCallerAllowed(caller) && pid > 0 && pid != LSBNativePID() && pid != LSBGuestPID();
@@ -228,8 +238,13 @@ __attribute__((noinline)) int LSBLaunchdProcessTerminate(pid_t pid, int *signalN
 static int peerPIDPath(uintptr_t caller, int pid, void *buffer, uint32_t size) {
     int inspectionResult = 0;
     if (LSBInspectionPIDPath(pid, buffer, size, &inspectionResult)) return inspectionResult;
-    if (!LSBPeerProcessCallerEnabled(caller)) return proc_pidpath(pid, buffer, size);
+    bool pluginPath = pluginPathInspectionEnabled && peerCallerAllowed(caller);
+    if (!pluginPath && !LSBPeerProcessCallerEnabled(caller)) return proc_pidpath(pid, buffer, size);
     int result = proc_pidpath(pid, buffer, size), saved = errno;
+    // 23A343 PlugInKitDaemon -[PKDXpcClient initWithConnection:server:] (+0x13358) requires its peer's executable path
+    // before creating the audit-backed SecTask. Native app sandboxing returns EPERM and the constructor cancels XPC.
+    // Only that daemon/image's denied path query uses this bridge; its other process, task-name and sandbox queries remain native.
+    if (pluginPath && (result || saved != EPERM)) { errno = saved; return result; }
     if ((!result && saved == EFAULT) || !buffer || !size || !peerQueryAllowed(caller, pid)) { errno = saved; return result; }
     LSBPeerProcessIdentity identity;
     if (!copyPeer(pid, false, &identity)) {

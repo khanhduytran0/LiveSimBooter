@@ -114,7 +114,7 @@ background audio. AudioQueue, AVAudioEngine and AVAudioPlayer tone probes have p
 
 The optional audio-output and haptic dylibs are separate from the always-loaded C spawn shim. Stage them before enabling either
 feature in the native host; a missing enabled helper prevents guest startup. These settings are broker-owned session decisions,
-not guest environment overrides. The current transport is **ABI 7** (bootstrap ABI 4): rebuild and deploy the native host,
+not guest environment overrides. The current transport is **ABI 7** (bootstrap ABI 4, child ledger ABI 5): rebuild and deploy the native host,
 LiveProcess extension, core spawn shim and optional helpers together. Do not mix an older installed host with the new overlay.
 Native check-in and readiness retain the single-threaded pipe path. The authenticated check-in additionally supplies a guest-only
 connection endpoint; the simulator creates its sim-to-host XPC connection after libSystem/TLS initialization. Native Metal helpers
@@ -532,7 +532,8 @@ arguments after the bundle identifier, now waits for **Start** on the IOSurface 
 remain available before startup and persist afterward. For an unattended development test, pass `--launchd-services` with no
 labels to start the same default selection automatically. Other explicit guest arguments, such as `/bin/df` or `--terminal`,
 also retain automatic startup. The default selection comes from
-`Host/Broker.m`: it includes SpringBoard, assistantd, configd_sim, trustd, systemstatusd, kbd, and the on-demand PosterBoard LaunchAngel.
+`Host/Broker.m`: it includes SpringBoard, assistantd, configd_sim, trustd, systemstatusd, kbd, pkd, chronod, navd, geod,
+and the on-demand PosterBoard LaunchAngel. See [widget startup and Maps retry CPU](widgets.md).
 The generator adds backboardd, cfprefsd, the launchd-owned Fish helper, and the display-settings worker. Explicit `--launchd-services LABEL...` **replaces**
 the additional default list. Keep the native app foregrounded for baseline tests.
 
@@ -550,7 +551,7 @@ For app icons, the staged registration manifest is `RuntimeRoot/usr/share/LiveSi
 `/usr/libexec/app-registration --manifest /usr/share/LiveSimBooter/applications.json` as a job **inside the existing simulator
 launchd**, after lsd is running. It logs individual registration results; copying bundles alone does not prove registration.
 Use the [guest launchctl control setup](guest-control.md) to add its worker job and bootstrap the registration job. The worker
-label is opt-in and consumes one selected-job slot; current defaults plus the worker fit the 20-label limit. Bootstrap one-off
+label is opt-in and consumes one selected-job slot; current defaults plus the worker fit the 24-label limit. Bootstrap one-off
 registration jobs afterward rather than adding every diagnostic job to the initial selection. In job plists, use Boolean
 `<true/>`/`<false/>` for launchd policies and guest paths for logs/working directories. The `launchctl bootstrap` plist argument
 and the SSH client's `--data-root` are physical paths. Do not mix these path domains.
@@ -563,7 +564,8 @@ xcrun devicectl device process launch --device "$LSB_DEVICE" --terminate-existin
   --launchd-services com.apple.notifyd com.apple.lsd com.apple.runningboardd com.apple.containermanagerd \
   com.apple.fontservicesd com.apple.containermanagerd.system com.apple.distnoted.xpc.daemon com.apple.configd_sim \
   com.apple.trustd com.apple.sleepd com.apple.systemstatusd com.apple.SpringBoard com.apple.iconservices.iconservicesagent \
-  com.apple.TextInput.kbd com.apple.assistantd com.apple.PosterBoard com.apple.DragUI.druid com.kdt.LiveSimBooter.launchctl-control
+  com.apple.TextInput.kbd com.apple.assistantd com.apple.PosterBoard com.apple.DragUI.druid \
+  com.apple.pluginkit.pkd com.apple.chronod com.apple.navd com.apple.geod com.kdt.LiveSimBooter.launchctl-control
 ```
 
 After the worker starts, configure your actual SSH endpoint and group path, then submit the one-off job:

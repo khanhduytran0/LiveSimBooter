@@ -348,9 +348,10 @@ status ledger described below. Direct audited signaling is sandbox denied on the
 delivery to launchd using the retained extension instance. Hosting an extension does not grant ordinary parent-process
 `waitpid` or signal permissions.
 
-Each guest receives a 4 KiB shared mapping with 64 child slots and a nonblocking wake-pipe reader. Ledger ABI version 4 uses
-2080 bytes of that mapping; the backing-file and mapping sizes remain unchanged. Version and capacity checks reject the old
-16-slot ABI, so the host, extension and guest shim must be deployed together. The host creates the backing
+Each guest receives a 4 KiB shared mapping with 120 child slots and a nonblocking wake-pipe reader. Ledger ABI version 5 uses
+3872 bytes of that mapping; the backing-file and mapping sizes remain unchanged. Widget discovery exhausted the former 64-child
+limit and prevented app launches. Version and capacity checks reject the old 16/64-slot ABIs, so the host, extension and guest shim
+must be deployed together. The outer spawn transport remains ABI 7. The host creates the backing
 file inside the App Group, unlinks it immediately, and transfers its descriptor at check-in. Native preparation maps it, closes
 the file descriptor, and preserves the reader outside file-action destinations and close sweeps. The mapping and FD survive
 cache detachment; no native object or callback is retained. The spawn shim excludes this private reader from ordinary FD inheritance.

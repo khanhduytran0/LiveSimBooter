@@ -2,6 +2,7 @@
 #define LSB_CHILD_STATUS_H
 
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
 
@@ -10,10 +11,10 @@
 #define LSB_CHILD_STATUS_ENV "LSB_CHILD_STATUS"
 #define LSB_CHILD_WAKE_FD_ENV "LSB_CHILD_WAKE_FD"
 #define LSB_CHILD_STATUS_MAGIC 0x4c534243u
-#define LSB_CHILD_STATUS_VERSION 4u
-// Leave room for application jobs, compiler services and adopted children after the initial launchd services start.
-// The 64-slot ledger still fits in the existing 4096-byte mapping; version 4 rejects peers using the old 16-slot layout.
-#define LSB_CHILD_STATUS_CAPACITY 64u
+#define LSB_CHILD_STATUS_VERSION 5u
+// Widget providers need headroom beyond 64 live launchd children. Keep the ledger within its existing 4096-byte mapping
+// and the derived broker job limit within its 256-record process list. Version 5 rejects the former 64-slot layout.
+#define LSB_CHILD_STATUS_CAPACITY 120u
 
 typedef struct {
     // High 44 bits: ticket generation; next 16: observer pins; low 4: phase. One CAS protects reuse against new pins.
@@ -30,6 +31,9 @@ typedef struct {
     _Atomic(int32_t) parentPID;
     LSBChildSlot slots[LSB_CHILD_STATUS_CAPACITY];
 } LSBChildStatus;
+
+_Static_assert(sizeof(LSBChildSlot) == 32 && offsetof(LSBChildStatus, slots) == 32, "Child status wire layout changed");
+_Static_assert(sizeof(LSBChildStatus) <= LSB_CHILD_STATUS_MAP_SIZE, "Child status mapping is too small");
 
 typedef struct { uint32_t index; uint64_t generation; } LSBChildTicket;
 typedef struct {

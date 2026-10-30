@@ -110,6 +110,24 @@ int main(void) {
     join(candidate, posterDirectory, "PosterBoardOther"); makeFile(candidate);
     expect("1", root, candidate, 0, false);
 
+    // Chronod's widget providers need Launch in its own PID domain; this remains an exact executable opt-in.
+    char chronoDirectory[PATH_MAX], chrono[PATH_MAX];
+    join(chronoDirectory, root, "System/Library/PrivateFrameworks/ChronoCore.framework/Support"); makeDirectory(chronoDirectory);
+    join(chrono, chronoDirectory, "chronod"); makeFile(chrono);
+    for (unsigned i = 0; i < sizeof(disabled) / sizeof(*disabled); ++i) expect(disabled[i], root, chrono, 0, false);
+    expect("1", root, chrono, 0, true);
+    assert(!strcmp(registeredPath, bundle));
+    join(candidate, alias, "System/Library/PrivateFrameworks/ChronoCore.framework/Support/../Support/chronod");
+    expect("1", alias, candidate, 0, true);
+    assert(!strcmp(registeredPath, bundle));
+    const char *chronoNearMatches[] = {"chronod-helper", "chrono", "chronod.other"};
+    for (unsigned i = 0; i < sizeof(chronoNearMatches) / sizeof(*chronoNearMatches); ++i) {
+        join(candidate, chronoDirectory, chronoNearMatches[i]); makeFile(candidate);
+        expect("1", root, candidate, 0, false);
+    }
+    join(candidate, directory, "chronod"); makeFile(candidate);
+    expect("1", root, candidate, 0, false);
+
     // Inherited options never register the service, proxy, launchd, unrelated, or merely prefix-matching executables.
     expect("1", root, service, 0, false);
     const char *otherRoles[] = {"launchd_sim", "xpcproxy_sim", "backboardd", "SpringBoard-other", "df"};
@@ -121,6 +139,9 @@ int main(void) {
     join(outside, canonical, "RuntimeRoot-other"); makeDirectory(outside);
     join(outsideFile, outside, "SpringBoard"); makeFile(outsideFile);
     expect("1", root, outsideFile, 0, false);
+    assert(!unlink(chrono) && !symlink(outsideFile, chrono));
+    expect("1", root, chrono, 0, false);
+    assert(!unlink(chrono)); makeFile(chrono);
     assert(!unlink(poster) && !symlink(outsideFile, poster));
     expect("1", root, poster, 0, false);
     assert(!unlink(poster)); makeFile(poster);
@@ -149,7 +170,7 @@ int main(void) {
     assert(!symlink(outsideFile, service)); expect("1", root, executable, ELOOP, false);
     assert(!unlink(service)); makeFile(service);
     expect("1", root, executable, 0, true);
-    assert(registrations == 5);
+    assert(registrations == 7);
     removeTree(canonical);
     puts("ExtensionKitRegistration: opt-in, canonical executable roles, contained bundle, regular files and exact registration passed");
     return 0;

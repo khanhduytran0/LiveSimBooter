@@ -47,7 +47,7 @@ static unsigned sandboxShmCalls;
 static bool sandboxShmAllowed;
 static const char *sandboxShmName, *sandboxShmOperation;
 static int queryError, pathResult = 9, pathErrno = EPERM;
-static pid_t replyPID, killedPID;
+static pid_t replyPID, queriedPID, killedPID;
 static unsigned kills, nativeTerminations;
 static int killError, killedSignal;
 static bool badAudit, badSnapshot, badPath;
@@ -71,6 +71,7 @@ bool LSBNotificationShmAllowsSandbox(const char *name, const char *operation) {
 
 int LSBTransportCopyProcessIdentity(pid_t pid, LSBPeerProcessIdentity *identity) {
     ++queries;
+    queriedPID = pid;
     memset(identity, 0, sizeof(*identity));
     errno = EIO; // Helpers must preserve the native call's errno rather than transport scratch state.
     if (queryError) return queryError;
@@ -442,6 +443,99 @@ static void testInvalidOutputs(void) {
     assert(!munmap(mapping, page * 2));
 }
 
+static void testPluginDaemonPaths(void) {
+    const char *root = "/private/Group/RuntimeRoot", *executable = "/private/Group/RuntimeRoot/usr/libexec/pkd";
+    const char *disabled[] = {NULL, "", "0", "true", "01"};
+    for (unsigned i = 0; i < sizeof(disabled) / sizeof(*disabled); ++i) {
+        configurePeerScope(disabled[i], NULL, root, executable);
+        assert(!peerInspectionEnabled && !pluginPathInspectionEnabled);
+    }
+    const char *wrongExecutables[] = {"/usr/libexec/pkd", "/private/Group/RuntimeRoot/usr/libexec/pkd-helper",
+        "/private/Group/RuntimeRoot-other/usr/libexec/pkd", "/private/Group/RuntimeRoot/usr/libexec/../libexec/pkd"};
+    for (unsigned i = 0; i < sizeof(wrongExecutables) / sizeof(*wrongExecutables); ++i) {
+        configurePeerScope("1", NULL, root, wrongExecutables[i]);
+        assert(!peerInspectionEnabled && !pluginPathInspectionEnabled);
+    }
+    configurePeerScope("1", NULL, root, executable);
+    assert(peerInspectionEnabled && pluginPathInspectionEnabled && !launchdInspectionEnabled);
+    assert(!strcmp(servicesPhysicalPath,
+        "/private/Group/RuntimeRoot/System/Library/PrivateFrameworks/PlugInKitDaemon.framework/PlugInKitDaemon"));
+    struct { struct mach_header_64 header; struct segment_command_64 text, data; } image = {0};
+    image.header = (struct mach_header_64){.magic = MH_MAGIC_64, .ncmds = 2, .sizeofcmds = sizeof(image.text) + sizeof(image.data)};
+    image.text = (struct segment_command_64){.cmd = LC_SEGMENT_64, .cmdsize = sizeof(image.text), .vmaddr = 0x7000,
+                                           .vmsize = 0x100, .initprot = VM_PROT_READ | VM_PROT_EXECUTE};
+    image.data = image.text;
+    image.data.vmaddr = 0x8000;
+    image.data.initprot = VM_PROT_READ | VM_PROT_WRITE;
+    const struct mach_header *header = (const struct mach_header *)&image;
+    setCaller(0, 0);
+    const char *wrongImages[] = {pluginDaemonExecutable, executable, servicesInstallPath, launchdExecutable,
+        "/System/Library/PrivateFrameworks/PlugInKit.framework/PlugInKit",
+        "/System/Library/PrivateFrameworks/PlugInKitDaemon.framework/PlugInKitDaemonExtra",
+        "/OtherRoot/System/Library/PrivateFrameworks/PlugInKitDaemon.framework/PlugInKitDaemon"};
+    for (unsigned i = 0; i < sizeof(wrongImages) / sizeof(*wrongImages); ++i) {
+        rememberPeerCaller(header, 0, wrongImages[i]);
+        assert(!peerCallerAllowed(0x7000));
+    }
+    const char *paths[] = {pluginDaemonInstallPath, servicesPhysicalPath};
+    for (unsigned i = 0; i < 2; ++i) {
+        rememberPeerCaller(header, 0, paths[i]);
+        assert(peerCallerAllowed(0x7000) && peerCallerAllowed(0x70ff));
+        assert(!peerCallerAllowed(0x6fff) && !peerCallerAllowed(0x7100) && !peerCallerAllowed(0x8000));
+        assert(!LSBPeerProcessCallerEnabled(0x7000)); // pkd never acquires the wider RunningBoard adapters.
+        forgetPeerCaller(header);
+        assert(!peerCallerAllowed(0x7000));
+    }
+    setCaller(0x7000, 0x7100);
+    char output[256];
+    unsigned before = queries;
+    assert(peerPIDPath(0x7000, 202, output, sizeof(output)) == 9 && !strcmp(output, "/host/app") && queries == before);
+    pathResult = 0;
+    const int nativeErrors[] = {ESRCH, EACCES, EFAULT, EINVAL, 0};
+    for (unsigned i = 0; i < sizeof(nativeErrors) / sizeof(*nativeErrors); ++i) {
+        pathErrno = nativeErrors[i];
+        assert(!peerPIDPath(0x7000, 202, output, sizeof(output)) && errno == pathErrno && queries == before);
+    }
+    pathErrno = EPERM;
+    const int excludedPIDs[] = {-1, 0, 99, 101};
+    for (unsigned i = 0; i < sizeof(excludedPIDs) / sizeof(*excludedPIDs); ++i)
+        assert(!peerPIDPath(0x7000, excludedPIDs[i], output, sizeof(output)) && errno == EPERM && queries == before);
+    assert(!peerPIDPath(0x6fff, 202, output, sizeof(output)) && queries == before);
+    assert(!peerPIDPath(0x7100, 202, output, sizeof(output)) && queries == before);
+    assert(!peerPIDPath(0x7000, 202, NULL, sizeof(output)) && queries == before);
+    assert(!peerPIDPath(0x7000, 202, output, 0) && queries == before);
+    assert(peerPIDPath(0x7000, 202, output, sizeof(output)) == (int)strlen(physicalGuestPath));
+    assert(!strcmp(output, physicalGuestPath) && errno == EPERM && queriedPID == 202 && sendReferences() == 1);
+    for (unsigned i = 0; i < 6; ++i) {
+        queryError = i == 0 ? ESRCH : i == 1 ? EACCES : 0;
+        badAudit = i == 2; badSnapshot = i == 3; badPath = i == 4; replyPID = i == 5 ? 303 : 0;
+        memset(output, 0xcc, sizeof(output));
+        assert(!peerPIDPath(0x7000, 202, output, sizeof(output)) && errno == EPERM);
+        assert((unsigned char)output[0] == 0xcc && sendReferences() == 1);
+    }
+    queryError = 0; badAudit = badSnapshot = badPath = false; replyPID = 0;
+    memset(output, 0xcc, sizeof(output));
+    assert(!peerPIDPath(0x7000, 202, output, (uint32_t)strlen(physicalGuestPath)) && errno == ENOSPC);
+    assert((unsigned char)output[0] == 0xcc && sendReferences() == 1);
+    assert(!peerPIDPath(0x7000, 202, (void *)(uintptr_t)1, sizeof(output)) && errno == EFAULT && sendReferences() == 1);
+    before = queries;
+    mach_port_t task = 0x1234;
+    kern_return_t taskResult = KERN_ABORTED;
+    errno = EDOM;
+    assert(!LSBPeerProcessPIDInfo(0x7000, 202, 13, 0, output, sizeof(output), 0, EPERM));
+    assert(LSBPeerProcessTaskName(0x7000, mach_task_self(), 202, &task, KERN_FAILURE) == KERN_FAILURE);
+    assert(!LSBLaunchdProcessTaskName(0x7000, mach_task_self(), 202, &task, &taskResult));
+    assert(task == 0x1234 && taskResult == KERN_ABORTED && errno == EDOM && queries == before);
+    policyErrnoReads = 0;
+    assert(!peerSandboxPolicy(101, "process-info-pidinfo", SANDBOX_CHECK_NO_REPORT, 0x7000, NULL));
+    assert(!peerSandboxPolicy(101, "mach-task-name", SANDBOX_CHECK_NO_REPORT, 0x7000, NULL));
+    assert(!policyErrnoReads && errno == EDOM);
+    pathResult = 9;
+    configurePeerScope("1", NULL, root, "/private/Group/RuntimeRoot/usr/libexec/runningboardd");
+    assert(!pluginPathInspectionEnabled);
+    setCaller(0x1000, 0x1100);
+}
+
 __attribute__((noinline)) static void testSandbox(void) {
     setCaller((uintptr_t)&testSandbox, (uintptr_t)&testSandbox + 4096);
     errno = EDOM;
@@ -544,7 +638,7 @@ static void testWorkspaceShmSandbox(void) {
 int main(void) {
     assert(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &namePort) == KERN_SUCCESS);
     assert(mach_port_insert_right(mach_task_self(), namePort, namePort, MACH_MSG_TYPE_MAKE_SEND) == KERN_SUCCESS);
-    testScope(); testShortInfo(); testTaskNames(); testPaths(); testInvalidOutputs(); testLaunchdIdentityAndTermination(); testSandbox();
+    testScope(); testShortInfo(); testTaskNames(); testPaths(); testInvalidOutputs(); testLaunchdIdentityAndTermination(); testPluginDaemonPaths(); testSandbox();
     testWorkspaceShmSandbox();
     assert(sendReferences() == 1);
     assert(mach_port_deallocate(mach_task_self(), namePort) == KERN_SUCCESS);

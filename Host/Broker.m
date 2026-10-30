@@ -1965,9 +1965,11 @@ static void handleMessage(LSBReceivedMessage *message) {
             audit_token_t senderAudit = sender.audit;
             LSBPeerProcessIdentity caller = sender.peerIdentity;
             BOOL launchd = launchdOwnsChildIdentity(sender);
+            // 23A343 PlugInKitDaemon rejects clients when sandboxed proc_pidpath cannot identify their executable.
+            BOOL peerService = !strcmp(caller.executablePath, "/usr/libexec/runningboardd") || !strcmp(caller.executablePath, "/usr/libexec/pkd");
             if (!sender || sender.phase != JobRunning || sender.retiredForExec || sender.finishing ||
                 sender.executionRole != LSB_EXECUTION_SIMULATOR || memcmp(&message->audit, &senderAudit, sizeof(senderAudit)) ||
-                sender.peerIdentityError || (!launchd && strcmp(caller.executablePath, "/usr/libexec/runningboardd"))) {
+                sender.peerIdentityError || (!launchd && !peerService)) {
                 logPeerIdentityRequest(pid, message->targetPID, 0, EACCES);
                 replyError(message, EACCES); return;
             }
@@ -2283,7 +2285,8 @@ static int initialPlan(LSBReceivedMessage *message, int argc, const char *argv[]
                                   "com.apple.fontservicesd", "com.apple.containermanagerd.system", "com.apple.distnoted.xpc.daemon",
                                   "com.apple.configd_sim", "com.apple.trustd", "com.apple.sleepd", "com.apple.systemstatusd", "com.apple.SpringBoard",
                                   "com.apple.iconservices.iconservicesagent", "com.apple.TextInput.kbd", "com.apple.assistantd",
-                                  "com.apple.PosterBoard", "com.apple.DragUI.druid", NULL};
+                                  "com.apple.PosterBoard", "com.apple.DragUI.druid", "com.apple.pluginkit.pkd", "com.apple.chronod",
+                                  "com.apple.navd", "com.apple.geod", NULL};
         enableIndigo = YES;
         const char *const *labels = argc > 2 ? argv + 2 : defaults;
         int error = LSBPrepareLaunchdServicesPlan(message, runtimeRoot.fileSystemRepresentation, envp, labels);

@@ -47,7 +47,7 @@ int main(int argc, char **argv) {
     assert(mprotect((void *)reused, LSB_STACK_RESERVATION_SIZE, PROT_NONE) == 0);
     assert(vm_deallocate(mach_task_self(), reused, LSB_STACK_RESERVATION_SIZE) == KERN_SUCCESS);
     assert((uintptr_t)argv[0] < top && (uintptr_t)argv[0] >= top - 0x800000);
-    int error = LSBSetProcessDisplayName("/guest/bin/LiveSimTest", argv[0], strlen(argv[0]) + 1);
+    int error = LSBSetProcessDisplayName("/guest/bin/LiveSimTest", 1234, argv[0], strlen(argv[0]) + 1);
     assert(!error || error == EPERM); // The macOS execution sandbox may deny only the optional long-name setter.
     int argumentsMIB[] = {CTL_KERN, KERN_PROCARGS2, getpid()};
     length = 0;
@@ -60,7 +60,7 @@ int main(int argc, char **argv) {
     size_t offset = sizeof(recordedCount);
     while (offset < length && arguments[offset]) ++offset; // Kernel executable path precedes the argv strings.
     while (offset < length && !arguments[offset]) ++offset;
-    assert(offset < length && !strcmp(arguments + offset, "LiveSimTest"));
+    assert(offset < length && !strcmp(arguments + offset, "LSB:1234 LiveSimTest"));
     assert(!strcmp(argv[1], "argument-canary") && !strcmp(getenv("LSB_STACK_TEST_ENV"), "environment-canary"));
     printf("Native stack probe: slide=0x%llx kernel-top=0x%llx argv0=%s\n", (unsigned long long)slide, (unsigned long long)top, arguments + offset);
     free(arguments);

@@ -27,6 +27,7 @@ Historical sections below describe earlier cache layouts and failures; use the s
 - [Runtime handoff](runtime-handoff.md): startup, local callbacks, thread storage, cache detachment, and debugger metadata.
 - [Multiprocess](multiprocess.md): App Group migration, native extension launches, synchronous XPC, FD replay, and current validation limits.
 - [Process inspection](process-inspection.md): authenticated guest process lists, original entitlement metadata, CocoaTop staging, and device-tested limits.
+- [Native process names](process-names.md): readable `ps` names with logical PIDs and preservation of the kernel's native argument stack.
 - [Simulator launchd](launchd.md): empty bootstrap, tank handoff without execve, workqueue startup, and device findings.
 - [Guest launchctl](guest-control.md): restart individual jobs and reboot the simulator session through the guest bootstrap namespace.
 - [Guest SSH with Fish](sshdog.md): sshdog staging, keys, authenticated device connection, and remaining shell/PTY work.

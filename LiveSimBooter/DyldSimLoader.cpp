@@ -282,6 +282,22 @@ struct GuardedMainStack {
 
 bool prepareMainStack(const CacheReservation &cache, uintptr_t &top, size_t &size, GuardedMainStack &stack, std::string &error) {
     if (!size || size >= top) return fail(error, "Invalid native main-stack bounds");
+    if (size == LSB_NATIVE_ARGUMENT_STACK_SIZE) {
+        size_t pageSize = static_cast<size_t>(getpagesize());
+        constexpr size_t usableSize = LSB_GUEST_MAIN_STACK_SIZE;
+        if (!pageSize || (pageSize & (pageSize - 1)) || (top & (pageSize - 1)) || pageSize > size - usableSize)
+            return fail(error, "Invalid preserved native argument-stack bounds");
+        uintptr_t guard = top - usableSize - pageSize;
+        if (rangesOverlap(guard, usableSize + pageSize, cache.address, cache.size))
+            return fail(error, "Kernel argument stack still overlaps simulator cache; refusing to overwrite native process arguments");
+        // LC_MAIN forced XNU to relocate the original stack and its recorded argv window. Keep that window in place.
+        // The unused lower reservation is demand-zero; a new guard bounds the simulator to the upper 8 MiB.
+        // Native pthread metadata remains unchanged so pre-handoff failures can still return through native code.
+        if (mprotect(reinterpret_cast<void *>(guard), pageSize, PROT_NONE))
+            return systemFailure(error, "guard preserved native argument stack");
+        size = usableSize;
+        return true;
+    }
     if (!rangesOverlap(top - size, size, cache.address, cache.size)) return true;
     size_t pageSize = static_cast<size_t>(getpagesize());
     size_t wanted = std::max(size, size_t(8 * 1024 * 1024));
@@ -834,6 +850,11 @@ int LSBEnterDyldSim(const LSBMappedImage *image, const mach_header *executable, 
             return 1;
         }
     }
+    bool argumentStack = stackSize == LSB_NATIVE_ARGUMENT_STACK_SIZE;
+    if (argumentStack && !mainStackContains(stackTop, LSB_GUEST_MAIN_STACK_SIZE, reinterpret_cast<uintptr_t>(__builtin_frame_address(0)))) {
+        fprintf(stderr, "Native preparation exceeded the preserved argument stack's usable bounds\n");
+        return 1;
+    }
     if (!prepareMainStack(cache, stackTop, stackSize, relocatedStack, stackError)) {
         fprintf(stderr, "Cannot prepare simulator main stack: %s\n", stackError.c_str());
         return 1;
@@ -842,7 +863,7 @@ int LSBEnterDyldSim(const LSBMappedImage *image, const mach_header *executable, 
         fprintf(stderr, "Relocated simulator main stack: top 0x%llx, size 0x%llx; cache reservation 0x%llx-0x%llx\n",
                 static_cast<unsigned long long>(stackTop), static_cast<unsigned long long>(stackSize),
                 static_cast<unsigned long long>(cache.address), static_cast<unsigned long long>(cache.address + cache.size));
-    else if (traceHandoff && nativeStackExclusion.size)
+    else if (traceHandoff && (nativeStackExclusion.size || argumentStack))
         fprintf(stderr, "Preserved native argument stack: top 0x%llx, size 0x%llx; outside simulator cache\n",
                 static_cast<unsigned long long>(stackTop), static_cast<unsigned long long>(stackSize));
     if (!LSBInitializeSimProcessInfo(image->header, dyldPath)) {

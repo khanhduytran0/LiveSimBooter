@@ -510,6 +510,35 @@ static void guardedMainStackTests() {
     check(!prepareMainStack({0x1000, 0x1000}, top, size, stack, error) && stackReservations == before, "allocation-size overflow fails before mmap");
 }
 
+static void preservedArgumentStackTests() {
+    constexpr size_t reserved = LSB_NATIVE_ARGUMENT_STACK_SIZE, usable = LSB_GUEST_MAIN_STACK_SIZE;
+    size_t pageSize = static_cast<size_t>(getpagesize());
+    void *mapping = ::mmap(nullptr, reserved, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    check(mapping != MAP_FAILED, "allocate demand-zero native argument-stack fixture");
+    uintptr_t top = reinterpret_cast<uintptr_t>(mapping) + reserved;
+    uintptr_t guard = top - usable - pageSize;
+    auto *arguments = reinterpret_cast<char *>(top - 4096);
+    strcpy(arguments, "LSB:1234 SpringBoard");
+    size_t size = reserved;
+    std::string error;
+    GuardedMainStack stack;
+    unsigned before = stackReservations;
+    check(!prepareMainStack({guard, pageSize}, top, size, stack, error) && size == reserved,
+          "overlapping preserved argv stack fails before shrinking its bounds or mapping a cache");
+    check(!strcmp(arguments, "LSB:1234 SpringBoard"), "collision does not alter native argv");
+    rejectStackProtection = true;
+    check(!prepareMainStack({}, top, size, stack, error) && size == reserved, "failed guard does not publish smaller stack bounds");
+    rejectStackProtection = false;
+    check(prepareMainStack({}, top, size, stack, error) && size == usable && stack.mapping == MAP_FAILED,
+          "preserved kernel stack exposes only its upper 8 MiB without another stack allocation");
+    check(top == reinterpret_cast<uintptr_t>(mapping) + reserved && stackReservations == before,
+          "native argument stack keeps its original kernel-recorded top");
+    check(!strcmp(arguments, "LSB:1234 SpringBoard"), "native argv survives the usable stack adjustment");
+    *reinterpret_cast<volatile unsigned char *>(top - usable) = 42;
+    expectGuard(reinterpret_cast<void *>(guard));
+    check(!::munmap(mapping, reserved), "release native argument-stack fixture");
+}
+
 static void startupStorageBoundsTest() {
     StartupStorage storage;
     memset(&storage, 0xa5, sizeof(storage));
@@ -1258,6 +1287,7 @@ int main() {
     lowImageReservationTests();
     runtimeImageMappingTests();
     guardedMainStackTests();
+    preservedArgumentStackTests();
     startupStorageBoundsTest();
     offMainEntryTest();
     oversizedEntryTest();

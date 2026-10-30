@@ -415,6 +415,11 @@ PY
 
 ## Build and package the native host
 
+LiveProcess defaults to `LSB_PRESERVE_NATIVE_ARGUMENTS=YES`. Its pre-signing phase adjusts `LC_MAIN.stacksize` so the kernel places native argv
+outside the guest cache, allowing native `ps` to show `LSB:<logical PID> <name>` beside the real PID. The guest uses a guarded 8 MiB stack; the larger
+initial demand-zero reservation consumes virtual address space. The old wide-segment experiment stays disabled. This approach has device
+evidence on the development iPhone 15; production-device validation is still pending. See [process names](process-names.md).
+
 ```sh
 sh Tests/run.sh > "$LSB_WORK/tests.log" 2>&1
 xcodebuild -project LiveSimBooter.xcodeproj -scheme LiveSimBooter -configuration Debug \

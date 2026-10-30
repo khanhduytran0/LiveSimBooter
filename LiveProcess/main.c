@@ -140,7 +140,8 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     if (error) { fprintf(stderr, "[LiveProcess] Check-in failed: %s\n", strerror(error)); return 1; }
     const char *displayName = launch.plan.strings + (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_SERVICE ?
         launch.plan.argv[0] : launch.plan.path);
-    int nameError = LSBSetProcessDisplayName(displayName, nativeArgv0, nativeArgv0Capacity);
+    pid_t displayPID = launch.executionRole == LSB_EXECUTION_SIMULATOR ? launch.guestPID : 0;
+    int nameError = LSBSetProcessDisplayName(displayName, displayPID, nativeArgv0, nativeArgv0Capacity);
     if (nameError) fprintf(stderr, "[LiveProcess] Could not set native process name: %s\n", strerror(nameError));
     error = prepareStatus();
     if (!error) error = LSBApplySpawnPlanPreservingFD(&launch.plan, received, launch.wakeFD);

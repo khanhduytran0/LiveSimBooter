@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep the native stack experiment disabled unless --enable is explicitly supplied; sign after this step."""
+"""Prepare native argument-stack placement before signing, without enlarging Mach-O segments."""
 
 import argparse
 import os
@@ -14,9 +14,12 @@ NAME = b"__LSB_STACK"
 SECTION = b"__reserve"
 PLACEHOLDER_SIZE = 0x4000
 STACK_SIZE = 0x800000
+ARGUMENT_STACK_SIZE = 0x90000000
 
 
-def prepare(data, enable=False):
+def prepare(data, enable=False, preserve_arguments=False):
+    if enable and preserve_arguments:
+        raise ValueError("the legacy wide segment and argument-stack placement are mutually exclusive")
     if len(data) < 32:
         raise ValueError("truncated Mach-O header")
     magic, cpu, _, kind, count, command_bytes, flags, _ = struct.unpack_from("<8I", data)
@@ -40,7 +43,7 @@ def prepare(data, enable=False):
         elif command == 0x80000028:
             if size != 24:
                 raise ValueError("invalid LC_MAIN")
-            entry_commands.append(struct.unpack_from("<QQ", data, cursor + 8))
+            entry_commands.append((cursor, *struct.unpack_from("<QQ", data, cursor + 8)))
         elif command == 5:
             raise ValueError("LC_UNIXTHREAD must not replace normal LC_MAIN startup")
         elif command == 2:
@@ -48,8 +51,8 @@ def prepare(data, enable=False):
                 raise ValueError("invalid symbol table")
             symbols = struct.unpack_from("<IIII", data, cursor + 8)
         cursor += size
-    if cursor != end or len(entry_commands) != 1 or entry_commands[0][1] != STACK_SIZE:
-        raise ValueError("expected exactly one LC_MAIN with an 8 MiB stack")
+    if cursor != end or len(entry_commands) != 1 or entry_commands[0][2] not in (STACK_SIZE, ARGUMENT_STACK_SIZE):
+        raise ValueError("expected exactly one LC_MAIN with a recognized native stack size")
     matching = [(offset, segment) for offset, segment in segments if segment[2].rstrip(b"\0") == NAME]
     if len(matching) != 1:
         raise ValueError("expected exactly one __LSB_STACK placeholder")
@@ -79,6 +82,11 @@ def prepare(data, enable=False):
         if span and (start + span > (1 << 64) - 1 or start < target_address + target_size and target_address < start + span):
             raise ValueError("stack exclusion would overlap a real executable segment")
     patched = bytearray(data)
+    # XNU's fixed initial stack overlaps PAGEZERO/image at this size, so create_unix_stack chooses another address and
+    # updates p->user_stack. Unlike the old wide segment, this does not move native dyld or its permanent LINKEDIT pages.
+    # Only virtual address space is reserved; the loader advertises the upper 8 MiB to the simulator with a new guard.
+    # https://github.com/apple-oss-distributions/xnu/blob/xnu-12377.1.9/bsd/kern/kern_exec.c (create_unix_stack)
+    struct.pack_into("<Q", patched, entry_commands[0][0] + 16, ARGUMENT_STACK_SIZE if preserve_arguments else STACK_SIZE)
     struct.pack_into("<QQ", patched, offset + 24, target_address, target_size)
     struct.pack_into("<QQ", patched, offset + 104, target_address, target_size)
     # The private no-dead-strip marker has no runtime references, but keep debugger symbol metadata truthful.
@@ -105,10 +113,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", type=Path)
     parser.add_argument("--enable", action="store_true", help="enable the experimental wide reservation (known iPhone cache-mapping failure)")
+    parser.add_argument("--preserve-arguments", action="store_true", help="place native argv outside the simulator cache using LC_MAIN stack size")
     args = parser.parse_args()
     original = args.executable.read_bytes()
     try:
-        patched = prepare(original, enable=args.enable)
+        patched = prepare(original, enable=args.enable, preserve_arguments=args.preserve_arguments)
     except ValueError as error:
         parser.error(str(error))
     if patched != original:
@@ -124,7 +133,9 @@ def main():
         finally:
             if temporary is not None:
                 temporary.unlink()
-    if args.enable:
+    if args.preserve_arguments:
+        print(f"Native argument stack: {ARGUMENT_STACK_SIZE:#x} demand-zero reservation, unchanged segment extents; sign after this step")
+    elif args.enable:
         print(f"EXPERIMENTAL native stack exclusion: {ADDRESS:#x}-{ADDRESS + SIZE:#x}; sign after this step")
     else:
         print("Native stack experiment disabled: linked 16 KiB placeholder only; sign after this step")

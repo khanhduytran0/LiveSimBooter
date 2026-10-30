@@ -63,6 +63,11 @@ physical App Group paths in those job fields can be translated a second time. Th
 physical path because native SSH accesses the App Group directly. See [guest sshdog](sshdog.md) for a complete example
 that preserves a daemon's working directory by bootstrapping its original plist directly.
 
+Submit as the app's filesystem user (normally `mobile`, UID 501). The client creates a mode-0700 `client.lock` directory;
+submitting as `root` can leave a root-owned lock that the native app cannot inspect when preserving an interrupted reboot
+request. The 2026-10-30 transport test hit this permission error after all guests had exited. Preserve that request's evidence
+before repairing its ownership or moving it aside; do not repeat an unknown command merely to clear the lock.
+
 The initial device trial with the temporary worker completed `print system`, `list`, and `bootstrap`/`bootout user/501`
 with exit 0. The promoted worker subsequently completed `list`, bootstrap of both the original sshdog and application-launch
 plists, and bootout of the application-launch probe with exit 0, without restarting the host or simulator launchd.

@@ -114,8 +114,11 @@ background audio. AudioQueue, AVAudioEngine and AVAudioPlayer tone probes have p
 
 The optional audio-output and haptic dylibs are separate from the always-loaded C spawn shim. Stage them before enabling either
 feature in the native host; a missing enabled helper prevents guest startup. These settings are broker-owned session decisions,
-not guest environment overrides. The current transport is **ABI 6** (bootstrap ABI 3): rebuild and deploy the native host,
+not guest environment overrides. The current transport is **ABI 7** (bootstrap ABI 4): rebuild and deploy the native host,
 LiveProcess extension, core spawn shim and optional helpers together. Do not mix an older installed host with the new overlay.
+Native check-in and readiness retain the single-threaded pipe path. The authenticated check-in additionally supplies a guest-only
+connection endpoint; the simulator creates its sim-to-host XPC connection after libSystem/TLS initialization. Native Metal helpers
+do not receive that endpoint. See [transport ownership and startup ordering](multiprocess.md#native-startup-pipes-and-guest-connections).
 
 ## Build and inspect the cache
 

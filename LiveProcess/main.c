@@ -25,6 +25,8 @@ static LSBChildStatus *childStatus;
 
 static void closeStatus(void) {
     LSBSpawnPortsDispose(&launch.ports);
+    if (MACH_PORT_VALID(launch.guestBrokerPort)) mach_port_deallocate(mach_task_self(), launch.guestBrokerPort);
+    launch.guestBrokerPort = MACH_PORT_NULL;
     if (MACH_PORT_VALID(launch.launchdTankPort)) mach_port_deallocate(mach_task_self(), launch.launchdTankPort);
     launch.launchdTankPort = MACH_PORT_NULL;
     if (launch.statusFD >= 0) close(launch.statusFD);
@@ -175,7 +177,7 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     if (!error && (length < 0 || (size_t)length >= sizeof(capabilitiesEnvironment))) error = ENAMETOOLONG;
     if (!error && !LSBMapDyldSimForRuntime(dyldPath, launch.runtimeRoot, &loader, detail, sizeof(detail))) error = ENOEXEC;
     if (!error && !LSBMapSimExecutableForRuntime(executablePath, launch.runtimeRoot, &executable, detail, sizeof(detail))) error = ENOEXEC;
-    // Keep only a kernel send right across detachment; simulator libxpc cannot look up services without simulator launchd.
+    // Hold the native pipe separately until READY; installing simulator bootstrap ports removes native service discovery.
     if (!error) error = LSBTransportCopyBrokerPort(&brokerPort);
     if (!error) {
         uintptr_t workqueueStart = (uintptr_t)dlsym(RTLD_DEFAULT, "start_wqthread");
@@ -189,7 +191,8 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
             snprintf(workqueueFeaturesEnvironment, sizeof(workqueueFeaturesEnvironment), "LSB_HOST_WORKQUEUE_FEATURES=0x%x", features());
         }
     }
-    snprintf(brokerEnvironment, sizeof(brokerEnvironment), "LSB_BROKER_PORT=%u", brokerPort);
+    // The authenticated check-in supplies a distinct guest connection endpoint; no native XPC object crosses the handoff.
+    snprintf(brokerEnvironment, sizeof(brokerEnvironment), "LSB_BROKER_PORT=%u", launch.guestBrokerPort);
     snprintf(statusEnvironment, sizeof(statusEnvironment), LSB_CHILD_STATUS_ENV "=0x%llx", (unsigned long long)(uintptr_t)childStatus);
     snprintf(wakeEnvironment, sizeof(wakeEnvironment), LSB_CHILD_WAKE_FD_ENV "=%d", launch.wakeFD);
     snprintf(guestPIDEnvironment, sizeof(guestPIDEnvironment), "LSB_GUEST_PID=%d", launch.guestPID);
@@ -212,15 +215,15 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     if (!error) error = LSBRequireSingleThread();
     int readyError = MACH_PORT_VALID(brokerPort) ? LSBTransportReadyOnPort(brokerPort, launch.requestID, error) :
         LSBTransportReady(launch.requestID, error);
+    if (MACH_PORT_VALID(brokerPort)) mach_port_deallocate(mach_task_self(), brokerPort);
+    brokerPort = MACH_PORT_NULL;
     if (error || readyError) {
-        if (MACH_PORT_VALID(brokerPort)) mach_port_deallocate(mach_task_self(), brokerPort);
         closeStatus();
         fprintf(stderr, "[LiveProcess] Preparation failed: %s %s\n", strerror(error ? error : readyError), detail);
         return 1;
     }
     // All native XPC objects have been released. No native dispatch queue has been created.
     if ((error = LSBRequireSingleThread())) {
-        mach_port_deallocate(mach_task_self(), brokerPort);
         closeStatus();
         fprintf(stderr, "[LiveProcess] Native worker appeared before handoff: %s\n", strerror(error)); return 1;
     }
@@ -269,7 +272,6 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     // Direct probes and children with a replacement environment also need the native policy before simulator initialization.
     int policyError = LSBAppendNativeRuntimePolicy(environment, &count, sizeof(environment) / sizeof(*environment), nativePolicy);
     if (policyError) {
-        mach_port_deallocate(mach_task_self(), brokerPort);
         closeStatus();
         fprintf(stderr, "[LiveProcess] Could not apply native runtime defaults: %s\n", strerror(policyError));
         return 1;
@@ -284,7 +286,6 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     int result = LSBEnterDyldSim(&loader, executable.header, executablePath, dyldPath, launch.runtimeRoot,
                                (int)launch.plan.argc, arguments, environment, apple);
     // Successful detachment never returns; only native preparation/handoff failures reach this cleanup.
-    mach_port_deallocate(mach_task_self(), brokerPort);
     closeStatus();
     return result;
 }

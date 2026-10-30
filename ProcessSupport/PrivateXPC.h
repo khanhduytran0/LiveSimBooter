@@ -15,6 +15,12 @@ extern xpc_object_t xpc_pipe_create_from_port(mach_port_t port, uint32_t flags);
 extern int xpc_pipe_routine(xpc_object_t pipe, xpc_object_t message, xpc_object_t *reply);
 extern int xpc_pipe_receive(mach_port_t port, xpc_object_t *message, uint64_t flags);
 extern int xpc_pipe_routine_reply(xpc_object_t reply);
+// Guest RPC uses Apple's simulator-to-host mode on a genuine connection, initialized only after guest libSystem is ready.
+extern void xpc_connection_enable_sim2host_4sim(xpc_connection_t connection);
+extern void xpc_connection_get_audit_token(xpc_connection_t connection, audit_token_t *token);
+// Consumes one send reference on success. Duplicate a borrowed right before wrapping it in an endpoint.
+extern xpc_endpoint_t xpc_endpoint_create_mach_port_4sim(mach_port_t port);
+extern mach_port_t xpc_endpoint_copy_listener_port_4sim(xpc_endpoint_t endpoint);
 // Returns an owned entitlement value for the current native process, or NULL when unavailable.
 extern xpc_object_t xpc_copy_entitlement_for_self(const char *name);
 extern void xpc_dictionary_get_audit_token(xpc_object_t dictionary, audit_token_t *token);

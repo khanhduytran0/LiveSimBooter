@@ -20,11 +20,13 @@ The native host retains its own UIKit and shared cache. Guest apps use the simul
 LiveProcess instances. LiveProcess's C entry has no Objective-C imports or extension context; a host-selected native Metal
 role may subsequently load its Objective-C backend. Private APIs are declared and called through typed C/Objective-C APIs.
 
-The broker discovers the extension through `NSExtension` and launches instances through PlugInKit. A synchronous XPC pipe
-delivers owned arguments, environment, file descriptors and supported process attributes. No `NSExtensionItem` carries the
-plan. The broker matches the native extension PID and full kernel audit identity before releasing it; guest-supplied PIDs
-cannot claim another job. The child retains a broker Mach send right, releases native XPC objects and checks its thread count
-before handoff. READY acknowledges preparation, not successful guest execution. See [multiprocess](multiprocess.md).
+The broker discovers the extension through `NSExtension` and launches instances through PlugInKit. A native synchronous XPC
+pipe delivers owned arguments, environment, file descriptors, supported process attributes and a separate guest broker endpoint.
+No `NSExtensionItem` carries the plan. The broker matches the native extension PID and full kernel audit identity before releasing
+it; guest-supplied PIDs cannot claim another job. After native READY, the child releases that pipe's right and all native XPC objects,
+checks its thread count and carries only the guest endpoint's Mach send right across handoff. Once guest libSystem/TLS is ready,
+the guest creates a persistent XPC connection with Apple's simulator-to-host mode; no native XPC worker crosses handoff.
+READY acknowledges preparation, not successful guest execution. See [multiprocess](multiprocess.md).
 
 ## Runtime storage and loading
 

@@ -12,10 +12,10 @@
 #include <sys/sysctl.h>
 
 #define LSB_BROKER_PORT_ENV "LSB_BROKER_PORT"
-#define LSB_TRANSPORT_VERSION 6
+#define LSB_TRANSPORT_VERSION 7
 
 // Bootstrap-only metadata is versioned independently from the outer transport envelope.
-#define LSB_BOOTSTRAP_VERSION 3
+#define LSB_BOOTSTRAP_VERSION 4
 enum LSBExecutionRole { LSB_EXECUTION_SIMULATOR = 0, LSB_EXECUTION_NATIVE_METAL_PROBE = 1, LSB_EXECUTION_NATIVE_METAL_SERVICE = 2 };
 
 enum LSBRequestKind {
@@ -32,6 +32,7 @@ typedef struct {
     int32_t error, pid, guestPID, parentPID;
     int statusFD, wakeFD;
     mach_port_t launchdTankPort;
+    mach_port_t guestBrokerPort; // Simulator-only owned endpoint reference for RPC after the native-cache handoff.
     LSBTaskPortCaptureOffer taskCapture; // Optional simulator-only offer; owns one send reference after successful CheckIn.
     LSBSpawnPorts ports;
     char runtimeRoot[LSB_PATH_BYTES];
@@ -42,6 +43,7 @@ typedef struct {
 typedef struct {
     pid_t guestPID, parentPID;
     mach_port_t launchdTankPort;
+    mach_port_t guestBrokerPort; // Borrowed simulator-to-host connection endpoint; forbidden for native service roles.
     const LSBSpawnPorts *ports;
     uint32_t executionRole; // Chosen by the native broker, never supplied by a guest spawn plan.
     uint32_t nativeProductionStatus;
@@ -50,6 +52,7 @@ typedef struct {
 
 typedef struct {
     void *object;
+    void *replyConnection; // Owned accepted connection for guest replies; NULL for native startup pipe messages.
     audit_token_t audit;
     uint32_t kind;
     uint64_t requestID;
@@ -70,10 +73,10 @@ typedef struct {
 #ifdef __cplusplus
 extern "C" {
 #endif
-// Synchronous transport; no callback queues. The caller owns all returned FDs and registered-port send references.
-// The private pipe call has no documented timeout; the broker must deadline pending launches and reply on failure.
-// Returns one owned send right. Native callers discover it through bootstrap; the guest copies the handed-off right.
-// A native child may keep one raw Mach send right across handoff; no XPC object or native function pointer is retained.
+// Native startup uses a synchronous pipe. Initialized guests use a persistent simulator-to-host connection and synchronous replies.
+// The caller owns all returned FDs and send references. Neither RPC path has a documented timeout; the broker must resolve pending launches.
+// Returns one owned send right: native callers discover the startup pipe; guests copy the separately handed-off connection endpoint.
+// No native XPC object or native function pointer is retained across handoff.
 int LSBTransportCopyBrokerPort(mach_port_t *port);
 int LSBTransportSpawn(const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], pid_t *pid);
 // Optional registered/bootstrap ports copied with COPY_SEND. Presence and null slots are preserved; the caller keeps its references.
@@ -93,7 +96,7 @@ int LSBTransportKill(pid_t targetPID, int signalNumber);
 // Carries no payload or rights. Returns an errno value; success means broker acceptance, not completion of the replacement boot.
 int LSBTransportRebootUserspace(void);
 // One fixed-format PCM ring per authenticated guest. Success owns a mapping; close first, then munmap using returned size.
-// No XPC object survives this synchronous request. There is no recording/input capability.
+// No request/reply object survives this synchronous request. There is no recording/input capability.
 __attribute__((visibility("default"))) int LSBTransportOpenAudioOutput(void **mapping, size_t *size);
 __attribute__((visibility("default"))) int LSBTransportCloseAudioOutput(void);
 // Actual Boolean proc_info-allow required. Current committed simulator jobs only; no rights or native helper processes.
@@ -129,6 +132,9 @@ int LSBTransportResolveNativeChildPID(pid_t nativePID, pid_t *guestPID);
 // Receive retains the request for a later reply; audit comes from the kernel, never the message payload.
 // On failure, sends an error reply when possible and disposes the malformed message, imported FDs and copied send references.
 int LSBTransportReceive(mach_port_t port, LSBReceivedMessage *message);
+// Borrows a dictionary and accepted connection, retaining both for a delayed reply. Full kernel sender/peer audit tokens must match.
+// Guest connections cannot issue native CHECKIN/READY. Failure replies when possible and disposes all copied capabilities.
+int LSBTransportReceiveConnection(void *request, void *connection, LSBReceivedMessage *message);
 // Replies and releases the request object. Imported FDs and registered ports remain owned by message until DisposeMessage is called.
 int LSBTransportReply(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
                       const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS]);
@@ -146,17 +152,19 @@ int LSBTransportReplyProcessIdentity(LSBReceivedMessage *message, int error, con
 // Bootstrap additionally copies a shared status-file FD and nonblocking wake-pipe read FD; caller retains ownership.
 // A successful CheckIn returns these in reply.statusFD/wakeFD. The caller must close them separately from the plan FDs.
 int LSBTransportReplyBootstrap(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
-                               const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD);
+                               const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, mach_port_t guestBrokerPort);
 // CheckIn returns independent owned send references in reply.ports; release them after applying registered and task-bootstrap ports.
 int LSBTransportReplyBootstrapWithPorts(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
-                                        const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, const LSBSpawnPorts *ports);
+                                        const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, const LSBSpawnPorts *ports,
+                                        mach_port_t guestBrokerPort);
 // guestPID must be positive; parentPID may be zero for a guest root process. Existing wrappers use pid/getpid() respectively.
 int LSBTransportReplyBootstrapWithMetadata(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
                                            const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD,
                                            const LSBBootstrapMetadata *metadata);
 // Optional launchd-only temporary bootstrap send right. CheckIn returns an owned send reference; the caller must release it.
 int LSBTransportReplyLaunchdBootstrap(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
-                                      const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, mach_port_t tankPort);
+                                      const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, mach_port_t tankPort,
+                                      mach_port_t guestBrokerPort);
 // Only pass a message initialized by Receive, and do not reuse it for another Receive before disposal.
 void LSBTransportDisposeMessage(LSBReceivedMessage *message);
 // Reject handoff if a native transport worker remains; called after all native IPC objects have been released.

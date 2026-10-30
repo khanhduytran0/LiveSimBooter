@@ -15,6 +15,24 @@
 #include "../Host/GuestEntitlementsConversion.h"
 #include "../ProcessSupport/TaskPortCapture.h"
 #import "../Host/DeviceConfiguration.h"
+#include "../ProcessSupport/PrivateXPC.h"
+@interface TestBrokerConnection : NSObject
+@property audit_token_t audit;
+@property (copy) xpc_handler_t handler;
+@property BOOL activated, canceled;
+@end
+@implementation TestBrokerConnection
+@end
+static void testConnectionAudit(xpc_connection_t, audit_token_t *);
+static void testConnectionTargetQueue(xpc_connection_t, dispatch_queue_t);
+static void testConnectionHandler(xpc_connection_t, xpc_handler_t);
+static void testConnectionActivate(xpc_connection_t);
+static void testConnectionCancel(xpc_connection_t);
+#define xpc_connection_get_audit_token testConnectionAudit
+#define xpc_connection_set_target_queue testConnectionTargetQueue
+#define xpc_connection_set_event_handler testConnectionHandler
+#define xpc_connection_activate testConnectionActivate
+#define xpc_connection_cancel testConnectionCancel
 static LSBGuestDeviceType *testConfiguredDeviceType(void);
 static void testSaveDeviceType(LSBGuestDeviceType *);
 static int testInstallGuestDeviceCapabilitiesWithNativeHaptics(NSString *, NSDictionary *, BOOL);
@@ -50,6 +68,11 @@ static int testTaskCaptureReceive(const LSBTaskPortCaptureOffer *, const audit_t
 #define handleMessage brokerHandleMessage
 #include "../Host/Broker.m"
 #undef handleMessage
+#undef xpc_connection_get_audit_token
+#undef xpc_connection_set_target_queue
+#undef xpc_connection_set_event_handler
+#undef xpc_connection_activate
+#undef xpc_connection_cancel
 #undef LSBTaskPortCaptureCreate
 #undef LSBTaskPortCaptureReceive
 #undef LSBPeerDebuggerQuery
@@ -67,6 +90,31 @@ static int testTaskCaptureReceive(const LSBTaskPortCaptureOffer *, const audit_t
 #undef LSBConfiguredGuestDeviceType
 #undef LSBSaveConfiguredGuestDeviceType
 #undef LSBInstallGuestDeviceCapabilitiesWithNativeHaptics
+
+static TestBrokerConnection *fakeConnection(xpc_connection_t connection) {
+    id object = (id)connection;
+    return [object isKindOfClass:TestBrokerConnection.class] ? object : nil;
+}
+static void testConnectionAudit(xpc_connection_t connection, audit_token_t *audit) {
+    TestBrokerConnection *fake = fakeConnection(connection);
+    if (fake) *audit = fake.audit; else xpc_connection_get_audit_token(connection, audit);
+}
+static void testConnectionTargetQueue(xpc_connection_t connection, dispatch_queue_t queue) {
+    if (fakeConnection(connection)) assert(queue == dispatch_get_main_queue());
+    else xpc_connection_set_target_queue(connection, queue);
+}
+static void testConnectionHandler(xpc_connection_t connection, xpc_handler_t handler) {
+    TestBrokerConnection *fake = fakeConnection(connection);
+    if (fake) fake.handler = handler; else xpc_connection_set_event_handler(connection, handler);
+}
+static void testConnectionActivate(xpc_connection_t connection) {
+    TestBrokerConnection *fake = fakeConnection(connection);
+    if (fake) fake.activated = YES; else xpc_connection_activate(connection);
+}
+static void testConnectionCancel(xpc_connection_t connection) {
+    TestBrokerConnection *fake = fakeConnection(connection);
+    if (fake) fake.canceled = YES; else xpc_connection_cancel(connection);
+}
 
 static uint32_t testNativeProductionStatus = LSB_NATIVE_DEVELOPMENT;
 uint32_t LSBHostNativeProductionStatus(void) { return testNativeProductionStatus; }
@@ -456,6 +504,18 @@ int LSBSignalExtension(uint64_t requestID, int signal) {
 }
 
 int LSBTransportReceive(mach_port_t port, LSBReceivedMessage *message) { (void)port; (void)message; return ENOSYS; }
+int LSBTransportReceiveConnection(void *request, void *connection, LSBReceivedMessage *message) {
+    TestBrokerConnection *fake = fakeConnection((__bridge xpc_connection_t)connection);
+    assert(fake && request && message);
+    memset(message, 0, sizeof(*message));
+    for (unsigned i = 0; i < LSB_MAX_FDS; ++i) message->fds[i] = -1;
+    TestMessageObject *object = malloc(sizeof(*object)); assert(object);
+    *object = (TestMessageObject){++objectSequence, -1};
+    message->object = object;
+    message->audit = fake.audit;
+    message->kind = (uint32_t)xpc_dictionary_get_uint64((__bridge xpc_object_t)request, "kind");
+    return 0;
+}
 int LSBTransportReply(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *root,
                       const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS]) {
     assert(message && message->object && replyCount < sizeof(replies) / sizeof(replies[0]));
@@ -521,21 +581,22 @@ int LSBTransportReplyProcessIdentity(LSBReceivedMessage *message, int error, con
     return LSBTransportReply(message, error, 0, 0, NULL, NULL, NULL);
 }
 int LSBTransportReplyBootstrap(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *root,
-                               const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD) {
+                               const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, mach_port_t guestPort) {
+    (void)guestPort;
     assert(statusFD >= 0 && wakeFD >= 0 && (fcntl(wakeFD, F_GETFL) & O_NONBLOCK));
     struct stat metadata;
     assert(!fstat(statusFD, &metadata) && metadata.st_size == LSB_CHILD_STATUS_MAPPING_SIZE);
     return LSBTransportReply(message, error, pid, requestID, root, plan, fds);
 }
 int LSBTransportReplyLaunchdBootstrap(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *root,
-                                      const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, mach_port_t tank) {
+                                      const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, mach_port_t tank, mach_port_t guestPort) {
     mach_port_type_t type = 0;
     assert(tank && mach_port_type(mach_task_self(), tank, &type) == KERN_SUCCESS && (type & MACH_PORT_TYPE_SEND));
     LSBJob *job = findJob(requestID);
     assert(job && job.simulatorLaunchd && job.launchdSource && job.launchdHandshake);
     assert(tank == LSBLaunchdHandshakeTankPort(job.launchdHandshake) && !job.launchdHandshake->completed);
     assert(!memcmp(&message->audit, &job.launchdHandshake->expectedAudit, sizeof(message->audit)));
-    int result = LSBTransportReplyBootstrap(message, error, pid, requestID, root, plan, fds, statusFD, wakeFD);
+    int result = LSBTransportReplyBootstrap(message, error, pid, requestID, root, plan, fds, statusFD, wakeFD, guestPort);
     replies[replyCount - 1].launchdTank = tank;
     if (launchdBootstrapSendError) replies[replyCount - 1].sendError = result = launchdBootstrapSendError;
     return result;
@@ -546,19 +607,21 @@ int LSBTransportReplyBootstrapWithMetadata(LSBReceivedMessage *message, int erro
     assert(metadata && metadata->guestPID > 0 && metadata->parentPID >= 0 && metadata->ports);
     assert(metadata->nativeProductionStatus == (metadata->executionRole == LSB_EXECUTION_SIMULATOR ? testNativeProductionStatus : LSB_NATIVE_PRODUCTION_UNKNOWN));
     if (metadata->executionRole == LSB_EXECUTION_SIMULATOR) {
+        assert(metadata->guestBrokerPort == guestBrokerPort && MACH_PORT_VALID(guestBrokerPort));
         LSBJob *job = findJob(requestID);
         assert(job.taskCaptureSource && metadata->taskCapture.port == job.taskCapture.port && MACH_PORT_VALID(metadata->taskCapture.port));
         LSBTaskPortCaptureOffer offer = job.taskCapture;
         assert(!memcmp(metadata->taskCapture.nonce, offer.nonce, sizeof(offer.nonce)));
     } else {
         const unsigned char zero[LSB_TASK_CAPTURE_NONCE_BYTES] = {0};
+        assert(!metadata->guestBrokerPort);
         assert(!MACH_PORT_VALID(metadata->taskCapture.port) && !memcmp(metadata->taskCapture.nonce, zero, sizeof(zero)));
     }
     if (checkInReplyHook) checkInReplyHook();
     int result;
     if (metadata->launchdTankPort)
-        result = LSBTransportReplyLaunchdBootstrap(message, error, pid, requestID, root, plan, fds, statusFD, wakeFD, metadata->launchdTankPort);
-    else result = LSBTransportReplyBootstrap(message, error, pid, requestID, root, plan, fds, statusFD, wakeFD);
+        result = LSBTransportReplyLaunchdBootstrap(message, error, pid, requestID, root, plan, fds, statusFD, wakeFD, metadata->launchdTankPort, metadata->guestBrokerPort);
+    else result = LSBTransportReplyBootstrap(message, error, pid, requestID, root, plan, fds, statusFD, wakeFD, metadata->guestBrokerPort);
     replies[replyCount - 1].guestPID = metadata->guestPID;
     replies[replyCount - 1].parentPID = metadata->parentPID;
     replies[replyCount - 1].executionRole = metadata->executionRole;
@@ -588,6 +651,10 @@ static void resetBroker(void) {
     simulatorPoweredOff = sessionStartFailed = sessionPowerOffRequested = sessionControlRequested = pendingDevicePreference = NO;
     sessionControlCompletion = nil;
     bootstrapCheckIns = 0;
+    if (!guestBrokerPort) {
+        assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &guestBrokerPort));
+        assert(!mach_port_insert_right(mach_task_self(), guestBrokerPort, guestBrokerPort, MACH_MSG_TYPE_MAKE_SEND));
+    }
     rebootArguments = rebootEnvironment = nil;
     sessionDeviceType = pendingDeviceType = nil;
     sessionHapticsEnabled = pendingHapticsEnabled = pendingHapticsPreference = sessionAudioEnabled = NO;
@@ -1015,6 +1082,64 @@ static LSBJob *auditJob(pid_t nativePID, pid_t guestPID, unsigned generation, BO
     job.simulatorLaunchd = launchd;
     [jobs addObject:job];
     return job;
+}
+
+static TestBrokerConnection *connectionForAudit(audit_token_t audit) {
+    TestBrokerConnection *connection = [TestBrokerConnection new];
+    connection.audit = audit;
+    acceptGuestBrokerConnection((xpc_connection_t)(id)connection);
+    assert(connection.activated && connection.handler);
+    return connection;
+}
+
+static void testGuestConnectionAuthentication(void) {
+    // The real endpoint transport tests own kernel audit/serialization checks. This fixture varies broker lifecycle atomically.
+    resetBroker();
+    LSBJob *job = auditJob(getpid() + 50, 42, 9, NO);
+    for (unsigned word = 0; word < 8; ++word) {
+        audit_token_t wrong = job.audit; ++wrong.val[word];
+        assert(connectionForAudit(wrong).canceled && !job.brokerConnection);
+    }
+    for (unsigned variant = 0; variant < 7; ++variant) {
+        job.phase = variant == 0 ? JobDispatched : JobRunning;
+        job.retiredForExec = variant == 1;
+        job.finishing = variant == 2;
+        job.executionRole = variant == 3 ? LSB_EXECUTION_NATIVE_METAL_SERVICE : LSB_EXECUTION_SIMULATOR;
+        job.peerIdentityError = variant == 4 ? EACCES : 0;
+        sessionDraining = variant == 5;
+        if (variant == 6) [jobs removeObject:job];
+        assert(connectionForAudit(job.audit).canceled && !job.brokerConnection);
+        if (variant == 6) [jobs addObject:job];
+    }
+    sessionDraining = NO;
+    job.peerIdentityError = 0;
+    TestBrokerConnection *first = connectionForAudit(job.audit);
+    assert(!first.canceled && job.brokerConnection == (xpc_connection_t)(id)first);
+    assert(connectionForAudit(job.audit).canceled && job.brokerConnection == (xpc_connection_t)(id)first);
+    xpc_object_t request = xpc_dictionary_create(NULL, NULL, 0);
+    xpc_dictionary_set_uint64(request, "kind", LSB_REQUEST_CLOSE_AUDIO_OUTPUT);
+    sessionAudioEnabled = YES;
+    unsigned before = replyCount;
+    first.handler(request);
+    assert(replyCount == before + 1 && !replies[before].error && !first.canceled);
+    // An old channel cannot continue after identity retirement, even before normal finishJob cancellation arrives.
+    job.retiredForExec = YES;
+    first.handler(request);
+    assert(replyCount == before + 2 && replies[before + 1].error == EACCES && first.canceled);
+    first.handler(XPC_ERROR_CONNECTION_INVALID);
+    assert(!job.brokerConnection);
+    job.retiredForExec = NO;
+    TestBrokerConnection *second = connectionForAudit(job.audit);
+    assert(!second.canceled && job.brokerConnection == (xpc_connection_t)(id)second);
+    first.handler(XPC_ERROR_CONNECTION_INVALID); // A stale disconnect cannot drop the current peer.
+    assert(job.brokerConnection == (xpc_connection_t)(id)second);
+    finishJob(job, 0);
+    assert(second.canceled && !job.brokerConnection);
+    before = replyCount;
+    second.handler(request);
+    assert(replyCount == before + 1 && replies[before].error == EACCES);
+    assert(connectionForAudit(job.audit).canceled);
+    resetBroker();
 }
 
 static RecordedReply *auditReply(audit_token_t caller, audit_token_t target) {
@@ -5312,6 +5437,7 @@ int main(void) {
         testGlobalJobCapacity();
         testExecDoesNotConsumeAnotherChildSlot();
         testFullLaunchdBatchFitsExecOverlap();
+        testGuestConnectionAuthentication();
         testAuditOwnerAuthenticationAndIdentity();
         testAuditIdentityHistoryNeverEvicts();
         testAuditResolutionSeesCommittedExecOnly();

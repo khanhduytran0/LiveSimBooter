@@ -10,7 +10,8 @@ static void *client(void *unused) {
     assert(LSBTransportReadyNativeServiceOnPort(broker, 9, EIO, endpoint) == EINVAL);
     assert(!LSBTransportReadyNativeServiceOnPort(broker, 9, 0, endpoint));
     for (unsigned variant = 0; variant < 5; ++variant) {
-        xpc_object_t request = createRequest(variant == 2 ? LSB_REQUEST_CHECKIN : LSB_REQUEST_READY, variant == 2 ? 0 : 9, variant == 3 ? EIO : 0);
+        xpc_object_t request = NULL;
+        assert(!createRequest(variant == 2 ? LSB_REQUEST_CHECKIN : LSB_REQUEST_READY, variant == 2 ? 0 : 9, variant == 3 ? EIO : 0, &request));
         assert(request);
         if (variant == 0) xpc_dictionary_set_string(request, "native-service-port", "not a port");
         else if (variant == 1) xpc_dictionary_set_uint64(request, "native-service-port", endpoint);

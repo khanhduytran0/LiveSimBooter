@@ -58,7 +58,8 @@ int main(void) {
             assert(!LSBTransportCloseAudioOutput()); assert(!munmap(mapping, size));
         } else assert(error == (variant == Denied ? EPERM : EPROTO) && !mapping && !size);
     }
-    xpc_object_t request = createRequest(LSB_REQUEST_OPEN_AUDIO_OUTPUT, 0, 0), reply = NULL;
+    xpc_object_t request = NULL, reply = NULL;
+    assert(!createRequest(LSB_REQUEST_OPEN_AUDIO_OUTPUT, 0, 0, &request));
     xpc_dictionary_set_mach_send(request, "unexpected-port", broker);
     assert(!callBroker(request, &reply));
     int error; pid_t pid; uint64_t requestID;

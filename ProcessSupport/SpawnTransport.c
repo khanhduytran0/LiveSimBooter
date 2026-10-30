@@ -7,8 +7,8 @@
 #if !defined(LSB_GUEST_RUNTIME) && !defined(LSB_TRANSPORT_TESTING)
 #include "StoreAppGroups.h"
 #endif
-#if defined(LSB_XPC_WIRE_COMPATIBILITY)
-#include "../Guest/XPCWireCompatibility.h"
+#if defined(LSB_GUEST_RUNTIME)
+#include "../Guest/BrokerConnection.h"
 #endif
 
 #include <errno.h>
@@ -59,7 +59,7 @@ static bool signedValue(xpc_object_t dictionary, const char *key, int64_t *value
 static int decodeExecutionRole(xpc_object_t dictionary, uint32_t *role, uint32_t *productionStatus) {
     *role = LSB_EXECUTION_SIMULATOR;
     *productionStatus = LSB_NATIVE_PRODUCTION_UNKNOWN;
-    // Version 3 adds a simulator-only task capture offer. Legacy replies cannot authorize the current native bootstrap policy.
+    // Version 4 supplies a separate simulator-to-host RPC endpoint. Legacy replies cannot authorize the current bootstrap policy.
     uint64_t version, value, status;
     if (!unsignedValue(dictionary, "bootstrap-version", &version) || version != LSB_BOOTSTRAP_VERSION ||
         !unsignedValue(dictionary, "execution-role", &value) || value > LSB_EXECUTION_NATIVE_METAL_SERVICE ||
@@ -69,10 +69,12 @@ static int decodeExecutionRole(xpc_object_t dictionary, uint32_t *role, uint32_t
     return 0;
 }
 
-static int validateRoleMetadata(uint32_t role, pid_t pid, pid_t guestPID, mach_port_t tank, const LSBSpawnPorts *ports) {
+static int validateRoleMetadata(uint32_t role, pid_t pid, pid_t guestPID, mach_port_t tank, const LSBSpawnPorts *ports, mach_port_t guestBroker) {
     if (role > LSB_EXECUTION_NATIVE_METAL_SERVICE) return EINVAL;
     if (role != LSB_EXECUTION_SIMULATOR &&
-        (pid != guestPID || tank != MACH_PORT_NULL || (ports && (ports->registeredPresent || ports->bootstrapPresent)))) return EINVAL;
+        (pid != guestPID || tank != MACH_PORT_NULL || guestBroker != MACH_PORT_NULL ||
+         (ports && (ports->registeredPresent || ports->bootstrapPresent)))) return EINVAL;
+    if (role == LSB_EXECUTION_SIMULATOR && !MACH_PORT_VALID(guestBroker)) return EINVAL;
     return 0;
 }
 
@@ -277,8 +279,9 @@ int LSBTransportCopyBrokerPort(mach_port_t *port) {
     if (!port) return EINVAL;
     *port = MACH_PORT_NULL;
 #if defined(LSB_GUEST_RUNTIME)
-    // Mach names remain valid across the in-process dyld handoff. Simulator libxpc deliberately disables its
-    // bootstrap lookup without a simulator launchd, so use the right obtained by our native entry instead.
+    if (!LSBBrokerConnectionIsReady()) return ENOTSUP;
+    // This is the connection endpoint supplied by native CHECKIN, not the native startup pipe.
+    // Its owned send reference survives the in-process dyld handoff without carrying a native XPC object.
     const char *text = getenv(LSB_BROKER_PORT_ENV);
     if (!text) return ENOENT;
     uint64_t value = 0;
@@ -320,35 +323,37 @@ int LSBTransportCopyBrokerPort(mach_port_t *port) {
 #endif
 }
 
-static xpc_object_t createRequest(uint32_t kind, uint64_t requestID, int error) {
+static int createRequest(uint32_t kind, uint64_t requestID, int error, xpc_object_t *result) {
+    *result = NULL;
+#if defined(LSB_GUEST_RUNTIME)
+    // Interposed entitlement queries can precede our constructor. Fail before allocation, environment reads or XPC initialization.
+    if (!LSBBrokerConnectionIsReady()) return ENOTSUP;
+#endif
     xpc_object_t request = xpc_dictionary_create(NULL, NULL, 0);
-    if (!request) return NULL;
+    if (!request) return ENOMEM;
     xpc_dictionary_set_uint64(request, "version", LSB_TRANSPORT_VERSION);
     xpc_dictionary_set_uint64(request, "kind", kind);
     xpc_dictionary_set_uint64(request, "request-id", requestID);
     xpc_dictionary_set_int64(request, "error", error);
-    return request;
+    *result = request;
+    return 0;
 }
 
-// This private API has no documented timeout. The native broker must finish or fail each accepted request.
-// Nothing from this call (including a pipe or reply object) may survive the native-cache handoff.
+// Neither synchronous API has a documented timeout. The native broker must finish or fail each accepted request.
 static int callBrokerOnPort(mach_port_t port, xpc_object_t request, xpc_object_t *reply) {
     *reply = NULL;
     if (!sendRight(port)) return EINVAL;
+#if defined(LSB_GUEST_RUNTIME)
+    int error = LSBBrokerConnectionCall(port, request, reply);
+    if (error) traceError("guest broker connection", error, port);
+#else
+    // Native startup must release every XPC object before handoff; only raw endpoint rights survive.
     xpc_object_t pipe = xpc_pipe_create_from_port(port, 0);
     if (!pipe) return traceError("xpc_pipe_create_from_port", ENOMEM, port);
-    int error;
-#if defined(LSB_XPC_WIRE_COMPATIBILITY)
-    error = LSBXPCWireBegin(port);
-    if (!error) {
-        error = xpc_pipe_routine(pipe, request, reply);
-        LSBXPCWireEnd();
-    }
-#else
-    error = xpc_pipe_routine(pipe, request, reply);
-#endif
+    int error = xpc_pipe_routine(pipe, request, reply);
     if (error) traceError("xpc_pipe_routine", error, port);
     xpc_release(pipe);
+#endif
     if (error && *reply) { xpc_release(*reply); *reply = NULL; }
     return error;
 }
@@ -378,8 +383,9 @@ static int decodeReplyHeader(xpc_object_t reply, int *remoteError, pid_t *pid, u
 static int processRequest(uint32_t kind, const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], const LSBSpawnPorts *ports, pid_t *pid) {
     if (!pid) return EINVAL;
     *pid = 0;
-    xpc_object_t request = createRequest(kind, 0, 0);
-    if (!request) return traceError("create process request", ENOMEM, kind);
+    xpc_object_t request = NULL;
+    int requestError = createRequest(kind, 0, 0, &request);
+    if (requestError) return requestError;
     int error = encodePlan(request, plan, fds);
     if (!error) error = encodePorts(request, ports);
     xpc_object_t reply = NULL;
@@ -417,8 +423,9 @@ int LSBTransportCheckIn(LSBBootstrapReply *result, int fds[LSB_MAX_FDS]) {
     memset(result, 0, sizeof(*result));
     result->statusFD = result->wakeFD = -1;
     initializeFDs(fds);
-    xpc_object_t request = createRequest(LSB_REQUEST_CHECKIN, 0, 0);
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL;
+    int requestError = createRequest(LSB_REQUEST_CHECKIN, 0, 0, &request);
+    if (requestError) return requestError;
     LSBPeerProcessIdentity self;
     int error = captureSelfIdentity(&self);
     if (!error) {
@@ -439,6 +446,16 @@ int LSBTransportCheckIn(LSBBootstrapReply *result, int fds[LSB_MAX_FDS]) {
         if (!error && (!result->requestID || pid <= 0)) error = EPROTO;
         if (!error) error = decodeExecutionRole(reply, &result->executionRole, &result->nativeProductionStatus);
         if (!error) error = decodeTaskCapture(reply, result->executionRole, &result->taskCapture);
+        if (!error) {
+            xpc_object_t endpoint = xpc_dictionary_get_value(reply, "guest-broker-port");
+            if (result->executionRole == LSB_EXECUTION_SIMULATOR) {
+                if (!endpoint || xpc_get_type(endpoint) != &_xpc_type_mach_send) error = EPROTO;
+                else {
+                    result->guestBrokerPort = xpc_dictionary_copy_mach_send(reply, "guest-broker-port");
+                    if (!sendRight(result->guestBrokerPort)) error = EPROTO;
+                }
+            } else if (endpoint) error = EPROTO;
+        }
         if (!error) {
             int64_t guestPID, parentPID;
             if (!signedValue(reply, "guest-pid", &guestPID) || guestPID <= 0 || guestPID > INT_MAX ||
@@ -467,7 +484,7 @@ int LSBTransportCheckIn(LSBBootstrapReply *result, int fds[LSB_MAX_FDS]) {
             }
         }
         if (!error && validateRoleMetadata(result->executionRole, result->pid, result->guestPID,
-                                           result->launchdTankPort, &result->ports)) error = EPROTO;
+                                           result->launchdTankPort, &result->ports, result->guestBrokerPort)) error = EPROTO;
     }
     if (reply) xpc_release(reply);
     if (error) {
@@ -478,6 +495,8 @@ int LSBTransportCheckIn(LSBBootstrapReply *result, int fds[LSB_MAX_FDS]) {
         result->statusFD = result->wakeFD = -1;
         if (MACH_PORT_VALID(result->launchdTankPort)) mach_port_deallocate(mach_task_self(), result->launchdTankPort);
         result->launchdTankPort = MACH_PORT_NULL;
+        if (MACH_PORT_VALID(result->guestBrokerPort)) mach_port_deallocate(mach_task_self(), result->guestBrokerPort);
+        result->guestBrokerPort = MACH_PORT_NULL;
         if (MACH_PORT_VALID(result->taskCapture.port)) mach_port_deallocate(mach_task_self(), result->taskCapture.port);
         memset(&result->taskCapture, 0, sizeof(result->taskCapture));
         LSBSpawnPortsDispose(&result->ports);
@@ -487,8 +506,9 @@ int LSBTransportCheckIn(LSBBootstrapReply *result, int fds[LSB_MAX_FDS]) {
 
 static int readyOnPort(mach_port_t broker, uint64_t requestID, int childError, mach_port_t servicePort) {
     if (!requestID || childError < 0 || (servicePort != MACH_PORT_NULL && (childError || !sendRight(servicePort)))) return EINVAL;
-    xpc_object_t request = createRequest(LSB_REQUEST_READY, requestID, childError);
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL;
+    int requestError = createRequest(LSB_REQUEST_READY, requestID, childError, &request);
+    if (requestError) return requestError;
     if (servicePort != MACH_PORT_NULL) xpc_dictionary_set_mach_send(request, "native-service-port", servicePort);
     xpc_object_t reply = NULL;
     int error = callBrokerOnPort(broker, request, &reply);
@@ -527,8 +547,9 @@ int LSBTransportReady(uint64_t requestID, int childError) {
 int LSBTransportKill(pid_t targetPID, int signalNumber) {
     if (signalNumber < 0 || signalNumber >= NSIG) return EINVAL;
     if (targetPID <= 0) return ENOTSUP;
-    xpc_object_t request = createRequest(LSB_REQUEST_KILL, 0, 0);
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL;
+    int requestError = createRequest(LSB_REQUEST_KILL, 0, 0, &request);
+    if (requestError) return requestError;
     xpc_dictionary_set_int64(request, "target-pid", targetPID);
     xpc_dictionary_set_int64(request, "signal", signalNumber);
     xpc_object_t reply = NULL;
@@ -547,8 +568,9 @@ int LSBTransportKill(pid_t targetPID, int signalNumber) {
 }
 
 int LSBTransportRebootUserspace(void) {
-    xpc_object_t request = createRequest(LSB_REQUEST_REBOOT_USERSPACE, 0, 0);
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL;
+    int requestError = createRequest(LSB_REQUEST_REBOOT_USERSPACE, 0, 0, &request);
+    if (requestError) return requestError;
     xpc_object_t reply = NULL;
     int error = callBroker(request, &reply);
     xpc_release(request);
@@ -568,8 +590,9 @@ int LSBTransportListProcesses(LSBProcessList **list, size_t *size) {
     if (list) *list = NULL;
     if (size) *size = 0;
     if (!list || !size) return EINVAL;
-    xpc_object_t request = createRequest(LSB_REQUEST_LIST_PROCESSES, 0, 0);
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL;
+    int requestError = createRequest(LSB_REQUEST_LIST_PROCESSES, 0, 0, &request);
+    if (requestError) return requestError;
     xpc_object_t reply = NULL;
     int error = callBroker(request, &reply);
     xpc_release(request);
@@ -600,8 +623,9 @@ int LSBTransportListProcesses(LSBProcessList **list, size_t *size) {
 int LSBTransportRegisterDebuggerPort(mach_port_t endpoint, audit_token_t *brokerAudit) {
     if (brokerAudit) memset(brokerAudit, 0, sizeof(*brokerAudit));
     if (!brokerAudit || !sendRight(endpoint)) return EINVAL;
-    xpc_object_t request = createRequest(LSB_REQUEST_REGISTER_DEBUGGER_PORT, 0, 0);
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL;
+    int requestError = createRequest(LSB_REQUEST_REGISTER_DEBUGGER_PORT, 0, 0, &request);
+    if (requestError) return requestError;
     xpc_dictionary_set_mach_send(request, "process-debugger-port", endpoint);
     xpc_object_t reply = NULL;
     int error = callBroker(request, &reply);
@@ -626,8 +650,9 @@ int LSBTransportRegisterDebuggerPort(mach_port_t endpoint, audit_token_t *broker
 
 int LSBTransportActivateDebuggerPort(const audit_token_t *brokerAudit) {
     if (!brokerAudit || !brokerAudit->val[5] || brokerAudit->val[5] > INT_MAX || !brokerAudit->val[7]) return EINVAL;
-    xpc_object_t request = createRequest(LSB_REQUEST_REGISTER_DEBUGGER_PORT, 0, 0);
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL;
+    int requestError = createRequest(LSB_REQUEST_REGISTER_DEBUGGER_PORT, 0, 0, &request);
+    if (requestError) return requestError;
     xpc_dictionary_set_bool(request, "activate-debugger-port", true);
     xpc_object_t reply = NULL;
     int error = callBroker(request, &reply);
@@ -652,8 +677,9 @@ int LSBTransportActivateDebuggerPort(const audit_token_t *brokerAudit) {
 int LSBTransportCopyDebuggerInfo(pid_t nativePID, struct kinfo_proc *info) {
     if (info) memset(info, 0, sizeof(*info));
     if (!info || nativePID <= 0) return EINVAL;
-    xpc_object_t request = createRequest(LSB_REQUEST_COPY_DEBUGGER_INFO, 0, 0);
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL;
+    int requestError = createRequest(LSB_REQUEST_COPY_DEBUGGER_INFO, 0, 0, &request);
+    if (requestError) return requestError;
     xpc_dictionary_set_int64(request, "target-pid", nativePID);
     xpc_object_t reply = NULL;
     int error = callBroker(request, &reply);
@@ -682,8 +708,9 @@ int LSBTransportOpenAudioOutput(void **mapping, size_t *size) {
     if (mapping) *mapping = NULL;
     if (size) *size = 0;
     if (!mapping || !size) return EINVAL;
-    xpc_object_t request = createRequest(LSB_REQUEST_OPEN_AUDIO_OUTPUT, 0, 0), reply = NULL;
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL, reply = NULL;
+    int requestError = createRequest(LSB_REQUEST_OPEN_AUDIO_OUTPUT, 0, 0, &request);
+    if (requestError) return requestError;
     int error = callBroker(request, &reply);
     xpc_release(request);
     void *region = NULL;
@@ -714,8 +741,9 @@ int LSBTransportOpenAudioOutput(void **mapping, size_t *size) {
 }
 
 int LSBTransportCloseAudioOutput(void) {
-    xpc_object_t request = createRequest(LSB_REQUEST_CLOSE_AUDIO_OUTPUT, 0, 0), reply = NULL;
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL, reply = NULL;
+    int requestError = createRequest(LSB_REQUEST_CLOSE_AUDIO_OUTPUT, 0, 0, &request);
+    if (requestError) return requestError;
     int error = callBroker(request, &reply);
     xpc_release(request);
     if (!error) {
@@ -733,8 +761,9 @@ int LSBTransportCloseAudioOutput(void) {
 int LSBTransportCopyProcessTask(pid_t guestPID, mach_port_t *task) {
     if (task) *task = MACH_PORT_NULL;
     if (!task || guestPID <= 0) return EINVAL;
-    xpc_object_t request = createRequest(LSB_REQUEST_COPY_PROCESS_TASK, 0, 0);
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL;
+    int requestError = createRequest(LSB_REQUEST_COPY_PROCESS_TASK, 0, 0, &request);
+    if (requestError) return requestError;
     xpc_dictionary_set_int64(request, "target-pid", guestPID);
     xpc_object_t reply = NULL;
     int error = callBroker(request, &reply);
@@ -767,8 +796,9 @@ int LSBTransportCopyProcessTask(pid_t guestPID, mach_port_t *task) {
 int LSBTransportResolveAuditPID(const audit_token_t *audit, pid_t *result) {
     if (result) *result = 0;
     if (!audit || !result || !audit->val[5] || audit->val[5] > INT_MAX) return EINVAL;
-    xpc_object_t request = createRequest(LSB_REQUEST_RESOLVE_AUDIT_PID, 0, 0);
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL;
+    int requestError = createRequest(LSB_REQUEST_RESOLVE_AUDIT_PID, 0, 0, &request);
+    if (requestError) return requestError;
     xpc_dictionary_set_data(request, "target-audit", audit, sizeof(*audit));
     xpc_object_t reply = NULL;
     int error = callBroker(request, &reply);
@@ -795,8 +825,9 @@ static int copyCodeSigningData(const audit_token_t *target, unsigned operation, 
     if (blob) *blob = NULL;
     if (size) *size = 0;
     if (!target || !blob || !size || !target->val[5] || target->val[5] > INT_MAX) return EINVAL;
-    xpc_object_t request = createRequest(LSB_REQUEST_COPY_ENTITLEMENTS, 0, 0);
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL;
+    int requestError = createRequest(LSB_REQUEST_COPY_ENTITLEMENTS, 0, 0, &request);
+    if (requestError) return requestError;
     xpc_dictionary_set_data(request, "target-audit", target, sizeof(*target));
     xpc_dictionary_set_uint64(request, "operation", operation);
     xpc_object_t reply = NULL;
@@ -848,8 +879,9 @@ int LSBTransportCopyCodeDirectoryHash(const audit_token_t *target, unsigned char
 static int copyProcessIdentity(pid_t targetPID, bool logicalPID, LSBPeerProcessIdentity *identity) {
     if (identity) memset(identity, 0, sizeof(*identity));
     if (!identity || targetPID <= 0) return EINVAL;
-    xpc_object_t request = createRequest(LSB_REQUEST_COPY_PROCESS_IDENTITY, 0, 0);
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL;
+    int requestError = createRequest(LSB_REQUEST_COPY_PROCESS_IDENTITY, 0, 0, &request);
+    if (requestError) return requestError;
     xpc_dictionary_set_int64(request, "target-pid", targetPID);
     xpc_object_t reply = NULL;
     int error = callBroker(request, &reply);
@@ -880,8 +912,9 @@ int LSBTransportCopyChildIdentity(pid_t guestPID, LSBPeerProcessIdentity *identi
 int LSBTransportResolveNativeChildPID(pid_t nativePID, pid_t *guestPID) {
     if (guestPID) *guestPID = 0;
     if (!guestPID || nativePID <= 0) return EINVAL;
-    xpc_object_t request = createRequest(LSB_REQUEST_RESOLVE_NATIVE_CHILD_PID, 0, 0);
-    if (!request) return ENOMEM;
+    xpc_object_t request = NULL;
+    int requestError = createRequest(LSB_REQUEST_RESOLVE_NATIVE_CHILD_PID, 0, 0, &request);
+    if (requestError) return requestError;
     xpc_dictionary_set_int64(request, "target-pid", nativePID);
     xpc_object_t reply = NULL;
     int error = callBroker(request, &reply);
@@ -899,10 +932,25 @@ int LSBTransportResolveNativeChildPID(pid_t nativePID, pid_t *guestPID) {
     return error;
 }
 
+static void releaseReplyContext(LSBReceivedMessage *message) {
+    if (message->object) xpc_release(message->object);
+    if (message->replyConnection) xpc_release(message->replyConnection);
+    message->object = message->replyConnection = NULL;
+}
+
+static int sendReply(LSBReceivedMessage *message, xpc_object_t reply) {
+    int error = 0;
+    if (message->replyConnection) xpc_connection_send_message(message->replyConnection, reply);
+    else error = xpc_pipe_routine_reply(reply);
+    xpc_release(reply);
+    releaseReplyContext(message);
+    // Connection send is queued: zero means accepted for transmission, not confirmed delivery to the guest.
+    return error;
+}
+
 void LSBTransportDisposeMessage(LSBReceivedMessage *message) {
     if (!message) return;
-    if (message->object) xpc_release((xpc_object_t)message->object);
-    message->object = NULL;
+    releaseReplyContext(message);
     if (MACH_PORT_VALID(message->processDebuggerPort)) mach_port_deallocate(mach_task_self(), message->processDebuggerPort);
     message->processDebuggerPort = MACH_PORT_NULL;
     closeFDs(message->fds);
@@ -915,12 +963,11 @@ void LSBTransportDisposeMessage(LSBReceivedMessage *message) {
 static int replyToMessage(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
                           const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], bool bootstrap, int statusFD, int wakeFD,
                           mach_port_t tankPort, const LSBSpawnPorts *ports, pid_t guestPID, pid_t parentPID, uint32_t executionRole,
-                          uint32_t productionStatus, const LSBTaskPortCaptureOffer *taskCapture) {
+                          uint32_t productionStatus, const LSBTaskPortCaptureOffer *taskCapture, mach_port_t guestBrokerPort) {
     if (!message || !message->object || error < 0 || pid < 0) return EINVAL;
     xpc_object_t reply = xpc_dictionary_create_reply((xpc_object_t)message->object);
     if (!reply) {
-        xpc_release((xpc_object_t)message->object);
-        message->object = NULL;
+        releaseReplyContext(message);
         return EPIPE;
     }
     int encodingError = 0;
@@ -933,7 +980,8 @@ static int replyToMessage(LSBReceivedMessage *message, int error, pid_t pid, uin
     }
     if (!error && !encodingError && bootstrap) {
         encodingError = plan && pid > 0 && guestPID > 0 && parentPID >= 0 ? validateBootstrapFDs(statusFD, wakeFD) : EINVAL;
-        if (!encodingError) encodingError = validateRoleMetadata(executionRole, pid, guestPID, tankPort, ports);
+        if (!encodingError) encodingError = validateRoleMetadata(executionRole, pid, guestPID, tankPort, ports, guestBrokerPort);
+        if (!encodingError && executionRole == LSB_EXECUTION_SIMULATOR && !sendRight(guestBrokerPort)) encodingError = EINVAL;
         if (!encodingError && !LSBValidNativeProductionStatus(productionStatus)) encodingError = EINVAL;
         if (!encodingError) encodingError = validateTaskCapture(taskCapture, executionRole);
         if (!encodingError) {
@@ -954,6 +1002,7 @@ static int replyToMessage(LSBReceivedMessage *message, int error, pid_t pid, uin
             xpc_dictionary_set_uint64(reply, "bootstrap-version", LSB_BOOTSTRAP_VERSION);
             xpc_dictionary_set_uint64(reply, "execution-role", executionRole);
             xpc_dictionary_set_uint64(reply, "native-production-status", productionStatus);
+            if (executionRole == LSB_EXECUTION_SIMULATOR) xpc_dictionary_set_mach_send(reply, "guest-broker-port", guestBrokerPort);
             if (taskCapture && taskCapture->port != MACH_PORT_NULL) {
                 xpc_dictionary_set_mach_send(reply, "task-capture-port", taskCapture->port);
                 xpc_dictionary_set_data(reply, "task-capture-nonce", taskCapture->nonce, sizeof(taskCapture->nonce));
@@ -965,17 +1014,14 @@ static int replyToMessage(LSBReceivedMessage *message, int error, pid_t pid, uin
     xpc_dictionary_set_uint64(reply, "request-id", requestID);
     xpc_dictionary_set_int64(reply, "error", error);
     xpc_dictionary_set_int64(reply, "pid", error ? 0 : pid);
-    int sendError = xpc_pipe_routine_reply(reply);
-    xpc_release(reply);
-    xpc_release((xpc_object_t)message->object);
-    message->object = NULL;
+    int sendError = sendReply(message, reply);
     return sendError ? sendError : encodingError;
 }
 
 int LSBTransportReply(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
                       const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS]) {
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, false, -1, -1, MACH_PORT_NULL, NULL, 0, 0,
-                          LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, NULL);
+                          LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, NULL, MACH_PORT_NULL);
 }
 
 int LSBTransportReplyEntitlements(LSBReceivedMessage *message, int error, const void *bytes, size_t size) {
@@ -985,8 +1031,7 @@ int LSBTransportReplyEntitlements(LSBReceivedMessage *message, int error, const 
     if (encodingError) error = encodingError;
     xpc_object_t reply = xpc_dictionary_create_reply((xpc_object_t)message->object);
     if (!reply) {
-        xpc_release((xpc_object_t)message->object);
-        message->object = NULL;
+        releaseReplyContext(message);
         return EPIPE;
     }
     xpc_dictionary_set_uint64(reply, "version", LSB_TRANSPORT_VERSION);
@@ -994,10 +1039,7 @@ int LSBTransportReplyEntitlements(LSBReceivedMessage *message, int error, const 
     xpc_dictionary_set_int64(reply, "error", error);
     xpc_dictionary_set_int64(reply, "pid", 0);
     if (!error) xpc_dictionary_set_data(reply, "entitlements", bytes, size);
-    int sendError = xpc_pipe_routine_reply(reply);
-    xpc_release(reply);
-    xpc_release((xpc_object_t)message->object);
-    message->object = NULL;
+    int sendError = sendReply(message, reply);
     return sendError ? sendError : encodingError;
 }
 
@@ -1007,8 +1049,7 @@ int LSBTransportReplyProcessList(LSBReceivedMessage *message, int error, const L
     if (encodingError) error = encodingError;
     xpc_object_t reply = xpc_dictionary_create_reply((xpc_object_t)message->object);
     if (!reply) {
-        xpc_release((xpc_object_t)message->object);
-        message->object = NULL;
+        releaseReplyContext(message);
         return EPIPE;
     }
     xpc_dictionary_set_uint64(reply, "version", LSB_TRANSPORT_VERSION);
@@ -1016,10 +1057,7 @@ int LSBTransportReplyProcessList(LSBReceivedMessage *message, int error, const L
     xpc_dictionary_set_int64(reply, "error", error);
     xpc_dictionary_set_int64(reply, "pid", 0);
     if (!error) xpc_dictionary_set_data(reply, "process-list", list, size);
-    int sendError = xpc_pipe_routine_reply(reply);
-    xpc_release(reply);
-    xpc_release((xpc_object_t)message->object);
-    message->object = NULL;
+    int sendError = sendReply(message, reply);
     return sendError ? sendError : encodingError;
 }
 
@@ -1029,16 +1067,13 @@ int LSBTransportReplyDebuggerInfo(LSBReceivedMessage *message, int error, const 
         (!info || message->targetPID <= 0 || info->kp_proc.p_pid != message->targetPID ? EINVAL : 0);
     if (encodingError) error = encodingError;
     xpc_object_t reply = xpc_dictionary_create_reply((xpc_object_t)message->object);
-    if (!reply) { xpc_release((xpc_object_t)message->object); message->object = NULL; return EPIPE; }
+    if (!reply) { releaseReplyContext(message); return EPIPE; }
     xpc_dictionary_set_uint64(reply, "version", LSB_TRANSPORT_VERSION);
     xpc_dictionary_set_uint64(reply, "request-id", 0);
     xpc_dictionary_set_int64(reply, "error", error);
     xpc_dictionary_set_int64(reply, "pid", error ? 0 : message->targetPID);
     if (!error) xpc_dictionary_set_data(reply, "process-debugger-info", info, sizeof(*info));
-    int sendError = xpc_pipe_routine_reply(reply);
-    xpc_release(reply);
-    xpc_release((xpc_object_t)message->object);
-    message->object = NULL;
+    int sendError = sendReply(message, reply);
     return sendError ? sendError : encodingError;
 }
 
@@ -1050,7 +1085,7 @@ int LSBTransportReplyProcessTask(LSBReceivedMessage *message, int error, mach_po
          !taskNameMatchesAudit(task, targetAudit) ? EINVAL : 0);
     if (encodingError) error = encodingError;
     xpc_object_t reply = xpc_dictionary_create_reply((xpc_object_t)message->object);
-    if (!reply) { xpc_release((xpc_object_t)message->object); message->object = NULL; return EPIPE; }
+    if (!reply) { releaseReplyContext(message); return EPIPE; }
     xpc_dictionary_set_uint64(reply, "version", LSB_TRANSPORT_VERSION);
     xpc_dictionary_set_uint64(reply, "request-id", 0);
     xpc_dictionary_set_int64(reply, "error", error);
@@ -1059,10 +1094,7 @@ int LSBTransportReplyProcessTask(LSBReceivedMessage *message, int error, mach_po
         xpc_dictionary_set_data(reply, "target-audit", targetAudit, sizeof(*targetAudit));
         xpc_dictionary_set_mach_send(reply, "process-task", task);
     }
-    int sendError = xpc_pipe_routine_reply(reply);
-    xpc_release(reply);
-    xpc_release((xpc_object_t)message->object);
-    message->object = NULL;
+    int sendError = sendReply(message, reply);
     return sendError ? sendError : encodingError;
 }
 
@@ -1072,14 +1104,13 @@ int LSBTransportReplyAudioOutput(LSBReceivedMessage *message, int error, void *s
     int encodingError = error ? (memory ? EINVAL : 0) : (!memory || xpc_get_type(memory) != XPC_TYPE_SHMEM ? EINVAL : 0);
     if (encodingError) error = encodingError;
     xpc_object_t reply = xpc_dictionary_create_reply(message->object);
-    if (!reply) { xpc_release(message->object); message->object = NULL; return EPIPE; }
+    if (!reply) { releaseReplyContext(message); return EPIPE; }
     xpc_dictionary_set_uint64(reply, "version", LSB_TRANSPORT_VERSION);
     xpc_dictionary_set_uint64(reply, "request-id", 0);
     xpc_dictionary_set_int64(reply, "error", error);
     xpc_dictionary_set_int64(reply, "pid", 0);
     if (!error) xpc_dictionary_set_value(reply, "audio-ring", memory);
-    int sendError = xpc_pipe_routine_reply(reply);
-    xpc_release(reply); xpc_release(message->object); message->object = NULL;
+    int sendError = sendReply(message, reply);
     return sendError ? sendError : encodingError;
 }
 
@@ -1093,8 +1124,7 @@ int LSBTransportReplyProcessIdentity(LSBReceivedMessage *message, int error, con
     if (encodingError) error = encodingError;
     xpc_object_t reply = xpc_dictionary_create_reply((xpc_object_t)message->object);
     if (!reply) {
-        xpc_release((xpc_object_t)message->object);
-        message->object = NULL;
+        releaseReplyContext(message);
         return EPIPE;
     }
     xpc_dictionary_set_uint64(reply, "version", LSB_TRANSPORT_VERSION);
@@ -1107,23 +1137,21 @@ int LSBTransportReplyProcessIdentity(LSBReceivedMessage *message, int error, con
         xpc_dictionary_set_string(reply, "peer-path", identity->executablePath);
         xpc_dictionary_set_mach_send(reply, "peer-task-name", identity->taskName);
     }
-    int sendError = xpc_pipe_routine_reply(reply);
-    xpc_release(reply);
-    xpc_release((xpc_object_t)message->object);
-    message->object = NULL;
+    int sendError = sendReply(message, reply);
     return sendError ? sendError : encodingError;
 }
 
 int LSBTransportReplyBootstrap(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
-                               const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD) {
+                               const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, mach_port_t guestBrokerPort) {
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, true, statusFD, wakeFD,
-                          MACH_PORT_NULL, NULL, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, NULL);
+                          MACH_PORT_NULL, NULL, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, NULL, guestBrokerPort);
 }
 
 int LSBTransportReplyBootstrapWithPorts(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
-                                        const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, const LSBSpawnPorts *ports) {
+                                        const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, const LSBSpawnPorts *ports,
+                                        mach_port_t guestBrokerPort) {
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, true, statusFD, wakeFD,
-                          MACH_PORT_NULL, ports, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, NULL);
+                          MACH_PORT_NULL, ports, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, NULL, guestBrokerPort);
 }
 
 int LSBTransportReplyBootstrapWithMetadata(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
@@ -1132,41 +1160,41 @@ int LSBTransportReplyBootstrapWithMetadata(LSBReceivedMessage *message, int erro
     if (!metadata || (metadata->launchdTankPort != MACH_PORT_NULL && !sendRight(metadata->launchdTankPort))) return EINVAL;
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, true, statusFD, wakeFD,
                           metadata->launchdTankPort, metadata->ports, metadata->guestPID, metadata->parentPID, metadata->executionRole,
-                          metadata->nativeProductionStatus, &metadata->taskCapture);
+                          metadata->nativeProductionStatus, &metadata->taskCapture, metadata->guestBrokerPort);
 }
 
 int LSBTransportReplyLaunchdBootstrap(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
-                                      const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, mach_port_t tankPort) {
+                                      const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, mach_port_t tankPort,
+                                      mach_port_t guestBrokerPort) {
     if (!MACH_PORT_VALID(tankPort)) return EINVAL;
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, true, statusFD, wakeFD,
-                          tankPort, NULL, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, NULL);
+                          tankPort, NULL, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, NULL, guestBrokerPort);
 }
 
-int LSBTransportReceive(mach_port_t port, LSBReceivedMessage *message) {
-    if (!message || !MACH_PORT_VALID(port)) return EINVAL;
-    memset(message, 0, sizeof(*message));
-    initializeFDs(message->fds);
-    xpc_object_t request = NULL;
-    int error = xpc_pipe_receive(port, &request, 0);
-    if (error || !request) {
-        if (request) xpc_release(request);
-        return error ? error : EPROTO;
-    }
-    if (xpc_get_type(request) != XPC_TYPE_DICTIONARY) { xpc_release(request); return EPROTO; }
-    message->object = request;
+static int decodeRequest(LSBReceivedMessage *message) {
+    xpc_object_t request = message->object;
+    int error = 0;
     xpc_dictionary_get_audit_token(request, &message->audit);
+    if (message->replyConnection) {
+        audit_token_t peer = {{0}};
+        xpc_connection_get_audit_token(message->replyConnection, &peer);
+        if (!message->audit.val[5] || message->audit.val[5] > INT_MAX || !message->audit.val[7] ||
+            memcmp(&message->audit, &peer, sizeof(peer))) error = EACCES;
+    }
     uint64_t version = 0, kind = 0;
     int64_t childError = 0;
-    if (!unsignedValue(request, "version", &version) || version != LSB_TRANSPORT_VERSION ||
+    if (!error && (!unsignedValue(request, "version", &version) || version != LSB_TRANSPORT_VERSION ||
         !unsignedValue(request, "kind", &kind) || kind < LSB_REQUEST_SPAWN || kind > LSB_REQUEST_CLOSE_AUDIO_OUTPUT ||
         !unsignedValue(request, "request-id", &message->requestID) || !signedValue(request, "error", &childError) ||
-        childError < 0 || childError > INT_MAX) error = EPROTO;
+        childError < 0 || childError > INT_MAX)) error = EPROTO;
     if (!error) {
         message->kind = (uint32_t)kind;
         message->error = (int)childError;
+        if (message->replyConnection && (kind == LSB_REQUEST_CHECKIN || kind == LSB_REQUEST_READY)) error = EPROTO;
         if (xpc_dictionary_get_value(request, "execution-role") || xpc_dictionary_get_value(request, "bootstrap-version") ||
             xpc_dictionary_get_value(request, "native-production-status") || xpc_dictionary_get_value(request, "task-capture-port") ||
-            xpc_dictionary_get_value(request, "task-capture-nonce") || xpc_dictionary_get_value(request, "process-task")) error = EPROTO;
+            xpc_dictionary_get_value(request, "task-capture-nonce") || xpc_dictionary_get_value(request, "process-task") ||
+            xpc_dictionary_get_value(request, "guest-broker-port")) error = EPROTO;
         // This control request must carry only its four-field envelope, including no capabilities under unknown keys.
         if ((kind == LSB_REQUEST_REBOOT_USERSPACE || kind == LSB_REQUEST_LIST_PROCESSES || kind == LSB_REQUEST_OPEN_AUDIO_OUTPUT ||
              kind == LSB_REQUEST_CLOSE_AUDIO_OUTPUT) && xpc_dictionary_get_count(request) != 4) error = EPROTO;
@@ -1239,6 +1267,30 @@ int LSBTransportReceive(mach_port_t port, LSBReceivedMessage *message) {
         LSBTransportDisposeMessage(message);
     }
     return error;
+}
+
+int LSBTransportReceive(mach_port_t port, LSBReceivedMessage *message) {
+    if (!message || !MACH_PORT_VALID(port)) return EINVAL;
+    memset(message, 0, sizeof(*message));
+    initializeFDs(message->fds);
+    xpc_object_t request = NULL;
+    int error = xpc_pipe_receive(port, &request, 0);
+    if (error || !request || xpc_get_type(request) != XPC_TYPE_DICTIONARY) {
+        if (request) xpc_release(request);
+        return error ? error : EPROTO;
+    }
+    message->object = request;
+    return decodeRequest(message);
+}
+
+int LSBTransportReceiveConnection(void *request, void *connection, LSBReceivedMessage *message) {
+    if (!message) return EINVAL;
+    memset(message, 0, sizeof(*message));
+    initializeFDs(message->fds);
+    if (!request || xpc_get_type(request) != XPC_TYPE_DICTIONARY || !connection || xpc_get_type(connection) != XPC_TYPE_CONNECTION) return EINVAL;
+    message->object = xpc_retain(request);
+    message->replyConnection = xpc_retain(connection);
+    return decodeRequest(message);
 }
 
 int LSBRequireSingleThread(void) {

@@ -337,19 +337,13 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_TRANSP
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_TRANSPORT_TESTING \
     Tests/PeerProcessTransportTests.c ProcessSupport/SpawnTransport.c ProcessSupport/SpawnPlan.c -o "$test_directory/PeerProcessTransport"
 "$test_directory/PeerProcessTransport"
-xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_GUEST_RUNTIME \
-    Tests/SpawnTransportTests.c ProcessSupport/SpawnTransport.c ProcessSupport/SpawnPlan.c -o "$test_directory/GuestSpawnTransport"
-XPC_FLAGS=0x2 "$test_directory/GuestSpawnTransport"
-xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_XPC_WIRE_TESTING -dynamiclib \
-    Guest/XPCWireCompatibility.c -install_name "$test_directory/libXPCWireCompatibility.dylib" -o "$test_directory/libXPCWireCompatibility.dylib"
-xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    -DLSB_GUEST_RUNTIME -DLSB_XPC_WIRE_COMPATIBILITY -DLSB_XPC_WIRE_TESTING \
-    Tests/SpawnTransportTests.c ProcessSupport/SpawnTransport.c ProcessSupport/SpawnPlan.c \
-    "$test_directory/libXPCWireCompatibility.dylib" -o "$test_directory/WireSpawnTransport"
-DYLD_INSERT_LIBRARIES="$test_directory/libXPCWireCompatibility.dylib" XPC_FLAGS=0x2 "$test_directory/WireSpawnTransport"
-xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_XPC_WIRE_TESTING \
-    Tests/XPCWireCompatibilityTests.c "$test_directory/libXPCWireCompatibility.dylib" -o "$test_directory/XPCWireCompatibility"
-DYLD_INSERT_LIBRARIES="$test_directory/libXPCWireCompatibility.dylib" XPC_FLAGS=0x2 "$test_directory/XPCWireCompatibility"
+xcrun --sdk macosx clang -std=c11 -fblocks -Wall -Wextra -Werror -arch arm64 \
+    Tests/BrokerConnectionTests.c ProcessSupport/SpawnTransport.c ProcessSupport/SpawnPlan.c ProcessSupport/StoreAppGroups.c \
+    -o "$test_directory/BrokerConnectionServer"
+xcrun --sdk macosx clang -std=c11 -fblocks -Wall -Wextra -Werror -arch arm64 -DLSB_GUEST_RUNTIME \
+    Tests/BrokerConnectionTests.c Guest/BrokerConnection.c ProcessSupport/SpawnTransport.c ProcessSupport/SpawnPlan.c \
+    -o "$test_directory/BrokerConnectionClient"
+XPC_FLAGS=0x2 "$test_directory/BrokerConnectionServer" "$test_directory/BrokerConnectionClient"
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 -IProcessSupport -IHost \
     Tests/BrokerTests.m Host/SessionControlQueue.c Host/TerminalSession.m Host/LaunchdConfiguration.m ProcessSupport/LaunchdHandshake.c ProcessSupport/LaunchdProbe.c \
     Host/IndigoHIDServer.m Host/FramebufferServer.m Host/IOSurfaceServer.m ProcessSupport/LaunchdEndpoint.c \

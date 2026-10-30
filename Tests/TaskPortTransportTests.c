@@ -73,7 +73,7 @@ static void replyCapture(LSBReceivedMessage *message, unsigned variant, mach_por
     assert(!LSBPlanAddString(&plan, "/", &plan.cwd));
     int pid = (int)message->audit.val[5];
     if (variant <= CaptureAbsent) {
-        LSBBootstrapMetadata metadata = {.guestPID = pid, .parentPID = getpid(), .nativeProductionStatus = LSB_NATIVE_DEVELOPMENT};
+        LSBBootstrapMetadata metadata = {.guestPID = pid, .parentPID = getpid(), .guestBrokerPort = broker, .nativeProductionStatus = LSB_NATIVE_DEVELOPMENT};
         if (variant == CapturePresent) {
             metadata.taskCapture.port = broker;
             memcpy(metadata.taskCapture.nonce, captureNonce, sizeof(captureNonce));
@@ -92,6 +92,7 @@ static void replyCapture(LSBReceivedMessage *message, unsigned variant, mach_por
     xpc_dictionary_set_uint64(reply, "bootstrap-version", LSB_BOOTSTRAP_VERSION);
     xpc_dictionary_set_uint64(reply, "execution-role", variant == CaptureNativeRole ? LSB_EXECUTION_NATIVE_METAL_SERVICE : LSB_EXECUTION_SIMULATOR);
     xpc_dictionary_set_uint64(reply, "native-production-status", LSB_NATIVE_DEVELOPMENT);
+    xpc_dictionary_set_mach_send(reply, "guest-broker-port", broker);
     if (variant != CaptureLaterFailure) xpc_dictionary_set_string(reply, "runtime-root", "/RuntimeRoot");
     xpc_object_t status = xpc_fd_create(statusFD), wake = xpc_fd_create(wakeFD);
     assert(status && wake);
@@ -106,7 +107,8 @@ static void replyCapture(LSBReceivedMessage *message, unsigned variant, mach_por
 static void malformedRequest(unsigned variant) {
     mach_port_t port = MACH_PORT_NULL;
     assert(!LSBTestCopyBrokerPort(&port));
-    xpc_object_t pipe = xpc_pipe_create_from_port(port, 0), request = createRequest(LSB_REQUEST_COPY_PROCESS_TASK, 0, 0), reply = NULL;
+    xpc_object_t pipe = xpc_pipe_create_from_port(port, 0), request = NULL, reply = NULL;
+    assert(!createRequest(LSB_REQUEST_COPY_PROCESS_TASK, 0, 0, &request));
     assert(pipe && request);
     xpc_dictionary_set_int64(request, "target-pid", 42);
     switch (variant) {
@@ -155,6 +157,8 @@ static int client(void) {
         int error = LSBTransportCheckIn(&reply, fds);
         assert(error == (variant <= CaptureAbsent ? 0 : EPROTO));
         if (!error) {
+            assert(reply.guestBrokerPort == broker);
+            assert(!mach_port_deallocate(mach_task_self(), reply.guestBrokerPort));
             assert(reply.taskCapture.port == (variant == CapturePresent ? broker : MACH_PORT_NULL));
             if (reply.taskCapture.port) {
                 assert(!memcmp(reply.taskCapture.nonce, captureNonce, sizeof(captureNonce)));

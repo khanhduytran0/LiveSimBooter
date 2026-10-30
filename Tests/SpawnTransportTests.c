@@ -2,9 +2,6 @@
 #include "../ProcessSupport/PrivateXPC.h"
 #include "../ProcessSupport/ChildStatus.h"
 #include "../ProcessSupport/GuestEntitlements.h"
-#if defined(LSB_XPC_WIRE_TESTING)
-#include "../Guest/XPCWireCompatibility.h"
-#endif
 
 #include <assert.h>
 #include <arpa/inet.h>
@@ -24,10 +21,11 @@
 extern char **environ;
 extern int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *, mach_port_t *, uint32_t);
 static unsigned openDescriptorCount(void);
-enum { MalformedPortsCount = 10, MalformedIdentityCount = 12, MalformedRoleCount = 18, MalformedRoleRequestCount = 24,
+enum { MalformedPortsCount = 10, MalformedIdentityCount = 12, MalformedRoleCount = 23, MalformedRoleRequestCount = 24,
        MalformedBootstrapCount = 14 + MalformedPortsCount + MalformedIdentityCount + MalformedRoleCount,
        MalformedKillCount = 14, MalformedAuditCount = 16, MalformedEntitlementCount = 25, PortRoundTripCount = 7,
        MalformedRebootCount = 30, RebootReplyCount = 23 };
+static mach_port_t guestEndpoint; // Fixture endpoint distinct from tank/registered rights.
 static volatile sig_atomic_t childSignals;
 static volatile sig_atomic_t signalAcknowledgementFD = -1;
 
@@ -285,6 +283,8 @@ static void registeredPortsClient(const LSBSpawnPlan *plan, const int fds[LSB_MA
         assert(!memcmp(reply.ports.registered, ports.registered, sizeof(ports.registered)));
         assert(reply.ports.bootstrapPresent == ports.bootstrapPresent && reply.ports.bootstrapPort == ports.bootstrapPort);
         assert(reply.pid == 4242);
+        assert(MACH_PORT_VALID(reply.guestBrokerPort) == (variant != 6));
+        if (MACH_PORT_VALID(reply.guestBrokerPort)) assert(!mach_port_deallocate(mach_task_self(), reply.guestBrokerPort));
         assert(reply.guestPID == (variant % 2 ? variant == 5 ? INT_MAX : 1234 + (int)variant : 4242));
         assert(reply.parentPID == (variant == 6 || variant % 2 ? variant == 1 ? 0 : 4567 : getppid()));
         assert(reply.executionRole == (variant == 6 ? LSB_EXECUTION_NATIVE_METAL_PROBE : LSB_EXECUTION_SIMULATOR));
@@ -897,42 +897,8 @@ static void *blockedWorker(void *argument) {
     return NULL;
 }
 
-#ifdef LSB_GUEST_RUNTIME
-static mach_port_t testGuestPort(void) {
-    mach_port_t base = MACH_PORT_NULL, copy = MACH_PORT_NULL;
-    assert(!LSBTestCopyBrokerPort(&base));
-    assert(LSBTransportCopyBrokerPort(NULL) == EINVAL);
-    unsetenv(LSB_BROKER_PORT_ENV);
-    assert(LSBTransportCopyBrokerPort(&copy) == ENOENT && copy == MACH_PORT_NULL);
-    const char *invalid[] = {"", "0", "-1", "+1", " 1", "1x", "4294967295", "4294967296", "100000000000000000000000"};
-    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
-        assert(!setenv(LSB_BROKER_PORT_ENV, invalid[i], 1));
-        assert(LSBTransportCopyBrokerPort(&copy) == EINVAL && copy == MACH_PORT_NULL);
-    }
-    mach_port_t receiveOnly;
-    assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &receiveOnly));
-    char value[16];
-    snprintf(value, sizeof(value), "%u", receiveOnly);
-    assert(!setenv(LSB_BROKER_PORT_ENV, value, 1));
-    assert(LSBTransportCopyBrokerPort(&copy) == EACCES && copy == MACH_PORT_NULL);
-    assert(!mach_port_mod_refs(mach_task_self(), receiveOnly, MACH_PORT_RIGHT_RECEIVE, -1));
-    snprintf(value, sizeof(value), "%u", base);
-    assert(!setenv(LSB_BROKER_PORT_ENV, value, 1));
-    mach_port_urefs_t before = 0, after = 0;
-    assert(!mach_port_get_refs(mach_task_self(), base, MACH_PORT_RIGHT_SEND, &before));
-    assert(!LSBTransportCopyBrokerPort(&copy) && copy == base);
-    assert(!mach_port_get_refs(mach_task_self(), base, MACH_PORT_RIGHT_SEND, &after) && after == before + 1);
-    assert(!mach_port_deallocate(mach_task_self(), copy));
-    assert(!mach_port_get_refs(mach_task_self(), base, MACH_PORT_RIGHT_SEND, &after) && after == before);
-    return base;
-}
-#endif
-
 static int client(void) {
     assert(!LSBRequireSingleThread());
-#ifdef LSB_GUEST_RUNTIME
-    mach_port_t brokerPort = testGuestPort();
-#endif
     LSBSpawnPlan plan = makePlan();
     char path[] = "/tmp/LiveSimBooter-transport.XXXXXX";
     int fd = mkstemp(path);
@@ -952,6 +918,7 @@ static int client(void) {
     assert(!LSBTransportCheckIn(&reply, received));
     assert(reply.requestID == 77 && !reply.error && !strcmp(reply.runtimeRoot, "/tmp/RuntimeRoot"));
     assert(reply.guestPID == getpid() && reply.parentPID == getppid());
+    assert(MACH_PORT_VALID(reply.guestBrokerPort) && !mach_port_deallocate(mach_task_self(), reply.guestBrokerPort));
     assert(reply.launchdTankPort == MACH_PORT_NULL && !reply.ports.count && !reply.ports.registeredPresent && !reply.ports.bootstrapPresent);
     assert(!memcmp(&reply.plan, &plan, sizeof(plan)) && received[0] >= 0);
     assert(reply.statusFD >= 0 && reply.wakeFD >= 0 && reply.statusFD != reply.wakeFD && reply.statusFD != received[0]);
@@ -976,6 +943,7 @@ static int client(void) {
     for (unsigned index = 0; index < 2; ++index) {
         assert(!LSBTransportCheckIn(&reply, received) && reply.requestID == 78 + index);
         assert(MACH_PORT_VALID(reply.launchdTankPort));
+        assert(MACH_PORT_VALID(reply.guestBrokerPort) && !mach_port_deallocate(mach_task_self(), reply.guestBrokerPort));
         mach_port_type_t type;
         mach_port_urefs_t references;
         assert(!mach_port_type(mach_task_self(), reply.launchdTankPort, &type));
@@ -1020,7 +988,7 @@ static int client(void) {
     for (unsigned variant = 0; variant < MalformedBootstrapCount; ++variant) {
         unsigned before = openDescriptorCount();
         assert(LSBTransportCheckIn(&reply, received) == EPROTO);
-        assert(reply.nativeProductionStatus == LSB_NATIVE_PRODUCTION_UNKNOWN);
+        assert(reply.nativeProductionStatus == LSB_NATIVE_PRODUCTION_UNKNOWN && !reply.guestBrokerPort);
         assert(reply.statusFD == -1 && reply.wakeFD == -1 && reply.launchdTankPort == MACH_PORT_NULL);
         assert(!reply.ports.count && !reply.ports.registeredPresent && !reply.ports.bootstrapPresent && !reply.ports.bootstrapPort);
         for (unsigned i = 0; i < LSB_MAX_REGISTERED_PORTS; ++i) assert(reply.ports.registered[i] == MACH_PORT_NULL);
@@ -1057,15 +1025,6 @@ static int client(void) {
     int guard = EBUSY;
     for (unsigned i = 0; i < 100 && guard == EBUSY; ++i) { usleep(1000); guard = LSBRequireSingleThread(); }
     assert(!guard);
-#ifdef LSB_GUEST_RUNTIME
-    assert(!mach_port_deallocate(mach_task_self(), brokerPort));
-#endif
-#if defined(LSB_XPC_WIRE_TESTING)
-    LSBXPCWireStatistics statistics = LSBXPCWireTestStatistics();
-    fprintf(stderr, "XPC wire adapter: sent inline=%u OOL=%u, received inline=%u OOL=%u, receive retries=%u\n",
-            statistics.sentInline, statistics.sentOOL, statistics.receivedInline, statistics.receivedOOL, statistics.receiveRetries);
-    assert(statistics.sentInline && statistics.receivedInline);
-#endif
     puts("SpawnTransport child: spawn/exec, stable identity, FD/Mach ownership, kill/SIGCHLD, reboot and malformed-message checks passed");
     return 0;
 }
@@ -1118,6 +1077,7 @@ static void replyMalformedBootstrap(LSBReceivedMessage *message, const LSBSpawnP
     xpc_dictionary_set_uint64(reply, "version", LSB_TRANSPORT_VERSION);
     xpc_dictionary_set_uint64(reply, "bootstrap-version", LSB_BOOTSTRAP_VERSION);
     xpc_dictionary_set_uint64(reply, "execution-role", LSB_EXECUTION_SIMULATOR);
+    xpc_dictionary_set_mach_send(reply, "guest-broker-port", guestEndpoint);
     xpc_dictionary_set_uint64(reply, "native-production-status", LSB_NATIVE_PRODUCTION);
     xpc_dictionary_set_uint64(reply, "request-id", 77);
     xpc_dictionary_set_int64(reply, "error", 0);
@@ -1191,6 +1151,16 @@ static void replyMalformedBootstrap(LSBReceivedMessage *message, const LSBSpawnP
                 xpc_dictionary_set_uint64(reply, "bootstrap-version", 1);
                 xpc_dictionary_set_value(reply, "native-production-status", NULL);
                 break;
+            case 18: xpc_dictionary_set_value(reply, "guest-broker-port", NULL); break;
+            case 19: xpc_dictionary_set_string(reply, "guest-broker-port", "not an endpoint"); break;
+            case 20: xpc_dictionary_set_mach_send(reply, "guest-broker-port", MACH_PORT_NULL); break;
+            case 21: xpc_dictionary_set_uint64(reply, "guest-broker-port", guestEndpoint); break;
+            case 22:
+                xpc_dictionary_set_uint64(reply, "execution-role", LSB_EXECUTION_NATIVE_METAL_SERVICE);
+                xpc_dictionary_set_value(reply, "registered-ports", NULL);
+                xpc_dictionary_set_value(reply, "bootstrap-port", NULL);
+                xpc_dictionary_set_value(reply, "launchd-tank-port", NULL);
+                break;
             default: assert(false);
         }
     }
@@ -1248,11 +1218,12 @@ static void registeredPortsHost(mach_port_t broker, const BootstrapFDs *bootstra
                 .parentPID = variant == 1 ? 0 : 4567, .ports = &pending.ports,
                 .launchdTankPort = variant == 1 ? pending.ports.bootstrapPort : MACH_PORT_NULL,
                 .executionRole = variant == 6 ? LSB_EXECUTION_NATIVE_METAL_PROBE : LSB_EXECUTION_SIMULATOR,
+                .guestBrokerPort = variant == 6 ? MACH_PORT_NULL : guestEndpoint,
                 .nativeProductionStatus = variant == 1 ? LSB_NATIVE_DEVELOPMENT : variant == 3 ? LSB_NATIVE_PRODUCTION : LSB_NATIVE_PRODUCTION_UNKNOWN};
             assert(!LSBTransportReplyBootstrapWithMetadata(&message, 0, 4242, 80 + variant, "/tmp/RuntimeRoot", &pending.plan,
                                                            pending.fds, bootstrap->status, bootstrap->wake[0], &metadata));
         } else assert(!LSBTransportReplyBootstrapWithPorts(&message, 0, 4242, 80 + variant, "/tmp/RuntimeRoot", &pending.plan,
-                                                           pending.fds, bootstrap->status, bootstrap->wake[0], &pending.ports));
+                                                           pending.fds, bootstrap->status, bootstrap->wake[0], &pending.ports, guestEndpoint));
         assert(!memcmp(&anchors, &pending.ports, sizeof(anchors)));
         LSBTransportDisposeMessage(&message);
         assert(!LSBTransportReceive(broker, &message) && message.kind == LSB_REQUEST_READY && message.requestID == 80 + variant);
@@ -1279,6 +1250,8 @@ static void registeredPortsHost(mach_port_t broker, const BootstrapFDs *bootstra
 }
 
 static int host(const char *executable) {
+    assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &guestEndpoint));
+    assert(!mach_port_insert_right(mach_task_self(), guestEndpoint, guestEndpoint, MACH_MSG_TYPE_MAKE_SEND));
     mach_port_t port;
     assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port));
     assert(!mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND));
@@ -1307,7 +1280,7 @@ static int host(const char *executable) {
     assert(!mach_port_insert_right(mach_task_self(), tank, tank, MACH_MSG_TYPE_MAKE_SEND));
     assert(!LSBTransportReceive(port, &message) && message.kind == LSB_REQUEST_CHECKIN);
     assert(message.audit.val[5] == (unsigned)child);
-    assert(!LSBTransportReplyBootstrap(&message, 0, child, 77, "/tmp/RuntimeRoot", &pending.plan, pending.fds, bootstrap.status, bootstrap.wake[0]));
+    assert(!LSBTransportReplyBootstrap(&message, 0, child, 77, "/tmp/RuntimeRoot", &pending.plan, pending.fds, bootstrap.status, bootstrap.wake[0], guestEndpoint));
     assert(fcntl(bootstrap.status, F_GETFD) >= 0 && fcntl(bootstrap.wake[0], F_GETFD) >= 0);
     LSBTransportDisposeMessage(&message);
     assert(!LSBTransportReceive(port, &message) && message.kind == LSB_REQUEST_READY && message.requestID == 77 && !message.error);
@@ -1319,12 +1292,12 @@ static int host(const char *executable) {
         assert(!LSBTransportReceive(port, &message) && message.kind == LSB_REQUEST_CHECKIN);
         void *request = message.object;
         assert(LSBTransportReplyLaunchdBootstrap(&message, 0, child, 78 + index, "/tmp/RuntimeRoot", &pending.plan,
-                                                pending.fds, bootstrap.status, bootstrap.wake[0], MACH_PORT_NULL) == EINVAL);
+                                                pending.fds, bootstrap.status, bootstrap.wake[0], MACH_PORT_NULL, guestEndpoint) == EINVAL);
         assert(LSBTransportReplyLaunchdBootstrap(&message, 0, child, 78 + index, "/tmp/RuntimeRoot", &pending.plan,
-                                                pending.fds, bootstrap.status, bootstrap.wake[0], MACH_PORT_DEAD) == EINVAL);
+                                                pending.fds, bootstrap.status, bootstrap.wake[0], MACH_PORT_DEAD, guestEndpoint) == EINVAL);
         assert(message.object == request);
         assert(!LSBTransportReplyLaunchdBootstrap(&message, 0, child, 78 + index, "/tmp/RuntimeRoot", &pending.plan,
-                                                 pending.fds, bootstrap.status, bootstrap.wake[0], tank));
+                                                 pending.fds, bootstrap.status, bootstrap.wake[0], tank, guestEndpoint));
         mach_port_urefs_t references;
         assert(!mach_port_get_refs(mach_task_self(), tank, MACH_PORT_RIGHT_SEND, &references) && references == 1);
         assert(fcntl(bootstrap.status, F_GETFD) >= 0 && fcntl(bootstrap.wake[0], F_GETFD) >= 0 && !message.object);
@@ -1439,12 +1412,14 @@ static int host(const char *executable) {
     assert(!mach_port_mod_refs(mach_task_self(), tank, MACH_PORT_RIGHT_RECEIVE, -1));
     mach_port_deallocate(mach_task_self(), port);
     mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
+    mach_port_deallocate(mach_task_self(), guestEndpoint);
+    mach_port_mod_refs(mach_task_self(), guestEndpoint, MACH_PORT_RIGHT_RECEIVE, -1);
     puts("SpawnTransport parent: retained asynchronous reply ownership and audit identity checks passed");
     return 0;
 }
 
 int main(int argc, char **argv) {
-    _Static_assert(LSB_TRANSPORT_VERSION == 6 && LSB_BOOTSTRAP_VERSION == 3, "audio output and native capture require current transport/bootstrap versions");
+    _Static_assert(LSB_TRANSPORT_VERSION == 7 && LSB_BOOTSTRAP_VERSION == 4, "guest connection endpoint requires current transport/bootstrap versions");
     // Bound a failed regression test without adding a signal handler to the production transport.
     alarm(20);
     return argc == 2 && !strcmp(argv[1], "--client") ? client() : host(argv[0]);

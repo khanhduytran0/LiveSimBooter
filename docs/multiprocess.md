@@ -36,14 +36,17 @@ audited against that runtime's host-support libkernel. Recheck those layouts bef
    one-shot thread exception to the native host, allowing it to retain a kernel-created movable task-control right. The child
    restores its prior thread exception handler before simulator initialization. Native Metal roles skip this exchange; see
    [task-port capture and authorization](process-inspection.md#managed-task-ports).
-6. The native child retains one raw Mach send right to the broker and passes its numeric name in `LSB_BROKER_PORT`, replacing
-   any inherited value. A READY exchange reports preparation success or its errno. After releasing native XPC objects, the child
-   checks its thread count, performs the fresh-TSD handoff, and enters dyld_sim. The default retains the native cache with hardware
-   workqueue redirection; diagnostic detachment performs another thread check. READY means preparation reached that point;
-   it does not prove that dyld_sim or the guest program subsequently ran.
+6. The authenticated check-in also supplies a separate guest broker connection endpoint for simulator roles only. The native child
+   passes that raw send right's numeric name in `LSB_BROKER_PORT`, replacing any inherited value. It separately retains the native
+   pipe's broker right through READY, even after installing simulator bootstrap ports. READY reports preparation success or errno;
+   the native pipe right and all native XPC objects are then released. The child checks its thread count, performs the fresh-TSD
+   handoff, and enters dyld_sim. The default retains the native cache with hardware workqueue redirection; diagnostic detachment
+   performs another thread check. READY means preparation reached that point, not that dyld_sim or the guest subsequently ran.
 7. The child inserts [libLiveSimSpawn.dylib](../Guest/SpawnShim.c) into the simulator environment. Its interposition tuples replace
-   public `posix_spawn` and `posix_spawnp`; a later guest spawn follows the same broker/extension path. Its wait interposer
-   reads the shared status table directly, without guest XPC or a helper thread.
+   public `posix_spawn` and `posix_spawnp`; a later guest spawn follows the same broker/extension path. After guest libSystem/TLS
+   initialization, the shim creates a persistent connection to the handed-off endpoint with simulator-to-host mode enabled.
+   Guest RPC uses that connection's synchronous request/reply API. Its wait interposer reads the shared status table directly,
+   without guest XPC or a helper thread.
 
 The host calls declared private methods using normal Objective-C syntax. The narrow declarations live in
 [FoundationPrivate.h](../Host/Private/FoundationPrivate.h), [PlugInKitPrivate.h](../Host/Private/PlugInKitPrivate.h), and
@@ -139,7 +142,65 @@ updated shim containing FakePTY and creation-mask tracking. That native host cre
 terminal-state file alongside RuntimeRoot. Device-platform executables/dylibs additionally need the
 [iOS compatibility variant of dyld_sim](ios-platform.md); its relocated-cache support remains intact.
 
-## Synchronous XPC and native-cache removal
+## Native startup pipes and guest connections
+
+Transport **ABI 7**, bootstrap **ABI 4** separates native startup from guest RPC. Both ends retain the same owned spawn plans,
+descriptor transfer and full audit-token authorization. The guest endpoint is supplied only by authenticated native check-in;
+native Metal roles cannot receive or select it. Failed preparation releases both endpoints. The native pipe right is released
+after READY; only the guest endpoint's send reference survives a successful handoff.
+
+The guest creates a genuine `xpc_connection` after its own libSystem/TLS initialization and calls
+`xpc_connection_enable_sim2host_4sim` before activation. The native listener and accepted connections use the corresponding
+simulator-to-host mode (serialization mode 2). This follows the pinned
+[SimRun connection-mode investigation](https://github.com/unixzii/SimRun/blob/f49aea096320dffcea948bbbf74337d02c795800/docs/render.md#L176).
+The persistent connection uses `xpc_connection_send_message_with_reply_sync`; it does not create a new pipe per request.
+Libxpc handles its own graph format, descriptor ownership and reply ports. The old `brokerMachMessage`/`LSBXPCWireBegin` adapter
+is removed, so ordinary Mach messages no longer pass through a broker wire-format interposer.
+
+Synchronous connection calls can still create libdispatch/XPC workers. That is permitted only after the simulator's pthread
+and workqueue adapters are initialized; it is not a claim that connections remain single-threaded. Native CHECKIN/READY keep
+the pipe path below, release all native XPC objects and retain the existing thread-count guards before handoff. Guest calls
+before transport initialization fail rather than lazily activating a connection against native or incomplete guest TLS.
+Connection loss is terminal for that guest's broker channel: an uncertain request is never replayed and no replacement
+connection is silently opened. The host binds one accepted peer to a running simulator job and rechecks the complete audit
+token on every request. Deferred replies retain both the request and its accepted connection until completion.
+
+### Connection validation (2026-10-30)
+
+The integrated local suite passed. Focused tests additionally cover eight concurrent 40 KB requests with delayed replies,
+FD and Mach-right transfer, caller/connection endpoint ownership, malformed bootstrap metadata, all audit-token words,
+retired/native/duplicate peers, terminal disconnect without replay, and production calls before guest initialization.
+Native startup remains on the existing thread-count-guarded pipe path. The build lists `BrokerConnection.c` first so its
+readiness constructor precedes the other inserted-shim constructors; the actual Mach-O initializer order was inspected.
+
+Device tests used the pinned 23A343 guest on development iPhone16,2 / iOS 26.1 build 23B50, with native-cache detachment.
+The cache remained at `0x110000000`, UUID `73ED978A-FD25-3166-A57A-34E21BB7E5B8`; no cache bytes or mapping policy changed.
+The matched native host/extension and guest helpers were signed with the existing development identity and application identifier,
+with previous guest files retained for rollback. Transfers followed the no-checksum policy. Final guest shim UUID is
+`59153ACC-27A5-36F8-B546-2174F6882DD4`; native host and extension UUIDs are respectively
+`3C8E57E2-DA68-3ED9-BE62-B85083D8525D` and `F3DCF909-840F-3CAB-B54D-96A8159636C7`.
+
+Without LLDB, spawn-probe ran df and verified `WNOHANG`, SIGCHLD, exit 0, exit 37, SIGTERM 15 and a second wait returning
+`ECHILD`; its parent exited 0. Exec-probe preserved logical PID through both replacement cases: native **9537 → 9538**
+returned wait status `0x1700`, and native **9539 → 9540** returned `0xf` after SIGTERM; the probe exited 0.
+The graphical session reached SpringBoard, and launchd-owned Fish spawned df, produced its filesystem listing and recorded
+exit 0. A guest launchctl query independently returned exit 0. These are functional checks, not a performance benchmark.
+
+The final guarded shim also passed a userspace restart with native host **9682** retained and launchd **9686 → 9767**.
+The before/after managed process inventories shared only the native host PID; new SpringBoard **9807** and Fish **9811**
+started, and the captured display showed the Home Screen. The interrupted reboot control request was preserved without replay.
+Post-reboot Fish reran both probes with `spawn=0 exec=0`, including logical PIDs **9860** and **9864** surviving SETEXEC;
+a fresh launchctl query returned exit 0. There was no debugger attached and the final thermal-pressure reading was 0.
+An earlier reboot attempt had drained correctly but could not archive the SSH client's root-owned mode-0700 lock.
+Submitting subsequent control requests as `mobile` resolved that test-setup issue; see [queue ownership](guest-control.md#commands).
+
+An initial direct probe lacked `SIMULATOR_ROOT` while the enabled haptic helper loaded Foundation. LLDB caught the explicit
+libfeatureflags missing-root trap before shim constructors. Supplying the normal simulator environment fixed that probe;
+the ordinary launchd plan already provides it. LLDB was detached, the target resumed, and no debugserver remained.
+The production retained-cache path has not been retested with this transport. Evidence is under ignored
+`tmp/broker-connection-20261030/`; no setup step depends on those files.
+
+### Native startup pipe and historical guest adapter
 
 [SpawnTransport.c](../ProcessSupport/SpawnTransport.c) declares the private C pipe APIs in
 [PrivateXPC.h](../ProcessSupport/PrivateXPC.h). It uses `bootstrap_look_up`, `xpc_pipe_create_from_port`, `xpc_pipe_routine`,
@@ -157,11 +218,11 @@ README, eleven run logs, and `macos-results.json`.
 Those observations establish neither an API guarantee nor the absence of a transient worker between snapshots. The
 [single-thread guard](../ProcessSupport/SingleThreadGuard.h) takes two snapshots and returns `EBUSY` if another thread is present.
 It does not suspend workers or prevent a later one from appearing. Native XPC pipes, requests, replies, and their temporary
-Mach rights are released before handoff. One independent broker send right intentionally survives: it is a kernel right in the
-same task, with no native-cache object or function pointer attached. After detachment, the shim validates the numeric name from
-`LSB_BROKER_PORT` as a send right, increments its reference count for the request, creates a new pipe with simulator libxpc,
-and releases that temporary reference afterward. Each new extension obtains its own right during native preparation, so a
-parent's task-local port number is never reused blindly in another task.
+Mach rights are released before handoff. The guest endpoint intentionally survives as a kernel right in the same task, with
+no native-cache object or function pointer attached. Each new extension obtains its own right during native preparation, so
+a parent's task-local port number is never reused blindly in another task. Before ABI 7, the guest instead retained the native
+pipe endpoint, created a simulator pipe for each request and used the marker adapter described below. Those paragraphs record
+the original implementation and its evidence, not the current guest connection path.
 
 The first simulator spawn probe reached its interposed `posix_spawn` but returned `EIO` during service discovery. The pinned
 simulator libxpc disables its launchd bootstrap lookup when `XPC_SIMULATOR_LAUNCHD_NAME` is missing. Supplying the native broker
@@ -174,22 +235,21 @@ the native marker, so this is a platform distinction. A native receiver rejects 
 the reply send-once right. The client's Mach receive succeeds with `MACH_NOTIFY_SEND_ONCE` (message ID `0x47`), which libxpc
 then reports as `EIO`. Disassembly and a local reproduction confirmed this sequence; it does not require a failed Mach syscall.
 
-[XPCWireCompatibility.c](../Guest/XPCWireCompatibility.c) now adapts that marker in the inserted guest shim. `callBroker`
-brackets only its synchronous `xpc_pipe_routine` with `LSBXPCWireBegin` and `LSBXPCWireEnd`. The scoped `mach_msg` interposer
-translates simulator-to-native requests to the broker and native-to-simulator replies on the matching reply port. It preserves
-the version, message options, descriptors, and payload. Unrelated destinations and other threads remain unchanged; no cache
-instructions or global libxpc state are patched.
+The former `Guest/XPCWireCompatibility.c` adapted that marker in the inserted guest shim. `callBroker` bracketed only its
+synchronous `xpc_pipe_routine` with `LSBXPCWireBegin` and `LSBXPCWireEnd`. The scoped `mach_msg` interposer translated
+simulator-to-native requests to the broker and native-to-simulator replies on the matching reply port. It preserved the
+version, message options, descriptors, and payload. Unrelated destinations and other threads remained unchanged; it patched
+neither cache instructions nor global libxpc state.
 
-The adapter validates message sizes, graph version, descriptor types/order, and inline or out-of-line graph bounds before
-changing the marker. OOL header access uses checked VM reads/writes rather than dereferencing an arbitrary address. Its fixed
-atomic context table uses no implicit thread-local allocation, and an inactive fast path avoids touching thread state during
-early runtime startup. A reentry guard passes the adapter's own VM-copy MIG traffic through unchanged.
+The adapter validated message sizes, graph version, descriptor types/order, and inline or out-of-line graph bounds before
+changing the marker. OOL header access used checked VM reads/writes rather than dereferencing an arbitrary address. Its fixed
+atomic context table used no implicit thread-local allocation, and an inactive fast path avoided touching thread state during
+early runtime startup. A reentry guard passed the adapter's own VM-copy MIG traffic through unchanged.
 
-The inserted-dylib tests in [SpawnTransportTests.c](../Tests/SpawnTransportTests.c) and
-[XPCWireCompatibilityTests.c](../Tests/XPCWireCompatibilityTests.c) use fresh client processes and a separate native XPC peer.
-They cover inline and OOL graphs, a 70 KB payload with 128 transferred FDs, shared descriptor offsets, receive-buffer retries,
-malformed/unmapped/read-only OOL addresses, and isolation from unrelated ports and threads. A test-only marker substitution
-models the simulator wire format on macOS; the native peer's libxpc remains untouched. These tests run through `Tests/run.sh`.
+The former adapter tests in `Tests/SpawnTransportTests.c` and `Tests/XPCWireCompatibilityTests.c` used fresh client processes
+and a separate native XPC peer. They covered inline and OOL graphs, a 70 KB payload with 128 transferred FDs, shared descriptor
+offsets, receive-buffer retries, malformed/unmapped/read-only OOL addresses, and isolation from unrelated ports and threads.
+A test-only marker substitution modeled the simulator wire format on macOS; the native peer's libxpc remained untouched.
 
 The complete adapted path also passed on the iPhone: a simulator parent spawned two df children, each returning 2,268 bytes
 through its stdout pipe followed by EOF. A separate LLDB run stopped at both `LSBXPCWireBegin` and `LSBXPCWireEnd` with exactly

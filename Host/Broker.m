@@ -89,6 +89,7 @@ enum { JobQueued, JobStarting, JobDispatched, JobRunning };
 @property BOOL guestTaskForPIDAllowed;
 @property BOOL guestDragUIAllowed, debuggerQueryPending, processDebuggerReady;
 @property mach_port_t processDebuggerPort;
+@property (nonatomic, strong) xpc_connection_t brokerConnection;
 @property mach_port_t taskPort;
 @property LSBTaskPortCaptureOffer taskCapture;
 @property dispatch_source_t taskCaptureSource;
@@ -112,6 +113,7 @@ enum { JobQueued, JobStarting, JobDispatched, JobRunning };
     return self;
 }
 - (void)dealloc {
+    if (_brokerConnection) xpc_connection_cancel(_brokerConnection);
     LSBPeerProcessIdentityDispose(&_peerIdentity);
     if (MACH_PORT_VALID(_processDebuggerPort)) mach_port_deallocate(mach_task_self(), _processDebuggerPort);
     if (_taskCaptureSource) dispatch_source_cancel(_taskCaptureSource);
@@ -134,6 +136,8 @@ enum { JobQueued, JobStarting, JobDispatched, JobRunning };
 @end
 
 static NSMutableArray<LSBJob *> *jobs;
+static xpc_connection_t guestBrokerListener;
+static mach_port_t guestBrokerPort;
 static NSMutableArray<LSBPendingAdoption *> *pendingAdoptions;
 static dispatch_source_t adoptionRetrySource;
 static LSBJob *startingJob;
@@ -187,6 +191,7 @@ static BOOL authenticatedSimulatorJob(LSBJob *job, const audit_token_t *expected
 static LSBJob *enqueueNativeMetalHelper(BOOL publicAccess, const char *name, int *result);
 static void registerReplacementSpringBoardMetal(LSBJob *active, LSBJob *helper);
 static void finishJob(LSBJob *job, int error);
+static void handleMessage(LSBReceivedMessage *message);
 static int snapshotSavedSessionConfiguration(void);
 
 static void notifySessionStateChanged(void) {
@@ -876,6 +881,7 @@ static void finishJob(LSBJob *job, int error) {
         disposeMessage(job.request);
         job.request = NULL;
     }
+    if (job.brokerConnection) { xpc_connection_cancel(job.brokerConnection); job.brokerConnection = nil; }
     if (job.exitMonitor) { dispatch_source_cancel(job.exitMonitor); job.exitMonitor = nil; }
     if (job.launchdSource) { dispatch_source_cancel(job.launchdSource); job.launchdSource = nil; }
     if (job.indigo) [job.indigo close];
@@ -1662,6 +1668,65 @@ static BOOL authenticatedSimulatorJob(LSBJob *job, const audit_token_t *expected
         audit.val[5] == (uint32_t)job.pid && audit.val[7] == job.pidVersion && !memcmp(&audit, expected, sizeof(audit));
 }
 
+static void acceptGuestBrokerConnection(xpc_connection_t peer) {
+    // Listener and peer handlers run on main, serialized with READY, exec retirement and session shutdown.
+    audit_token_t audit = {{0}};
+    xpc_connection_get_audit_token(peer, &audit);
+    LSBJob *owner = nil;
+    if (!sessionDraining) for (LSBJob *job in jobs) if (authenticatedSimulatorJob(job, &audit)) { owner = job; break; }
+    xpc_connection_set_target_queue(peer, dispatch_get_main_queue());
+    if (!owner || owner.brokerConnection) {
+        xpc_connection_set_event_handler(peer, ^(xpc_object_t ignored) { (void)ignored; });
+        xpc_connection_activate(peer);
+        xpc_connection_cancel(peer);
+        return;
+    }
+    owner.brokerConnection = peer;
+    __weak LSBJob *weakOwner = owner;
+    __weak xpc_connection_t weakPeer = peer;
+    xpc_connection_set_event_handler(peer, ^(xpc_object_t event) {
+        @autoreleasepool {
+            LSBJob *current = weakOwner;
+            xpc_connection_t connection = weakPeer;
+            if (!connection) return;
+            if (xpc_get_type(event) == XPC_TYPE_ERROR) {
+                if (current.brokerConnection == connection) current.brokerConnection = nil;
+                return;
+            }
+            if (xpc_get_type(event) != XPC_TYPE_DICTIONARY) { xpc_connection_cancel(connection); return; }
+            LSBReceivedMessage *message = calloc(1, sizeof(*message));
+            if (!message) { xpc_connection_cancel(connection); return; }
+            int error = LSBTransportReceiveConnection((__bridge void *)event, (__bridge void *)connection, message);
+            if (error) { free(message); return; }
+            if (sessionDraining || current.brokerConnection != connection || !authenticatedSimulatorJob(current, &message->audit)) {
+                replyError(message, EACCES);
+                xpc_connection_cancel(connection);
+                return;
+            }
+            handleMessage(message);
+        }
+    });
+    xpc_connection_activate(peer);
+}
+
+static int prepareGuestBrokerListener(void) {
+    if (guestBrokerListener) return 0;
+    xpc_connection_t listener = xpc_connection_create(NULL, dispatch_get_main_queue());
+    if (!listener) return ENOMEM;
+    // Same mode on both endpoints: libxpc serializes the graph without a mach_msg interposer.
+    xpc_connection_enable_sim2host_4sim(listener);
+    xpc_connection_set_event_handler(listener, ^(xpc_object_t peer) {
+        if (xpc_get_type(peer) == XPC_TYPE_CONNECTION) acceptGuestBrokerConnection(peer);
+    });
+    xpc_endpoint_t endpoint = xpc_endpoint_create(listener);
+    mach_port_t port = endpoint ? xpc_endpoint_copy_listener_port_4sim(endpoint) : MACH_PORT_NULL;
+    xpc_connection_activate(listener);
+    if (!MACH_PORT_VALID(port)) { xpc_connection_cancel(listener); return EIO; }
+    guestBrokerListener = listener;
+    guestBrokerPort = port;
+    return 0;
+}
+
 static BOOL debuggerTargetCurrent(LSBJob *job, const audit_token_t *expected) {
     LSBPeerProcessIdentity identity = job.peerIdentity;
     return authenticatedSimulatorJob(job, expected) && !validatePeerTaskIdentity(&identity, expected);
@@ -2042,6 +2107,7 @@ static void handleMessage(LSBReceivedMessage *message) {
             error = prepareGuestTaskCapture(job);
             if (error) { replyError(message, error); finishJob(job, error); return; }
             LSBBootstrapMetadata metadata = { .guestPID = job.guestPID, .parentPID = LSBChildStatusGetParentPID(job.childStatus),
+                .guestBrokerPort = job.executionRole == LSB_EXECUTION_SIMULATOR ? guestBrokerPort : MACH_PORT_NULL,
                 .launchdTankPort = job.simulatorLaunchd ? LSBLaunchdHandshakeTankPort(job.launchdHandshake) : MACH_PORT_NULL,
                 .ports = &job.request->ports, .executionRole = job.executionRole, .taskCapture = job.taskCapture,
                 .nativeProductionStatus = job.executionRole == LSB_EXECUTION_SIMULATOR ? LSBHostNativeProductionStatus() : LSB_NATIVE_PRODUCTION_UNKNOWN };
@@ -2574,6 +2640,12 @@ int LSBStartHost(int argc, const char *argv[], const char *envp[]) {
             if (error) { disposeMessage(initial); return failSessionStart(error); }
             kern_return_t status = bootstrap_check_in(bootstrap_port, serviceName, &service);
             if (status) { disposeMessage(initial); fprintf(stderr, "[broker] bootstrap_check_in: %d\n", status); return failSessionStart(EIO); }
+            error = prepareGuestBrokerListener();
+            if (error) {
+                mach_port_mod_refs(mach_task_self(), service, MACH_PORT_RIGHT_RECEIVE, -1);
+                disposeMessage(initial);
+                return failSessionStart(error);
+            }
             jobs = [NSMutableArray new];
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                 unsigned receiveFailures = 0;
@@ -2594,7 +2666,11 @@ int LSBStartHost(int argc, const char *argv[], const char *envp[]) {
                         continue;
                     }
                     receiveFailures = 0;
-                    dispatch_async(dispatch_get_main_queue(), ^{ @autoreleasepool { handleMessage(message); } });
+                    dispatch_async(dispatch_get_main_queue(), ^{ @autoreleasepool {
+                        // This registered pipe is solely the native, single-threaded bootstrap. Guest operations use the mode-2 listener.
+                        if (message->kind != LSB_REQUEST_CHECKIN && message->kind != LSB_REQUEST_READY) replyError(message, EACCES);
+                        else handleMessage(message);
+                    } });
                 }
             });
         }

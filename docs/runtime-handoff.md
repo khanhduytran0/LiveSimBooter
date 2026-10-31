@@ -5,13 +5,15 @@ receives its launch plan, locates `RuntimeRoot` in the App Group, maps `usr/lib/
 enters the simulator runtime. LiveProcess uses C for its native startup and releases native XPC objects before handoff.
 The original starter delegates, controller, and storyboards remain in `unused/`; the new host UI lives in `Host/`.
 
-The native host caches MobileGestalt's `EffectiveProductionStatusAp` before launching guests. Only an exact Boolean false
+The native host weak-links MobileGestalt and calls the guarded weak `MGCopyAnswer` import to cache `EffectiveProductionStatusAp`
+before launching guests. Haptic capability queries use the same native import. An absent symbol remains an unavailable answer.
+Only an exact Boolean false
 permits native-cache detachment; missing, malformed, or true results keep the native cache and hardware workqueue bridge.
 This is a device production-status check, not an iOS-version or Developer Mode check. The development iPhone used for detach
 tests has custom boot arguments and relaxed TXM enforcement; those results do not establish support on ordinary iOS 26 phones.
 
 The authenticated XPC check-in reply carries that status separately from the guest's environment. LiveProcess validates the
-policy before switching TLS: non-production defaults to detach/software bridging, while production/unknown defaults to
+policy before switching TLS: non-production defaults to detachment with a direct workqueue-entry trampoline, while production/unknown defaults to
 retain/hardware bridging and rejects an explicit detach request. Explicit retention remains available on development devices.
 No MobileGestalt object or native function pointer crosses the handoff. See
 [retained-cache workqueue redirection](launchd.md#retained-native-cache-with-hardware-redirection) for its device evidence.
@@ -87,7 +89,8 @@ terminates the suspended thread before returning an error; unrecoverable cleanup
 storage still referenced by a live kernel thread.
 
 This supports explicit pthread creation with the selected simulator libpthread's custom-stack ABI. Kernel workqueue
-registration remains native; the current default redirects workqueue entry using the retained-cache bridge linked above.
+registration remains native. Retained-cache mode redirects workqueue entry using the hardware bridge linked above; detached
+development mode installs the direct entry trampoline below.
 The shim is loaded in the simulator after the native single-thread guard; it does not introduce a native worker during handoff.
 
 The host tests cover registration validation, state preservation, PC signing, requested suspension, failures, and cleanup,
@@ -97,12 +100,38 @@ breakpoints caught `LSBThreadCreate` and a new worker at simulator `_pthread_sta
 still inaccessible and the low simulator cache executable with zero reported dirty pages. Interactive child statuses,
 Ctrl-C, editing, and clean Ctrl-D exit are recorded with the [terminal validation](fake-pty.md#device-checks-and-diagnostics).
 
+## Detached development workqueue entry
+
+After guest TLS initialization and confirmed native-cache removal, [WorkqueueTrampoline.c](../Guest/WorkqueueTrampoline.c)
+recreates the kernel's recorded native `start_wqthread` address with a small anonymous executable mapping. It first reserves
+the exact page range with `mach_vm_allocate(VM_FLAGS_FIXED)` without overwrite. If occupied, only the kernel's detached-cache
+placeholder is accepted: a top-level, non-submap `VM_MEMORY_DYLD` region covering the whole range with current and maximum
+protections both zero. The query requests the v0 region-info ABI supported by the native iOS 26 kernel. Fixed `mmap` replaces
+only that reservation or validated placeholder slice; other occupied mappings fail. On installation failure, a carved slice
+is restored to its original no-access policy. The page transitions **RX → RW → RX**: the adapter writes `ldr x16, #8; br x16`
+and the literal guest entry address, flushes the instruction cache, then restores execute permission and verifies actual
+mapping coverage and RX protection. There is never a requested writable-executable phase.
+
+The trampoline preserves argument registers, SP, LR and TLS; only ABI scratch register `x16` is used. The same branch handles
+initial workqueue entry, reused workers, event delivery and the cleanup sentinel. Installation errors stop workqueue startup
+instead of falling back to recurring `EXC_BAD_ACCESS`. This depends on the development device's relaxed executable-memory
+policy; the host production-status gate and guest shared-region check both remain necessary.
+
+Direct mode installs no workqueue task exception handlers or hardware breakpoint. The existing single Mach port-set worker
+still serves authenticated process-inspection requests. Therefore this mode no longer intentionally faults at every native
+workqueue entry or replaces a debugger's task exception ports for redirection. The iPhone 15 development-device probe passed
+with and without LLDB, and a full simulator launchd continued after late attach and detach with no ignored exceptions;
+see [device evidence](debugging.md#detached-cache-direct-trampoline-on-iphone-15-2026-10-31).
+Retained-cache production behavior is unchanged. Direct mode requires the normalized `LSB_RETAIN_HOST_CACHE=0` and disabled
+hardware mode supplied by the native policy; noncanonical diagnostic environment values are not the supported configuration.
+
 ## Debugger publication
 
 [DebuggerBridge.cpp](../LiveSimBooter/DebuggerBridge.cpp) hands LLDB from native dyld notification to an app-resident notifier
 and publishes simulator state through `TASK_DYLD_INFO`. The kernel allows only one metadata-pointer relocation, which native
 startup may already have used. In the detach path, the bridge maps fresh anonymous metadata pages at the registered address
-after detaching the cache. Native cache code then remains inaccessible. The retained-cache path preserves native mappings;
+after detaching the cache. Original native cache code remains inaccessible; the direct workqueue trampoline contains newly
+written branch instructions, not native library code. The retained-cache path preserves native mappings;
 see [debugging](debugging.md) for the current publication and attachment behavior.
 
 [CompactImageInfo.cpp](../LiveSimBooter/CompactImageInfo.cpp) publishes AppleArchive image snapshots before notifications,

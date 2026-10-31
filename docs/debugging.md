@@ -446,3 +446,46 @@ xcrun devicectl device capture screenshot --device "$DEVICE" --destination tmp/d
 
 This captured a1320×2868 PNG on the iPhone17; the older `idevicescreenshot` service was unavailable there. The simulator
 FPS HUD was visible in `tmp/lsd-metadata-default/results/hud-fps.png` after the guest render server reported mode7.
+
+## Detached-cache direct trampoline on iPhone 15 (2026-10-31)
+
+The development iPhone16,2 running native iOS 26.1 / 23B50 passed the direct workqueue-entry test with the pinned simulator
+26.0 / 23A343. Native weak-imported `MGCopyAnswer` returned an exact CFBoolean false for `EffectiveProductionStatusAp`;
+the normal policy selected cache detachment without diagnostic overrides. The existing guest cache was unchanged at
+`0x110000000`, UUID `73ED978A-FD25-3166-A57A-34E21BB7E5B8`.
+
+The signed native host UUID was `C7C7E4D2-E8C2-3C34-AFF0-E0011750515F`, extension UUID
+`1432B3DA-A348-3C84-A8EF-FC66B7BBBD5E`, and rebuilt spawn-shim UUID `09DEDB19-5EBC-3EE1-91FA-B79997EC58F9`.
+The existing native Metal backend was reused. The bounded probe UUID was `6CC7EA30-8437-3FBF-BB52-04A637303B07`;
+it was installed under `/usr/local/bin` using the existing runtime signing identifier and identity. No cache was rebuilt,
+and the previous shim was preserved outside the active runtime before replacement.
+
+Detaching does not leave an unallocated hole: this kernel replaces the native shared-region submap with a DYLD-tagged
+anonymous placeholder whose current and maximum protections are zero. An initial no-overwrite reservation correctly
+returned `EADDRINUSE`. The final implementation carves only the validated entry-page slice from this placeholder. It
+requests the v0 `mach_vm_region_recurse` structure: requesting the iOS 27 SDK's newer count did not produce that count on
+the native iOS 26 kernel. These findings led to explicit placeholder and ABI validation rather than unconditional overwrite.
+
+Both probe runs confirmed `[0x1ebcb4000, 0x1ebcb8000)` as **r-x**, containing one dirty anonymous page. At the captured native
+entry `0x1ebcb78b8`, `ldr x16, #8; br x16` loads the literal guest `start_wqthread` address `0x16aae0a74`. The following region
+remained inaccessible. The no-debugger probe (native PID 11892) reported `CS_DEBUGGED=0`, no inherited workqueue hardware
+breakpoint, eight completed jobs over two waves with all four workers reused, one timer event, and exit 0. The same probe
+(PID 11896) passed under LLDB with ignored exceptions empty, including normal process exit 0 with no access-fault stop.
+This bounded test does not separately count cleanup-sentinel entries.
+
+A full services boot used native host 11898, guest launchd 11902, SpringBoard native 11936 / logical 11912, and Fish native
+11952 / logical 11924. A screenshot confirmed the populated Home Screen. Late LLDB attachment to launchd used hardware-only
+breakpoints, verified `target.parallel-module-load=false`, and left ignored exceptions empty. After the actual stopped
+notification, LLDB found 271 modules, named guest stack frames, and the same RX trampoline. Continue, interrupt and detach
+completed without an `EXC_BAD_ACCESS` stop. Independent SSH inspection confirmed the processes resumed and no debugserver
+remained. The existing launchd-owned Fish then executed `$DYLD_ROOT_PATH/bin/df` and received exit status 0.
+
+The amfid/TXM stream contained no matching rejection events during these tests. One post-detach sample showed launchd at
+10.8% CPU and native thermal pressure 0; this is not a controlled performance comparison. LLDB still warned about the missing
+`class_getMethodImplementation` lookup, so this establishes module discovery and ordinary backtraces, not complete Objective-C
+stepping. Production retained-cache/hardware mode was not retested on this device and is unchanged.
+
+The integrated local suite, focused final workqueue tests, ASan/UBSan, native ARM64 trampoline execution, host and guest
+builds, and diff checks passed. Evidence is under `tmp/workqueue-trampoline-20261031/`: `v0/probe-console.log`,
+`v0/probe-lldb-console.log`, `v0/lldb-probe.txt`, `v0/lldb-launchd.txt`, `v0/fish-after-detach.txt`,
+`v0/device-after-detach.json`, `v0/full-session.png`, and `security.log`.

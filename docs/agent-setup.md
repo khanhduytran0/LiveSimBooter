@@ -517,8 +517,9 @@ the previously registered native `start_wqthread`. Retaining the native cache wi
 tasks and launchd spawning df without LLDB. The native host now caches MobileGestalt `EffectiveProductionStatusAp` and sends
 it through authenticated child check-in. Only an exact Boolean false enables development cache detachment; production/unknown
 keeps retention and hardware bridging, and rejects an explicit detach request. The tested iPhone 15 has custom boot arguments
-and relaxed TXM enforcement; its detach success is not evidence that stock iOS 26 permits this. Developer Mode alone is not
-this status. Explicit `LSB_RETAIN_HOST_CACHE=1` remains available on a development device. See [handoff policy](runtime-handoff.md).
+and relaxed TXM enforcement; its detach success is not evidence that stock iOS 26 permits this. Detached development mode now
+maps a direct workqueue-entry trampoline, avoiding recurring instruction-fault exceptions. Developer Mode alone is not this
+status. Explicit `LSB_RETAIN_HOST_CACHE=1` remains available on a development device. See [handoff policy](runtime-handoff.md).
 Set `DEVICECTL_CHILD_LSB_DEBUG_STOP_CHILDREN=0` and
 `DEVICECTL_CHILD_LSB_DEBUG_STOP_BEFORE_HANDOFF=0` for an unattended test. The handoff rejects a guest cache
 reservation overlapping the current native cache; do not assume a historical ASLR address. Keeping the existing native
@@ -605,14 +606,15 @@ settings set -g target.require-hardware-breakpoint true
 settings set -g target.parallel-module-load false
 settings show target.parallel-module-load
 settings set -g target.memory-module-load-level partial
-settings set platform.plugin.darwin.ignored-exceptions EXC_BAD_ACCESS
 ```
 
 The tested Apple LLDB uses `target.parallel-module-load`; the spelling `target.experimental.parallel-module-loading` silently leaves
 that setting enabled. Confirm the displayed Boolean is false. Wait for the actual `Process ... stopped` notification after attaching:
 do not issue `process status`, backtraces, expressions, or Python polling while asynchronous attach is still initializing. A prompt alone
-does not mean attach completed. The workqueue bridge uses intentional `EXC_BAD_ACCESS`; ignoring it is appropriate for ordinary execution
-tests, not a substitute for the bridge's dedicated diagnostics.
+does not mean attach completed. Current detached development mode branches directly into guest workqueue code; leave
+`platform.plugin.darwin.ignored-exceptions` empty so genuine bad-access failures remain visible. When testing an older
+fault-based shim, configure `settings set platform.plugin.darwin.ignored-exceptions EXC_BAD_ACCESS` before attachment instead.
+Retained-cache hardware mode still owns an inherited execution breakpoint; do not remove it or consume all hardware slots.
 
 Before finishing, detach your debugger, verify the guest resumed, and confirm your remote debugserver session ended. If the LLDB client
 deadlocks during module/language-runtime initialization, terminate only that known client and verify detachment/resume independently.

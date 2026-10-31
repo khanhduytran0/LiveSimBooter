@@ -5,8 +5,16 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
-static unsigned createdThreads, detachedThreads, swappedHandlers, openedWorkqueues;
+static unsigned createdThreads, detachedThreads, swappedHandlers, openedWorkqueues, installedTrampolines;
+static int trampolineError;
+int LSBWorkqueueTrampolineInstall(uintptr_t nativeEntry, uintptr_t guestEntry) {
+    assert(nativeEntry == 0x2321218a74 && guestEntry == 0x12b269a74);
+    ++installedTrampolines;
+    return trampolineError;
+}
 static kern_return_t testSwap(task_t task, exception_mask_t mask, mach_port_t port, exception_behavior_t behavior,
                              thread_state_flavor_t flavor, exception_mask_array_t masks, mach_msg_type_number_t *count,
                              exception_handler_array_t ports, exception_behavior_array_t behaviors, exception_flavor_array_t flavors) {
@@ -39,7 +47,7 @@ uintptr_t LSBThreadSignPC(uintptr_t start, uint32_t flags) { (void)flags; return
 #undef pthread_detach
 #undef __workq_open
 
-int main(void) {
+static void testStartup(unsigned mode) {
     mach_port_t control;
     assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &control));
     assert(LSBWorkqueueAddProcessControlPort(control) == ENOTSUP);
@@ -47,22 +55,44 @@ int main(void) {
     assert(!setenv(LSB_HOST_WORKQUEUE_START_ENV, "0x2321218a74", 1));
     assert(!setenv(LSB_HOST_WORKQUEUE_FEATURES_ENV, "0x37", 1));
     assert(!setenv(LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV, "0", 1));
+    assert(!setenv(LSB_RETAIN_HOST_CACHE_ENV, mode ? "0" : "1", 1));
+    trampolineError = mode == 2 ? EACCES : 0;
     LSBWorkqueueRegister(0x12b269a74);
     assert(LSBWorkqueueAddProcessControlPort(MACH_PORT_NULL) == EINVAL && !createdThreads);
     // This is the real device order: guest constructor registers its endpoint before libdispatch first opens the workqueue.
+    if (trampolineError) {
+        assert(LSBWorkqueueAddProcessControlPort(control) == EACCES);
+        assert(installedTrampolines == 1 && !createdThreads && !swappedHandlers && !openedWorkqueues);
+        assert(!atomic_load(&exceptionServerReady));
+        LSBWorkqueueOpen(); // The real adapter must exit126, not open a kernel workqueue without a working entry.
+        abort();
+    }
     assert(!LSBWorkqueueAddProcessControlPort(control));
-    assert(atomic_load(&exceptionServerReady) && createdThreads == 1 && detachedThreads == 1 && swappedHandlers == 1 && !openedWorkqueues);
+    assert(atomic_load(&exceptionServerReady) && createdThreads == 1 && detachedThreads == 1 && !openedWorkqueues);
+    assert(swappedHandlers == !mode && installedTrampolines == !!mode);
+    assert(bridgeMask == (mode ? 0 : EXC_MASK_BAD_ACCESS) && !hardwareMode);
     mach_port_name_array_t members = NULL;
     mach_msg_type_number_t count = 0;
     assert(!mach_port_get_set_status(mach_task_self(), exceptionPortSet, &members, &count) && count == 2);
     assert((members[0] == control && members[1] == exceptionPort) || (members[1] == control && members[0] == exceptionPort));
     assert(!vm_deallocate(mach_task_self(), (vm_address_t)members, count * sizeof(*members)));
     assert(LSBWorkqueueOpen() == 17 && LSBWorkqueueOpen() == 17);
-    assert(createdThreads == 1 && detachedThreads == 1 && swappedHandlers == 1 && openedWorkqueues == 2);
+    assert(createdThreads == 1 && detachedThreads == 1 && swappedHandlers == !mode && openedWorkqueues == 2);
+    assert(installedTrampolines == !!mode); // Reopening uses the same sealed trampoline and control server.
     assert(!mach_port_mod_refs(mach_task_self(), control, MACH_PORT_RIGHT_RECEIVE, -1));
     assert(!mach_port_mod_refs(mach_task_self(), exceptionPortSet, MACH_PORT_RIGHT_PORT_SET, -1));
     assert(!mach_port_mod_refs(mach_task_self(), exceptionPort, MACH_PORT_RIGHT_RECEIVE, -1));
     assert(!mach_port_deallocate(mach_task_self(), exceptionPort));
-    puts("Workqueue startup: guest constructor creates one shared server before lazy workqueue open; native callers remain untouched");
+}
+
+int main(void) {
+    for (unsigned mode = 0; mode != 3; ++mode) {
+        pid_t child = fork();
+        assert(child >= 0);
+        if (!child) { testStartup(mode); _exit(0); }
+        int status;
+        assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == (mode == 2 ? 126 : 0));
+    }
+    puts("Workqueue startup: one control server, direct mode leaves exception handlers untouched, failed trampoline never opens workqueue");
     return 0;
 }

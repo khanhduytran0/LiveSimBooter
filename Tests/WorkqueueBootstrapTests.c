@@ -202,7 +202,7 @@ static void reset(void) {
     breakpointSlots = 6;
     slotQueryResult = 0;
     shortDebugCount = false;
-    hardwareMode = breakpointNeedsRestore = false;
+    hardwareMode = trampolineMode = breakpointNeedsRestore = false;
     hardwareSlot = -1;
     hardwareTrapCount = hardwareRejectedCount = 0;
     handlerSetCalls = deallocateCalls = 0;
@@ -510,7 +510,7 @@ static void initializationPolicyTests(void) {
         initializeBridge();
         assert(hardwareMode == cases[i].enabled);
         assert(bridgeMask == (EXC_MASK_BAD_ACCESS | (cases[i].enabled ? EXC_MASK_BREAKPOINT : 0)));
-        assert(environmentReads == 3 && allocationCalls == 1 && bridgeError == ENOTSUP);
+        assert(environmentReads == 4 && allocationCalls == 1 && bridgeError == ENOTSUP && !trampolineMode);
         assert(!taskGetCalls && !taskSetCalls); // Default selection precedes allocation but does not arm through a failed setup.
     }
     overrideEnvironment = false;

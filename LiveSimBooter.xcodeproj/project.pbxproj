@@ -537,6 +537,7 @@
 					QuartzCore,
 					"-framework",
 					AVFoundation,
+					"-weak-lMobileGestalt",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.kdt.LiveSimBooter;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -591,6 +592,7 @@
 					QuartzCore,
 					"-framework",
 					AVFoundation,
+					"-weak-lMobileGestalt",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.kdt.LiveSimBooter;
 				PRODUCT_NAME = "$(TARGET_NAME)";

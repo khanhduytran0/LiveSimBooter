@@ -1,10 +1,11 @@
-#define LSB_NATIVE_PRODUCTION_STATUS_TESTING 1
+#define MGCopyAnswer LSBTestCopyProductionStatusAnswer
 #include "../Host/NativeProductionStatus.c"
 #include <assert.h>
 
 static CFTypeRef testAnswer;
 static unsigned queryCount;
-CFTypeRef LSBTestCopyProductionStatusAnswer(void) {
+CFTypeRef LSBTestCopyProductionStatusAnswer(CFStringRef question) {
+    assert(CFEqual(question, CFSTR("EffectiveProductionStatusAp")));
     ++queryCount;
     return testAnswer ? CFRetain(testAnswer) : NULL;
 }

@@ -1,6 +1,8 @@
 #include "WorkqueueBootstrap.h"
+#include "WorkqueueTrampoline.h"
 #include "ThreadBootstrap.h"
 #include "ProcessDebugger.h"
+#include "../ProcessSupport/NativeRuntimePolicy.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -38,7 +40,7 @@ static mach_port_t savedPorts[EXC_TYPES_COUNT];
 static exception_behavior_t savedBehaviors[EXC_TYPES_COUNT];
 static thread_state_flavor_t savedFlavors[EXC_TYPES_COUNT];
 static exception_mask_t bridgeMask = EXC_MASK_BAD_ACCESS;
-static bool hardwareMode, breakpointNeedsRestore;
+static bool hardwareMode, trampolineMode, breakpointNeedsRestore;
 static int hardwareSlot = -1;
 static arm_debug_state64_t originalDebugState;
 static unsigned hardwareTrapCount, hardwareRejectedCount;
@@ -259,7 +261,7 @@ static uintptr_t rawSP(const arm_thread_state64_t *state) {
 
 static bool redirectException(ExceptionRequest *request) {
     arm_thread_state64_t *state = &request->state;
-    if (!nativeEntry || !guestEntry || rawPC(state) != nativeEntry) return false;
+    if (trampolineMode || !nativeEntry || !guestEntry || rawPC(state) != nativeEntry) return false;
     bool breakpoint = request->exception == EXC_BREAKPOINT;
     if (breakpoint) {
         // Do not rely on code[1] being an address: the authenticated state PC and inherited owned slot identify our trap.
@@ -463,17 +465,29 @@ static void initializeBridge(void) {
     if (!guestEntry || !parseMetadata(&nativeEntry, &features) || nativeEntry == guestEntry) return;
     const char *hardware = getenv(LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV);
     hardwareMode = !hardware || !strcmp(hardware, "1");
-    bridgeMask = EXC_MASK_BAD_ACCESS | (hardwareMode ? EXC_MASK_BREAKPOINT : 0);
+    const char *retain = getenv(LSB_RETAIN_HOST_CACHE_ENV);
+    trampolineMode = !hardwareMode && retain && !strcmp(retain, "0");
+    if (trampolineMode) {
+        bridgeError = LSBWorkqueueTrampolineInstall(nativeEntry, guestEntry);
+        if (bridgeError) return; // Do not hide a failed executable mapping behind recurring bad-access exceptions.
+    }
+    bridgeMask = trampolineMode ? 0 : EXC_MASK_BAD_ACCESS | (hardwareMode ? EXC_MASK_BREAKPOINT : 0);
     hardwareTrace("initialize", KERN_SUCCESS, bridgeMask);
+    bridgeError = ENOTSUP;
     bool ownsSend = false;
     if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &exceptionPort)) return;
     if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_PORT_SET, &exceptionPortSet)) goto releasePort;
     if (mach_port_move_member(mach_task_self(), exceptionPort, exceptionPortSet)) goto releasePort;
     if (mach_port_insert_right(mach_task_self(), exceptionPort, exceptionPort, MACH_MSG_TYPE_MAKE_SEND)) goto releasePort;
     ownsSend = true;
-    savedCount = EXC_TYPES_COUNT;
-    if (task_swap_exception_ports(mach_task_self(), bridgeMask, exceptionPort, EXCEPTION_STATE_IDENTITY | MACH_EXCEPTION_CODES,
-                                  ARM_THREAD_STATE64, savedMasks, &savedCount, savedPorts, savedBehaviors, savedFlavors)) goto releasePort;
+    // Direct mode keeps the port-set worker for authenticated process-inspection requests, without replacing debugger
+    // exception handlers. Its kernel workqueue entry is executable and branches to the guest without a Mach exception.
+    savedCount = 0;
+    if (bridgeMask) {
+        savedCount = EXC_TYPES_COUNT;
+        if (task_swap_exception_ports(mach_task_self(), bridgeMask, exceptionPort, EXCEPTION_STATE_IDENTITY | MACH_EXCEPTION_CODES,
+                                      ARM_THREAD_STATE64, savedMasks, &savedCount, savedPorts, savedBehaviors, savedFlavors)) goto releasePort;
+    }
     for (unsigned i = 0; i < savedCount; ++i) {
         if (MACH_PORT_VALID(savedPorts[i]) && !supportedBehavior(savedBehaviors[i], savedFlavors[i])) goto restore;
     }
@@ -495,7 +509,7 @@ static void initializeBridge(void) {
     return;
 restore:
     if (restoreHardwareBreakpoint()) _exit(126);
-    restoreHandlers();
+    if (bridgeMask) restoreHandlers();
 releasePort:
     if (MACH_PORT_VALID(exceptionPortSet)) (void)mach_port_mod_refs(mach_task_self(), exceptionPortSet, MACH_PORT_RIGHT_PORT_SET, -1);
     exceptionPortSet = MACH_PORT_NULL;

@@ -220,13 +220,16 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ThreadBootstrapTests.c -o "$test_directory/ThreadBootstrap"
 "$test_directory/ThreadBootstrap"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/WorkqueueBootstrapTests.c -o "$test_directory/WorkqueueBootstrap"
+    Tests/WorkqueueBootstrapTests.c Guest/WorkqueueTrampoline.c -o "$test_directory/WorkqueueBootstrap"
 "$test_directory/WorkqueueBootstrap"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/WorkqueueTrampolineTests.c -o "$test_directory/WorkqueueTrampoline"
+"$test_directory/WorkqueueTrampoline"
 xcrun clang -std=c11 -Wall -Wextra -Werror -Wno-unused-function \
     Tests/WorkqueueStartupTests.c -o "$test_directory/WorkqueueStartup"
 "$test_directory/WorkqueueStartup"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/WorkqueueMachTests.c ProcessSupport/PeerDebugger.c -o "$test_directory/WorkqueueMach"
+    Tests/WorkqueueMachTests.c Guest/WorkqueueTrampoline.c ProcessSupport/PeerDebugger.c -o "$test_directory/WorkqueueMach"
 "$test_directory/WorkqueueMach"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/LaunchdHandshakeTests.c -o "$test_directory/LaunchdHandshake"
@@ -350,7 +353,7 @@ xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 -
     Host/GuestEntitlementsConversion.m Host/DeviceType.m Host/DeviceConfiguration.m Host/RuntimeStorage.m ProcessSupport/StoreAppGroups.c \
     ProcessSupport/GuestEntitlements.c \
     ProcessSupport/FakePTY.c ProcessSupport/SpawnPlan.c ProcessSupport/ChildStatus.c ProcessSupport/NativeMetalControl.c \
-    -framework Foundation -framework IOSurface -o "$test_directory/Broker"
+    -framework Foundation -framework IOSurface -weak-lMobileGestalt -o "$test_directory/Broker"
 "$test_directory/Broker"
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
     Tests/IndigoHIDServerTests.m Host/IndigoHIDServer.m -framework Foundation -o "$test_directory/IndigoHIDServer"
@@ -394,7 +397,7 @@ xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
 "$test_directory/DeviceType"
 python3 Tests/SetupIOS26DeviceTypesTests.py
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
-    Tests/DeviceConfigurationTests.m Host/DeviceConfiguration.m Host/DeviceType.m -framework Foundation -o "$test_directory/DeviceConfiguration"
+    Tests/DeviceConfigurationTests.m Host/DeviceConfiguration.m Host/DeviceType.m -framework Foundation -weak-lMobileGestalt -o "$test_directory/DeviceConfiguration"
 "$test_directory/DeviceConfiguration"
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 -IHost -IProcessSupport \
     Tests/GuestDeviceSettingsTests.m Host/GuestDeviceSettings.m Host/DeviceType.m -framework Foundation -o "$test_directory/GuestDeviceSettings"

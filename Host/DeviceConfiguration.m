@@ -1,6 +1,6 @@
 #import "DeviceConfiguration.h"
+#include "Private/MobileGestaltPrivate.h"
 #include <TargetConditionals.h>
-#include <dlfcn.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -160,16 +160,12 @@ static CFBooleanRef nativeHapticsCapability(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         // Native host only: no MobileGestalt pointer or CF object crosses into the guest.
-        typedef CFTypeRef (*MGCopyAnswerFunction)(CFStringRef question);
-        void *library = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_LAZY | RTLD_LOCAL);
-        MGCopyAnswerFunction copyAnswer = library ? (MGCopyAnswerFunction)dlsym(library, "MGCopyAnswer") : NULL;
-        CFTypeRef answer = copyAnswer ? copyAnswer(CFSTR("gqDnklGQnpv5ilgh5uHckw")) : NULL;
+        CFTypeRef answer = MGCopyAnswer ? MGCopyAnswer(CFSTR("gqDnklGQnpv5ilgh5uHckw")) : NULL;
         BOOL known = answer && CFGetTypeID(answer) == CFBooleanGetTypeID();
         if (known) cachedAnswer = CFBooleanGetValue((CFBooleanRef)answer) ? kCFBooleanTrue : kCFBooleanFalse;
         fprintf(stderr, "[haptics] native closed-loop support=%s answer-type=%lu\n",
                 known ? CFBooleanGetValue(cachedAnswer) ? "true" : "false" : "unknown", answer ? (unsigned long)CFGetTypeID(answer) : 0);
         if (answer) CFRelease(answer);
-        if (library) dlclose(library);
     });
     return cachedAnswer;
 }

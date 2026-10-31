@@ -33,8 +33,9 @@ not a real tank PID or evidence that a tank process exited. A launchd update req
 ## Workqueue handoff
 
 Production or unknown devices keep the native shared cache mapped and enable hardware redirection of its registered workqueue entry.
-The host caches an exact Boolean `EffectiveProductionStatusAp` result and supplies it through authenticated check-in metadata.
-Only false permits the development detach/software path; production/unknown rejects `LSB_RETAIN_HOST_CACHE=0`.
+The host caches an exact Boolean `EffectiveProductionStatusAp` result through a guarded weak `MGCopyAnswer` import and supplies
+it through authenticated check-in metadata. An absent symbol remains unknown. Only false permits the development detach path;
+production/unknown rejects `LSB_RETAIN_HOST_CACHE=0`.
 Explicit retention is available on development devices, and launchd propagates the resolved settings to descendants.
 Rebuild the native app, extension, and guest shim together after this bootstrap-metadata change. See [handoff policy](runtime-handoff.md).
 The retained-cache evidence
@@ -46,16 +47,40 @@ thread's entry PC, but kernel workqueue threads start asynchronously at the regi
 Simulator libpthread also receives `EINVAL` from its second registration and consequently exposes an empty feature mask.
 
 Before detachment, LiveProcess captures the native workqueue entry address and actual `_pthread_workqueue_supported()` mask.
-The guest adapter uses these only after validating the known duplicate-registration ABI. On the first `__workq_open`, it
-starts one simulator pthread and installs a Mach exception handler. It redirects only an instruction fault at the exact old
+The guest adapter uses these only after validating the known duplicate-registration ABI. Current detached development mode
+installs a direct trampoline at that recorded entry; retained-cache mode uses hardware redirection. The shared initialization
+runs before the kernel workqueue opens, and can run earlier when the guest process-inspection endpoint is registered.
+
+### Detached development-cache trampoline
+
+[WorkqueueTrampoline.c](../Guest/WorkqueueTrampoline.c) verifies actual shared-region removal and reserves the exact entry pages
+without overwrite. If occupied, it accepts only the kernel's top-level, non-submap, DYLD-tagged placeholder with current and
+maximum protections both zero. It replaces that validated slice or its own reservation with anonymous RX memory, then changes RX to
+RW, writes `ldr x16, #8; br x16` with the guest `start_wqthread` literal, flushes the instruction cache, and changes RW back to RX.
+An actual VM-region query must confirm complete coverage and RX permissions before workqueues open. Failed installation
+returns an error rather than using an instruction-fault fallback. This mapping remains owned until process exit.
+
+The branch uses only ABI scratch register `x16`; it leaves the stack, link register, arguments and TLS unchanged for initial,
+reused, event-bearing and cleanup entries. Direct mode installs no task exception handler or hardware breakpoint for the
+workqueue. The existing Mach port-set worker remains for authenticated process inspection. This removes the intentional
+`EXC_BAD_ACCESS` traffic and its task-handler conflict with LLDB in this mode. The direct worker probe and full simulator boot
+passed on the development iPhone 15, including late LLDB attach/detach with no ignored exceptions;
+see [device evidence](debugging.md#detached-cache-direct-trampoline-on-iphone-15-2026-10-31).
+It depends on relaxed executable-memory policy on the non-production device. Production/unknown devices keep their native
+cache and existing hardware bridge. See [handoff implementation](runtime-handoff.md#detached-development-workqueue-entry).
+
+### Historical detached-cache exception bridge
+
+The earlier detached-cache implementation started one simulator pthread and installed a Mach exception handler on the first
+`__workq_open`. It redirected only an instruction fault at the exact old
 workqueue entry, with the expected workqueue argument shape, to simulator `start_wqthread`. Other register state is retained;
 only the PC and its signing flag change. Other faults are forwarded to the previously installed exception handlers, including
-LLDB. The handler uses Mach messages and no Objective-C or dispatch queue. Programs that never open workqueues do not start
-this server thread.
+LLDB. The handler uses Mach messages and no Objective-C or dispatch queue. That original experiment predated the shared
+process-inspection endpoint, which can now start the port-set server before a workqueue opens.
 
-Attach LLDB before the handoff for this experiment. Attaching a debugger later can replace the task exception handler. An
+The historical experiment attached LLDB before the handoff. Attaching a debugger later could replace the task exception handler. An
 exception inside the exception-server thread cannot be handled by that same thread; a previously installed debugger handler
-is retained for it when available.
+was retained for it when available. These fault-mode constraints are not a requirement of the current direct trampoline.
 
 ### iOS 27 hardware-breakpoint trial
 
@@ -90,8 +115,9 @@ after that experiment. The subsequent retained-cache trial below led to the curr
 ### Retained native cache with hardware redirection
 
 The next 2026-10-27 experiment retained native mappings and enabled both `LSB_RETAIN_HOST_CACHE=1` and
-`LSB_WORKQUEUE_HARDWARE_BREAKPOINT=1`; this combination is now the default. If supplied, the first setting value wins and only
-exact `1` enables it; omission also enables it. Launchd receives the same settings in its own environment and `Bootstrap.Child`,
+`LSB_WORKQUEUE_HARDWARE_BREAKPOINT=1`; this combination is now the default for production/unknown devices or explicit retention.
+If supplied, the first setting value wins and only exact `1` enables it; otherwise the host resolves the default from native
+production status. Launchd receives the same settings in its own environment and `Bootstrap.Child`,
 including an explicit `0` diagnostic opt-out. Retention alone does not redirect workers.
 Before changing debugger state or TLS, the handoff requires a present, nonzero native cache base and a complete guest cache
 reservation ending at or below that base. An absent cache returns `ENOTSUP`; overlap returns `EADDRINUSE`. The single-thread
@@ -129,7 +155,7 @@ because its separate SSH invocation rejected the host key; no launchctl result i
 
 No AMFI rejection or TXM fault was found in the bounded native capture. No LLDB/debugserver was attached for these tests.
 Native and guest builds, focused loader/handoff/workqueue/launchd-configuration tests, and the diff check passed. These runs used
-an experimental build with both flags supplied explicitly; the source now enables the pair by default. All test hosts and
+an experimental build with both flags supplied explicitly; current production/unknown policy enables the same pair. All test hosts and
 guests were stopped afterward, with no debugger left attached. The previous signed
 shim is preserved outside RuntimeRoot for rollback. No runtime cache was rebuilt or copied for this experiment.
 
@@ -306,11 +332,12 @@ in the app image. Temporary C++ staging allocations are destroyed before detachm
 main_stack and ptr_munge remain writable for simulator pthread consumption. Tests cover complete pointer containment,
 exact-fit and overflow boundaries, destroyed staging allocations, and consumption of the writable startup entries.
 
-Debugger detachment has a separate limitation. Immediately after detaching from PID 80141, a new workqueue thread faulted at
+The historical fault-based bridge had a debugger-detachment limitation. Immediately after detaching from PID 80141, a new workqueue thread faulted at
 `0x1e4a538b8` inside the unloaded native cache, with the workqueue cleanup entry register shape. Debugserver's detach path
 [restores its saved exception ports](https://github.com/llvm/llvm-project/blob/main/lldb/tools/debugserver/source/MacOSX/MachException.cpp#L437-L458),
 overwriting the runtime adapter installed after attachment. The df exec/wait sequence had completed before
-detach. Do not rely on a detached instance remaining healthy; start a fresh instance without LLDB after these tests.
+detach. That fault-mode instance was not safe to reuse after debugging; the current detached development path instead uses
+the direct trampoline described above and does not install those workqueue task exception handlers.
 Evidence: `tmp/launchd-df/post-detach.ips` and the final lines of `console-final-lldb.log`.
 
 The final normal run used launchd PID 80165, proxy/guest PID 80166, and replacement native PID 80167. df exited 0 and launchd

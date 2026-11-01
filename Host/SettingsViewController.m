@@ -1,4 +1,5 @@
 #import "SettingsViewController.h"
+#import "SettingsChoiceControllers.h"
 #import "BackgroundAudio.h"
 #import "GuestDisplaySettings.h"
 #import "GuestDeviceSettings.h"
@@ -7,15 +8,23 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <string.h>
 
-static void reloadSettingsTable(UITableView *table, NSIndexSet *sections) {
-    [UIView performWithoutAnimation:^{
-        if (sections) [table reloadSections:sections withRowAnimation:UITableViewRowAnimationNone];
-        else [table reloadData];
-        [table layoutIfNeeded];
-    }];
+static NSString *const DeviceGroup = @"device-group", *const SigningGroup = @"signing-group", *const DisplayGroup = @"display-group";
+static NSString *const AudioGroup = @"audio-group", *const HapticsGroup = @"haptics-group", *const BackgroundGroup = @"background-group";
+static NSString *const SessionGroup = @"session-group";
+static NSString *const Device = @"simulator-device-picker", *const FullWidth = @"simulator-full-width", *const LazySign = @"simulator-lazy-sign";
+static NSString *const SigningIdentity = @"signing-identity-import", *const HUD = @"simulator-performance-hud", *const Touches = @"simulator-visualize-touches";
+static NSString *const AudioOutput = @"simulator-audio-output", *const Haptics = @"simulator-haptic-passthrough";
+static NSString *const BackgroundAudio = @"silent-background-audio", *const PowerOff = @"simulator-power-off", *const Restart = @"simulator-restart";
+
+static BOOL setSpecifierProperty(PSSpecifier *specifier, NSString *key, id value) {
+    id previous = [specifier propertyForKey:key];
+    if (previous == value || [previous isEqual:value]) return NO;
+    if (value) [specifier setProperty:value forKey:key];
+    else [specifier removePropertyForKey:key];
+    return YES;
 }
 
-static void offerSimulatorRestart(UIViewController *controller, LSBGuestDeviceSettings *settings) {
+void LSBOfferSimulatorRestart(UIViewController *controller, LSBGuestDeviceSettings *settings) {
     if (settings.simulatorOff || !settings.needsRestart || !settings.canControlSimulator || controller.presentedViewController) return;
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:
         NSLocalizedString(@"Restart Simulator?", @"Title of the prompt to apply saved simulator settings.")
@@ -34,167 +43,9 @@ static void offerSimulatorRestart(UIViewController *controller, LSBGuestDeviceSe
 
 static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSettings *settings) {
     if ([controller.presentedViewController isKindOfClass:UIAlertController.class])
-        [controller dismissViewControllerAnimated:YES completion:^{ offerSimulatorRestart(controller, settings); }];
-    else offerSimulatorRestart(controller, settings);
+        [controller dismissViewControllerAnimated:YES completion:^{ LSBOfferSimulatorRestart(controller, settings); }];
+    else LSBOfferSimulatorRestart(controller, settings);
 }
-
-@interface LSBDeviceTypePickerViewController : UITableViewController
-@end
-@implementation LSBDeviceTypePickerViewController {
-    LSBGuestDeviceSettings *_settings;
-    NSString *_draftIdentifier;
-    UIBarButtonItem *_applyItem, *_progressItem;
-    UIActivityIndicatorView *_progress;
-    id _observer;
-}
-- (instancetype)init {
-    if (!(self = [super initWithStyle:UITableViewStyleInsetGrouped])) return nil;
-    self.title = NSLocalizedString(@"Simulator Device", @"Title of the simulated device picker.");
-    return self;
-}
-- (void)dealloc { if (_observer) [NSNotificationCenter.defaultCenter removeObserver:_observer]; }
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    _settings = LSBGuestDeviceSettings.sharedController;
-    _draftIdentifier = [_settings.currentIdentifier copy];
-    self.tableView.rowHeight = UITableViewAutomaticDimension;
-    self.tableView.estimatedRowHeight = 60;
-    _applyItem = [[UIBarButtonItem alloc] initWithTitle:NSLocalizedString(@"Apply", @"Save the selected simulated device.")
-        style:UIBarButtonItemStyleProminent target:self action:@selector(applySelection)];
-    _applyItem.accessibilityIdentifier = @"simulator-device-apply";
-    _applyItem.accessibilityHint = NSLocalizedString(@"Save the selected device, then choose whether to restart now or later.",
-        @"Accessibility hint for the device picker Apply button.");
-    _progress = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-    _progress.isAccessibilityElement = YES;
-    _progress.accessibilityLabel = NSLocalizedString(@"Applying simulator configuration", @"Accessibility label for the device settings progress indicator.");
-    _progressItem = [[UIBarButtonItem alloc] initWithCustomView:_progress];
-    __weak LSBDeviceTypePickerViewController *weakSelf = self;
-    _observer = [NSNotificationCenter.defaultCenter addObserverForName:LSBGuestDeviceSettingsDidChangeNotification object:_settings
-        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
-            (void)notification;
-            [weakSelf updateState];
-        }];
-    [self updateState];
-}
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    [_settings refresh];
-}
-- (void)updateState {
-    if (!_draftIdentifier.length) _draftIdentifier = [_settings.currentIdentifier copy];
-    BOOL validSelection = NO;
-    for (LSBGuestDeviceType *type in _settings.deviceTypes)
-        if ([type.identifier isEqual:_draftIdentifier]) { validSelection = YES; break; }
-    [UIView performWithoutAnimation:^{
-        self->_applyItem.enabled = validSelection && ![self->_draftIdentifier isEqual:self->_settings.currentIdentifier] && self->_settings.canApply;
-        if (self->_settings.pending) {
-            [self->_progress startAnimating];
-            self.navigationItem.rightBarButtonItems = @[self->_applyItem, self->_progressItem];
-        } else {
-            [self->_progress stopAnimating];
-            self.navigationItem.rightBarButtonItems = @[self->_applyItem];
-        }
-        reloadSettingsTable(self.tableView, nil);
-    }];
-}
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    (void)tableView; (void)section;
-    return _settings.deviceTypes.count;
-}
-- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    (void)tableView; (void)section;
-    NSString *description = NSLocalizedString(@"Choose a device, then tap Apply to save its screen resolution. While running, choose Restart or Later.",
-        @"Device picker instructions.");
-    return _settings.statusText.length ? [NSString stringWithFormat:NSLocalizedString(@"%@\n\n%@",
-        @"Settings footer: explanatory paragraph, then current status."), description, _settings.statusText] : description;
-}
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    (void)tableView;
-    LSBGuestDeviceType *type = _settings.deviceTypes[indexPath.row];
-    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-    cell.textLabel.text = type.displayName;
-    cell.detailTextLabel.text = type.detailText;
-    cell.textLabel.numberOfLines = cell.detailTextLabel.numberOfLines = 0;
-    cell.accessoryType = [type.identifier isEqual:_draftIdentifier] ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
-    cell.userInteractionEnabled = _settings.canApply;
-    cell.textLabel.enabled = cell.detailTextLabel.enabled = cell.userInteractionEnabled;
-    cell.accessibilityIdentifier = [@"simulator-device-" stringByAppendingString:type.identifier];
-    cell.accessibilityHint = [type.identifier isEqual:_settings.currentIdentifier] ?
-        NSLocalizedString(@"Saved device.", @"Accessibility hint for the currently saved device choice.") :
-        NSLocalizedString(@"Select, then tap Apply.", @"Accessibility hint for another device choice.");
-    return cell;
-}
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (!_settings.canApply || (NSUInteger)indexPath.row >= _settings.deviceTypes.count) return;
-    _draftIdentifier = [_settings.deviceTypes[indexPath.row].identifier copy];
-    [self updateState];
-}
-- (void)applySelection {
-    if (!_applyItem.enabled) return;
-    BOOL saved = [_settings saveDeviceIdentifier:_draftIdentifier];
-    [self updateState];
-    if (saved) offerSimulatorRestart(self, _settings);
-}
-@end
-
-@interface LSBHUDSettingsViewController : UITableViewController
-@end
-@implementation LSBHUDSettingsViewController {
-    id _observer, _deviceObserver;
-}
-- (instancetype)init {
-    if (!(self = [super initWithStyle:UITableViewStyleInsetGrouped])) return nil;
-    self.title = NSLocalizedString(@"Performance HUD", @"Title of the performance heads-up display setting.");
-    return self;
-}
-- (void)dealloc {
-    if (_observer) [NSNotificationCenter.defaultCenter removeObserver:_observer];
-    if (_deviceObserver) [NSNotificationCenter.defaultCenter removeObserver:_deviceObserver];
-}
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    __weak LSBHUDSettingsViewController *weakSelf = self;
-    _observer = [NSNotificationCenter.defaultCenter addObserverForName:LSBGuestDisplaySettingsDidChangeNotification
-        object:LSBGuestDisplaySettings.sharedController queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
-            (void)notification;
-            reloadSettingsTable(weakSelf.tableView, nil);
-        }];
-    _deviceObserver = [NSNotificationCenter.defaultCenter addObserverForName:LSBGuestDeviceSettingsDidChangeNotification
-        object:LSBGuestDeviceSettings.sharedController queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
-            (void)notification;
-            reloadSettingsTable(weakSelf.tableView, nil);
-        }];
-}
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    (void)tableView; (void)section;
-    return LSBPerformanceHUDNames().count;
-}
-- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    (void)tableView; (void)section;
-    return LSBGuestDeviceSettings.sharedController.simulatorOff ?
-        NSLocalizedString(@"Start the simulator to change its live display settings.", @"Settings footer while the simulator is off.") :
-        LSBGuestDisplaySettings.sharedController.statusText;
-}
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    (void)tableView;
-    LSBGuestDisplaySettings *settings = LSBGuestDisplaySettings.sharedController;
-    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-    cell.textLabel.text = [NSString stringWithFormat:NSLocalizedString(@"%ld · %@", @"Performance HUD row: numeric mode identifier, then localized mode name."),
-        (long)indexPath.row, LSBPerformanceHUDNames()[indexPath.row]];
-    cell.accessoryType = settings.hudMode == indexPath.row ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
-    cell.userInteractionEnabled = LSBGuestDeviceSettings.sharedController.canControlSimulator &&
-        !settings.pending && !settings.outcomeUnknown && settings.hudMode >= 0;
-    cell.textLabel.enabled = cell.userInteractionEnabled;
-    return cell;
-}
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (!LSBGuestDeviceSettings.sharedController.canControlSimulator) return;
-    [LSBGuestDisplaySettings.sharedController setHUDMode:indexPath.row];
-    [self.navigationController popViewControllerAnimated:YES];
-}
-@end
 
 @interface LSBSettingsViewController () <UIDocumentPickerDelegate>
 @end
@@ -203,15 +54,21 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
     LSBBackgroundAudio *_audio;
     LSBGuestDisplaySettings *_display;
     LSBGuestDeviceSettings *_device;
+    PSSpecifier *_fullWidthSpecifier;
     id _audioObserver, _displayObserver, _deviceObserver, _signingObserver;
     NSString *_signingSummary, *_signingError;
     BOOL _importingIdentity;
 }
 - (instancetype)init {
-    if (!(self = [super initWithStyle:UITableViewStyleInsetGrouped])) return nil;
+    if (!(self = [super init])) return nil;
+    _audio = LSBBackgroundAudio.sharedController;
+    _display = LSBGuestDisplaySettings.sharedController;
+    _device = LSBGuestDeviceSettings.sharedController;
+    _signingSummary = LSBSigningIdentitySummary();
     self.title = NSLocalizedString(@"Settings", @"Title of the native Settings tab.");
     return self;
 }
+- (UITableViewStyle)tableViewStyle { return UITableViewStyleInsetGrouped; }
 - (void)dealloc {
     if (_audioObserver) [NSNotificationCenter.defaultCenter removeObserver:_audioObserver];
     if (_displayObserver) [NSNotificationCenter.defaultCenter removeObserver:_displayObserver];
@@ -220,47 +77,22 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
-    _audio = LSBBackgroundAudio.sharedController;
-    _display = LSBGuestDisplaySettings.sharedController;
-    _device = LSBGuestDeviceSettings.sharedController;
-    self.tableView.rowHeight = UITableViewAutomaticDimension;
-    self.tableView.estimatedRowHeight = 54;
+    self.table.rowHeight = UITableViewAutomaticDimension;
+    self.table.estimatedRowHeight = 54;
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh
         target:self action:@selector(refreshDisplay)];
     self.navigationItem.rightBarButtonItem.accessibilityLabel =
         NSLocalizedString(@"Refresh simulator settings", @"Accessibility label for the Settings refresh button.");
     __weak LSBSettingsViewController *weakSelf = self;
     _audioObserver = [NSNotificationCenter.defaultCenter addObserverForName:LSBBackgroundAudioDidChangeNotification object:_audio
-        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
-            (void)notification;
-            reloadSettingsTable(weakSelf.tableView, [NSIndexSet indexSetWithIndex:0]);
-        }];
+        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; [weakSelf updateSettings]; }];
     _displayObserver = [NSNotificationCenter.defaultCenter addObserverForName:LSBGuestDisplaySettingsDidChangeNotification object:_display
-        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
-            (void)notification;
-            LSBSettingsViewController *controller = weakSelf;
-            if (!controller) return;
-            [UIView performWithoutAnimation:^{
-                controller.navigationItem.rightBarButtonItem.enabled = !controller->_display.pending && !controller->_device.pending;
-                reloadSettingsTable(controller.tableView, [NSIndexSet indexSetWithIndex:1]);
-            }];
-        }];
+        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; [weakSelf updateSettings]; }];
     _deviceObserver = [NSNotificationCenter.defaultCenter addObserverForName:LSBGuestDeviceSettingsDidChangeNotification object:_device
-        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
-            (void)notification;
-            LSBSettingsViewController *controller = weakSelf;
-            if (!controller) return;
-            [UIView performWithoutAnimation:^{
-                controller.navigationItem.rightBarButtonItem.enabled = !controller->_display.pending && !controller->_device.pending;
-                reloadSettingsTable(controller.tableView, [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(1, 6)]);
-            }];
-        }];
+        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; [weakSelf updateSettings]; }];
     _signingObserver = [NSNotificationCenter.defaultCenter addObserverForName:LSBSigningIdentityDidChangeNotification object:nil
-        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
-            (void)notification;
-            [weakSelf refreshSigningIdentity];
-        }];
-    [self refreshSigningIdentity];
+        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; [weakSelf refreshSigningIdentity]; }];
+    [self updateSettings];
 }
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
@@ -274,45 +106,100 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
 - (void)refreshSigningIdentity {
     _signingSummary = LSBSigningIdentitySummary();
     [_device refresh];
-    reloadSettingsTable(self.tableView, [NSIndexSet indexSetWithIndex:6]);
+    [self updateSettings];
 }
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { (void)tableView; return 7; }
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    (void)tableView;
-    if (section == 6) return 2;
-    if (section == 2) {
-        LSBGuestDeviceType *type = LSBGuestDeviceTypeForIdentifier(_device.currentIdentifier);
-        return type.hasHomeButton || type.isPad ? 2 : 1;
+- (PSSpecifier *)group:(NSString *)identifier title:(NSString *)title {
+    PSSpecifier *specifier = [PSSpecifier groupSpecifierWithName:title];
+    specifier.identifier = identifier;
+    return specifier;
+}
+- (PSSpecifier *)setting:(NSString *)identifier title:(NSString *)title cell:(PSSpecifierType)cell detail:(Class)detail {
+    PSSpecifier *specifier = [PSSpecifier preferenceSpecifierNamed:title target:self
+        set:cell == PSSwitchCell ? @selector(setSetting:specifier:) : NULL
+        get:@selector(readSetting:) detail:detail cell:cell edit:Nil];
+    specifier.identifier = identifier;
+    return specifier;
+}
+- (NSArray<PSSpecifier *> *)specifiers {
+    NSArray<PSSpecifier *> *existing = [super unprotectedSpecifiers];
+    if (existing) return existing;
+    _fullWidthSpecifier = [self setting:FullWidth title:NSLocalizedString(@"Use Full Width", @"Switch to expand the simulator display within the available view.")
+        cell:PSSwitchCell detail:Nil];
+    NSMutableArray<PSSpecifier *> *items = [NSMutableArray arrayWithArray:@[
+        [self group:DeviceGroup title:NSLocalizedString(@"Simulator device", @"Settings section heading for device selection and display sizing.")],
+        [self setting:Device title:NSLocalizedString(@"Device", @"Settings row that opens the simulated device picker.")
+            cell:PSLinkCell detail:LSBDeviceTypePickerViewController.class],
+        [self group:SigningGroup title:NSLocalizedString(@"Code signing", @"Settings section heading for lazy runtime code signing.")],
+        [self setting:LazySign title:NSLocalizedString(@"Lazy sign", @"Switch to sign runtime binaries on signature-registration failure.")
+            cell:PSSwitchCell detail:Nil],
+        [self setting:SigningIdentity title:NSLocalizedString(@"Import P12…", @"Choose a PKCS12 signing identity document.") cell:PSButtonCell detail:Nil],
+        [self group:DisplayGroup title:NSLocalizedString(@"Simulator display", @"Settings section heading for live display controls.")],
+        [self setting:HUD title:NSLocalizedString(@"Performance HUD", @"Title of the performance heads-up display setting.")
+            cell:PSLinkCell detail:LSBHUDSettingsViewController.class],
+        [self setting:Touches title:NSLocalizedString(@"Visualize touches", @"Switch to show simulator touch markers.") cell:PSSwitchCell detail:Nil],
+        [self group:AudioGroup title:NSLocalizedString(@"Experimental audio", @"Settings section heading for optional simulator audio output.")],
+        [self setting:AudioOutput title:NSLocalizedString(@"Audio output", @"Switch for simulator audio playback on the physical device.")
+            cell:PSSwitchCell detail:Nil],
+        [self group:HapticsGroup title:NSLocalizedString(@"Experimental haptics", @"Settings section heading for optional haptic passthrough.")],
+        [self setting:Haptics title:NSLocalizedString(@"Haptic passthrough", @"Switch for simulator haptic feedback on the physical device.")
+            cell:PSSwitchCell detail:Nil],
+        [self group:BackgroundGroup title:NSLocalizedString(@"Background execution", @"Settings section heading for native background audio.")],
+        [self setting:BackgroundAudio title:NSLocalizedString(@"Silent background audio", @"Switch to keep the native host active by playing silence.")
+            cell:PSSwitchCell detail:Nil],
+        [self group:SessionGroup title:NSLocalizedString(@"Simulator session", @"Settings section heading for Power Off and Restart.")],
+        [self setting:PowerOff title:NSLocalizedString(@"Power Off", @"Stop the simulator session without deleting its data.") cell:PSButtonCell detail:Nil],
+        [self setting:Restart title:NSLocalizedString(@"Restart", @"Restart the simulator session.") cell:PSButtonCell detail:Nil],
+    ]];
+    LSBGuestDeviceType *type = LSBGuestDeviceTypeForIdentifier(_device.currentIdentifier);
+    if (type.hasHomeButton || type.isPad) [items insertObject:_fullWidthSpecifier atIndex:2];
+    for (PSSpecifier *specifier in items) {
+        if (specifier.cellType == PSButtonCell) specifier.buttonAction = @selector(performSettingAction:);
+        [self updateSpecifier:specifier];
     }
-    return section == 1 || section == 5 ? 2 : 1;
+    [super setSpecifiers:items];
+    return items;
 }
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    (void)tableView;
-    if (section == 0) return NSLocalizedString(@"Background execution", @"Settings section heading for native background audio.");
-    if (section == 1) return NSLocalizedString(@"Simulator display", @"Settings section heading for live display controls.");
-    if (section == 2) return NSLocalizedString(@"Simulator device", @"Settings section heading for device selection and display sizing.");
-    if (section == 3) return NSLocalizedString(@"Experimental haptics", @"Settings section heading for optional haptic passthrough.");
-    if (section == 4) return NSLocalizedString(@"Experimental audio", @"Settings section heading for optional simulator audio output.");
-    if (section == 6) return NSLocalizedString(@"Code signing", @"Settings section heading for lazy runtime code signing.");
-    return NSLocalizedString(@"Simulator session", @"Settings section heading for Power Off and Restart.");
+- (id)readSetting:(PSSpecifier *)specifier {
+    NSString *identifier = specifier.identifier;
+    if ([identifier isEqual:Device]) return LSBGuestDeviceTypeForIdentifier(_device.currentIdentifier).displayName ?:
+        NSLocalizedString(@"Choose…", @"Placeholder when no simulated device name is available.");
+    if ([identifier isEqual:HUD]) return _display.hudMode >= 0 && _display.hudMode < (NSInteger)LSBPerformanceHUDNames().count ?
+        LSBPerformanceHUDNames()[_display.hudMode] : NSLocalizedString(@"Unavailable", @"A simulator display setting could not be read.");
+    if ([identifier isEqual:FullWidth]) return @(_device.fullWidth);
+    if ([identifier isEqual:LazySign]) return @(LSBLazySigningEnabled());
+    if ([identifier isEqual:Touches]) return @(_display.touches == 1);
+    if ([identifier isEqual:AudioOutput]) return @(_device.audioOutputEnabled);
+    if ([identifier isEqual:Haptics]) return @(_device.hapticsEnabled);
+    if ([identifier isEqual:BackgroundAudio]) return @(_audio.enabled);
+    return nil;
 }
-- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    (void)tableView;
-    if (section == 6) {
+- (BOOL)settingEnabled:(PSSpecifier *)specifier {
+    NSString *identifier = specifier.identifier;
+    if ([identifier isEqual:LazySign]) return _device.canApply && !_importingIdentity && (LSBLazySigningEnabled() || _signingSummary.length);
+    if ([identifier isEqual:SigningIdentity]) return _device.canApply && !_importingIdentity;
+    if ([identifier isEqual:HUD] || [identifier isEqual:Touches]) return _device.canControlSimulator && !_display.pending &&
+        !_display.outcomeUnknown && ([identifier isEqual:HUD] ? _display.hudMode >= 0 : _display.touches >= 0);
+    if ([identifier isEqual:AudioOutput]) return _device.canApply && !_device.audioOutputForced;
+    if ([identifier isEqual:Haptics]) return _device.canApply && !_device.hapticsForced;
+    if ([identifier isEqual:PowerOff] || [identifier isEqual:Restart]) return _device.canControlSimulator;
+    return YES;
+}
+- (NSString *)footerForGroup:(NSString *)identifier {
+    if ([identifier isEqual:SigningGroup]) {
         NSString *description = NSLocalizedString(@"Off by default. Sign a runtime binary only when its signature registration fails. "
             @"The P12 and password stay in this app's device-only keychain. Changes apply on the next simulator start or restart.",
             @"Description of lazy signing and where its credentials are stored.");
         return _signingError.length ? [NSString stringWithFormat:NSLocalizedString(@"%@\n\n%@",
             @"Settings footer: explanatory paragraph, then current status."), description, _signingError] : description;
     }
-    if (section == 5) return _device.sessionStatusText;
-    if (section == 4) return _device.audioOutputForced ? NSLocalizedString(@"Enabled by the host launch environment.",
+    if ([identifier isEqual:SessionGroup]) return _device.sessionStatusText;
+    if ([identifier isEqual:AudioGroup]) return _device.audioOutputForced ? NSLocalizedString(@"Enabled by the host launch environment.",
         @"Settings footer when a feature is forced on by the native host environment.") : _device.audioOutputStatusText;
-    if (section == 3) return _device.hapticsForced ? NSLocalizedString(@"Enabled by the host launch environment.",
+    if ([identifier isEqual:HapticsGroup]) return _device.hapticsForced ? NSLocalizedString(@"Enabled by the host launch environment.",
         @"Settings footer when a feature is forced on by the native host environment.") : _device.hapticsStatusText;
-    if (section == 1) return _device.simulatorOff ?
+    if ([identifier isEqual:DisplayGroup]) return _device.simulatorOff ?
         NSLocalizedString(@"Start the simulator to change its live display settings.", @"Settings footer while the simulator is off.") : _display.statusText;
-    if (section == 2) {
+    if ([identifier isEqual:DeviceGroup]) {
         LSBGuestDeviceType *type = LSBGuestDeviceTypeForIdentifier(_device.currentIdentifier);
         if (!type.hasHomeButton && !type.isPad) return _device.statusText;
         return [NSString stringWithFormat:NSLocalizedString(@"%@\n\nFull width preserves the screen’s aspect ratio and fits within the available height.",
@@ -321,184 +208,117 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
     NSString *description = NSLocalizedString(@"Play silence to keep the host's audio session active in the background. Off by default. "
         @"This may increase battery use. Other audio can continue playing.",
         @"Description of native silent background audio, independent of simulator audio output.");
-    NSString *status = _audio.statusDetail;
-    if (status.length) return [NSString stringWithFormat:NSLocalizedString(@"%@\n\n%@",
-        @"Settings footer: explanatory paragraph, then current status."), description, status];
-    return description;
+    return _audio.statusDetail.length ? [NSString stringWithFormat:NSLocalizedString(@"%@\n\n%@",
+        @"Settings footer: explanatory paragraph, then current status."), description, _audio.statusDetail] : description;
+}
+- (BOOL)updateSpecifier:(PSSpecifier *)specifier {
+    if (specifier.cellType == PSGroupCell) return setSpecifierProperty(specifier, @"footerText", [self footerForGroup:specifier.identifier]);
+    BOOL changed = setSpecifierProperty(specifier, @"enabled", [self settingEnabled:specifier] ? @YES : @NO);
+    // Track rendered state separately from Preferences' value cache; getters always use the existing controllers.
+    changed |= setSpecifierProperty(specifier, @"LSBRenderedValue", [self readSetting:specifier]);
+    if ([specifier.identifier isEqual:SigningIdentity]) {
+        NSString *name = _importingIdentity ? NSLocalizedString(@"Importing…", @"P12 import is in progress.") :
+            _signingSummary.length ? NSLocalizedString(@"Imported", @"A P12 signing identity has been imported; tap to replace it.") :
+            NSLocalizedString(@"Import P12…", @"Choose a PKCS12 signing identity document.");
+        if (![specifier.name isEqual:name]) { specifier.name = name; changed = YES; }
+        changed |= setSpecifierProperty(specifier, @"LSBIdentitySummary", _signingSummary);
+    }
+    return changed;
+}
+- (void)updateSettings {
+    if (!self.isViewLoaded) return;
+    [UIView performWithoutAnimation:^{
+        self.navigationItem.rightBarButtonItem.enabled = !self->_display.pending && !self->_device.pending;
+        LSBGuestDeviceType *type = LSBGuestDeviceTypeForIdentifier(self->_device.currentIdentifier);
+        BOOL fullWidth = type.hasHomeButton || type.isPad;
+        BOOL present = [self.specifiers containsObject:self->_fullWidthSpecifier];
+        if (fullWidth != present) {
+            NSMutableArray *items = [self.specifiers mutableCopy];
+            if (fullWidth) [items insertObject:self->_fullWidthSpecifier atIndex:[items indexOfObject:[self specifierForID:Device]] + 1];
+            else [items removeObject:self->_fullWidthSpecifier];
+            for (PSSpecifier *specifier in items) [self updateSpecifier:specifier];
+            [self setSpecifiers:items];
+        } else {
+            for (PSSpecifier *specifier in self.specifiers)
+                if ([self updateSpecifier:specifier]) [self reloadSpecifier:specifier animated:NO];
+        }
+        [self configureVisibleCells];
+        [self.table layoutIfNeeded];
+    }];
+}
+- (void)setSetting:(NSNumber *)value specifier:(PSSpecifier *)specifier {
+    if (![self settingEnabled:specifier]) { [self reloadSpecifier:specifier animated:NO]; return; }
+    NSString *identifier = specifier.identifier;
+    BOOL saved = NO;
+    if ([identifier isEqual:FullWidth]) [_device setFullWidth:value.boolValue];
+    else if ([identifier isEqual:BackgroundAudio]) [_audio setEnabled:value.boolValue];
+    else if ([identifier isEqual:Touches]) [_display setVisualizeTouches:value.boolValue];
+    else if ([identifier isEqual:AudioOutput]) saved = [_device saveAudioOutputEnabled:value.boolValue];
+    else if ([identifier isEqual:Haptics]) saved = [_device saveHapticsEnabled:value.boolValue];
+    else if ([identifier isEqual:LazySign]) {
+        int error = LSBHostSaveLazySigningEnabled(value.boolValue);
+        _signingError = error ? [NSString stringWithFormat:
+            NSLocalizedString(@"Could not save lazy signing: %s (%d).", @"Lazy signing settings error: description and numeric code."),
+            strerror(error), error] : nil;
+        [self refreshSigningIdentity];
+        saved = !error;
+    }
+    // Restore confirmed values after a failed save or while live guest readback is pending.
+    [self reloadSpecifier:specifier animated:NO];
+    [self configureVisibleCells];
+    if (saved) LSBOfferSimulatorRestart(self, _device);
+}
+- (void)performSettingAction:(PSSpecifier *)specifier {
+    if (![self settingEnabled:specifier]) return;
+    if ([specifier.identifier isEqual:SigningIdentity]) [self chooseSigningIdentity];
+    else if ([specifier.identifier isEqual:PowerOff]) [_device powerOffSimulator];
+    else if ([specifier.identifier isEqual:Restart]) [_device restartSimulator];
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    (void)tableView;
-    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
-    cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    cell.textLabel.numberOfLines = 0;
-    if (indexPath.section == 6) {
-        if (indexPath.row == 0) {
-            cell.textLabel.text = NSLocalizedString(@"Lazy sign", @"Switch to sign runtime binaries on signature-registration failure.");
-            UISwitch *toggle = [UISwitch new];
-            toggle.on = LSBLazySigningEnabled();
-            toggle.enabled = _device.canApply && !_importingIdentity && (toggle.on || _signingSummary.length);
-            toggle.accessibilityLabel = cell.textLabel.text;
-            toggle.accessibilityIdentifier = @"simulator-lazy-sign";
-            toggle.accessibilityHint = NSLocalizedString(@"Import a P12 signing identity first. Save this choice, then restart now or later.",
-                @"Accessibility hint for enabling lazy signing.");
-            cell.textLabel.enabled = toggle.enabled;
-            __weak LSBSettingsViewController *weakSelf = self;
-            [toggle addAction:[UIAction actionWithHandler:^(UIAction *action) {
-                LSBSettingsViewController *controller = weakSelf;
-                if (!controller) return;
-                UISwitch *sender = (UISwitch *)action.sender;
-                BOOL requested = sender.on;
-                sender.on = LSBLazySigningEnabled();
-                int error = LSBHostSaveLazySigningEnabled(requested);
-                controller->_signingError = error ? [NSString stringWithFormat:
-                    NSLocalizedString(@"Could not save lazy signing: %s (%d).", @"Lazy signing settings error: description and numeric code."),
-                    strerror(error), error] : nil;
-                [controller refreshSigningIdentity];
-                if (!error) offerSimulatorRestart(controller, controller->_device);
-            }] forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = toggle;
-        } else {
-            cell.textLabel.text = _importingIdentity ? NSLocalizedString(@"Importing…", @"P12 import is in progress.") :
-                _signingSummary.length ? NSLocalizedString(@"Imported", @"A P12 signing identity has been imported; tap to replace it.") :
-                NSLocalizedString(@"Import P12…", @"Choose a PKCS12 signing identity document.");
-            cell.textLabel.numberOfLines = 1;
-            cell.textLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-            cell.userInteractionEnabled = _device.canApply && !_importingIdentity;
-            cell.textLabel.enabled = cell.userInteractionEnabled;
-            cell.textLabel.textColor = cell.userInteractionEnabled ? self.view.tintColor : UIColor.secondaryLabelColor;
-            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            cell.accessibilityIdentifier = @"signing-identity-import";
-            if (_signingSummary.length) {
-                cell.accessibilityValue = _signingSummary;
-                UIButton *remove = [UIButton buttonWithType:UIButtonTypeSystem];
-                remove.frame = CGRectMake(0, 0, 32, 32);
-                [remove setImage:[UIImage systemImageNamed:@"xmark.circle.fill"] forState:UIControlStateNormal];
-                remove.enabled = cell.userInteractionEnabled;
-                remove.accessibilityIdentifier = @"signing-identity-remove";
-                remove.accessibilityLabel = NSLocalizedString(@"Remove signing identity", @"Delete the imported signing identity from this app's keychain.");
-                __weak LSBSettingsViewController *weakSelf = self;
-                [remove addAction:[UIAction actionWithHandler:^(UIAction *action) {
-                    (void)action;
-                    [weakSelf confirmRemoveSigningIdentity];
-                }] forControlEvents:UIControlEventTouchUpInside];
-                cell.accessoryView = remove;
-            }
-        }
-        return cell;
-    }
-    if (indexPath.section == 5) {
-        BOOL powerOff = indexPath.row == 0;
-        cell.textLabel.text = powerOff ? NSLocalizedString(@"Power Off", @"Stop the simulator session without deleting its data.") :
-            NSLocalizedString(@"Restart", @"Restart the simulator session.");
-        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-        cell.userInteractionEnabled = _device.canControlSimulator;
-        cell.textLabel.enabled = cell.userInteractionEnabled;
-        cell.textLabel.textColor = cell.userInteractionEnabled ? (powerOff ? UIColor.systemRedColor : self.view.tintColor) : UIColor.secondaryLabelColor;
-        cell.accessibilityIdentifier = powerOff ? @"simulator-power-off" : @"simulator-restart";
-        return cell;
-    }
-    if (indexPath.section == 3 || indexPath.section == 4) {
-        BOOL audioOutput = indexPath.section == 4;
-        cell.textLabel.text = audioOutput ? NSLocalizedString(@"Audio output", @"Switch for simulator audio playback on the physical device.") :
-            NSLocalizedString(@"Haptic passthrough", @"Switch for simulator haptic feedback on the physical device.");
-        UISwitch *toggle = [UISwitch new];
-        toggle.on = audioOutput ? _device.audioOutputEnabled : _device.hapticsEnabled;
-        toggle.enabled = _device.canApply && !(audioOutput ? _device.audioOutputForced : _device.hapticsForced);
-        toggle.accessibilityLabel = cell.textLabel.text;
-        toggle.accessibilityIdentifier = audioOutput ? @"simulator-audio-output" : @"simulator-haptic-passthrough";
-        toggle.accessibilityHint = NSLocalizedString(@"Save this choice; restart now or later if the simulator is running.",
-            @"Accessibility hint for optional simulator features.");
-        cell.textLabel.enabled = toggle.enabled;
-        __weak LSBSettingsViewController *weakSelf = self;
-        [toggle addAction:[UIAction actionWithHandler:^(UIAction *action) {
-            LSBSettingsViewController *controller = weakSelf;
-            if (!controller) return;
-            UISwitch *sender = (UISwitch *)action.sender;
-            BOOL requested = sender.on;
-            sender.on = audioOutput ? controller->_device.audioOutputEnabled : controller->_device.hapticsEnabled;
-            BOOL saved = audioOutput ? [controller->_device saveAudioOutputEnabled:requested] : [controller->_device saveHapticsEnabled:requested];
-            if (saved) offerSimulatorRestart(controller, controller->_device);
-        }] forControlEvents:UIControlEventValueChanged];
-        cell.accessoryView = toggle;
-        return cell;
-    }
-    if (indexPath.section == 2 && indexPath.row == 1) {
-        cell.textLabel.text = NSLocalizedString(@"Use Full Width", @"Switch to expand the simulator display within the available view.");
-        UISwitch *toggle = [UISwitch new];
-        toggle.on = _device.fullWidth;
-        toggle.accessibilityLabel = cell.textLabel.text;
-        toggle.accessibilityIdentifier = @"simulator-full-width";
-        __weak LSBSettingsViewController *weakSelf = self;
-        [toggle addAction:[UIAction actionWithHandler:^(UIAction *action) {
-            LSBSettingsViewController *controller = weakSelf;
-            if (controller) [controller->_device setFullWidth:((UISwitch *)action.sender).on];
-        }] forControlEvents:UIControlEventValueChanged];
-        cell.accessoryView = toggle;
-        return cell;
-    }
-    if (indexPath.section == 2) {
-        cell.textLabel.text = NSLocalizedString(@"Device", @"Settings row that opens the simulated device picker.");
-        cell.detailTextLabel.text = NSLocalizedString(@"Choose…", @"Placeholder when no simulated device name is available.");
-        for (LSBGuestDeviceType *type in _device.deviceTypes) if ([type.identifier isEqual:_device.currentIdentifier]) {
-            cell.detailTextLabel.text = type.displayName;
-            break;
-        }
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-        cell.accessibilityIdentifier = @"simulator-device-picker";
-        return cell;
-    }
-    if (indexPath.section == 1 && indexPath.row == 0) {
-        cell.textLabel.text = NSLocalizedString(@"Performance HUD", @"Title of the performance heads-up display setting.");
-        cell.detailTextLabel.text = _display.hudMode >= 0 ? LSBPerformanceHUDNames()[_display.hudMode] :
-            NSLocalizedString(@"Unavailable", @"A simulator display setting could not be read.");
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-        cell.userInteractionEnabled = _device.canControlSimulator && !_display.pending && !_display.outcomeUnknown && _display.hudMode >= 0;
-        cell.textLabel.enabled = cell.userInteractionEnabled;
-        return cell;
-    }
-    BOOL audio = indexPath.section == 0;
-    cell.textLabel.text = audio ? NSLocalizedString(@"Silent background audio", @"Switch to keep the native host active by playing silence.") :
-        NSLocalizedString(@"Visualize touches", @"Switch to show simulator touch markers.");
-    UISwitch *toggle = [UISwitch new];
-    toggle.on = audio ? _audio.enabled : _display.touches == 1;
-    toggle.enabled = audio || (_device.canControlSimulator && !_display.pending && !_display.outcomeUnknown && _display.touches >= 0);
-    cell.textLabel.enabled = toggle.enabled;
-    if (!audio && _display.touches < 0) cell.detailTextLabel.text = NSLocalizedString(@"Unavailable", @"A simulator display setting could not be read.");
-    toggle.accessibilityLabel = cell.textLabel.text;
-    __weak LSBSettingsViewController *weakSelf = self;
-    [toggle addAction:[UIAction actionWithHandler:^(UIAction *action) {
-        LSBSettingsViewController *controller = weakSelf;
-        if (!controller) return;
-        UISwitch *sender = (UISwitch *)action.sender;
-        if (audio) [controller->_audio setEnabled:sender.on];
-        else {
-            if (!controller->_device.canControlSimulator) { sender.on = controller->_display.touches == 1; return; }
-            BOOL requested = sender.on;
-            sender.on = controller->_display.touches == 1; // Show only confirmed readback while the request is pending.
-            [controller->_display setVisualizeTouches:requested];
-        }
-    }] forControlEvents:UIControlEventValueChanged];
-    cell.accessoryView = toggle;
+    UITableViewCell *cell = [super tableView:tableView cellForRowAtIndexPath:indexPath];
+    [self configureCell:cell specifier:[self specifierAtIndexPath:indexPath]];
     return cell;
 }
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (indexPath.section == 6 && _device.canApply && !_importingIdentity) {
-        if (indexPath.row == 1) [self chooseSigningIdentity];
-        return;
+- (void)configureVisibleCells {
+    // Preferences refreshes cached cells in place, so update our custom accessories after specifier reloads too.
+    for (NSIndexPath *path in self.table.indexPathsForVisibleRows)
+        [self configureCell:[self.table cellForRowAtIndexPath:path] specifier:[self specifierAtIndexPath:path]];
+}
+- (void)configureCell:(UITableViewCell *)cell specifier:(PSSpecifier *)specifier {
+    NSString *identifier = specifier.identifier;
+    cell.accessibilityIdentifier = identifier;
+    cell.textLabel.numberOfLines = 0;
+    NSString *hint = nil;
+    if ([identifier isEqual:LazySign]) hint = NSLocalizedString(@"Import a P12 signing identity first. Save this choice, then restart now or later.",
+        @"Accessibility hint for enabling lazy signing.");
+    else if ([identifier isEqual:AudioOutput] || [identifier isEqual:Haptics]) hint =
+        NSLocalizedString(@"Save this choice; restart now or later if the simulator is running.", @"Accessibility hint for optional simulator features.");
+    cell.accessibilityHint = hint;
+    if ([cell.accessoryView isKindOfClass:UISwitch.class]) {
+        cell.accessoryView.accessibilityIdentifier = identifier;
+        cell.accessoryView.accessibilityLabel = specifier.name;
+        cell.accessoryView.accessibilityHint = hint;
     }
-    if (indexPath.section == 5 && _device.canControlSimulator) {
-        if (indexPath.row == 0) [_device powerOffSimulator];
-        else [_device restartSimulator];
-    } else if (indexPath.section == 1 && indexPath.row == 0 && _device.canControlSimulator)
-        [self.navigationController pushViewController:[LSBHUDSettingsViewController new] animated:YES];
-    else if (indexPath.section == 2 && indexPath.row == 0)
-        [self.navigationController pushViewController:[LSBDeviceTypePickerViewController new] animated:YES];
+    if ([identifier isEqual:PowerOff]) cell.textLabel.textColor = [self settingEnabled:specifier] ? UIColor.systemRedColor : UIColor.secondaryLabelColor;
+    if ([identifier isEqual:SigningIdentity]) {
+        cell.textLabel.numberOfLines = 1;
+        cell.textLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        cell.accessibilityValue = _signingSummary;
+        cell.accessoryView = nil;
+        if (_signingSummary.length) {
+            UIButton *remove = [UIButton buttonWithType:UIButtonTypeSystem];
+            remove.frame = CGRectMake(0, 0, 32, 32);
+            [remove setImage:[UIImage systemImageNamed:@"xmark.circle.fill"] forState:UIControlStateNormal];
+            remove.enabled = [self settingEnabled:specifier];
+            remove.accessibilityIdentifier = @"signing-identity-remove";
+            remove.accessibilityLabel = NSLocalizedString(@"Remove signing identity", @"Delete the imported signing identity from this app's keychain.");
+            [remove addTarget:self action:@selector(confirmRemoveSigningIdentity) forControlEvents:UIControlEventTouchUpInside];
+            cell.accessoryView = remove;
+        }
+    }
 }
 - (void)chooseSigningIdentity {
-    if (self.presentedViewController) return;
+    if (self.presentedViewController || _importingIdentity || !_device.canApply) return;
     NSMutableArray<UTType *> *types = [NSMutableArray array];
     for (NSString *extension in @[@"p12", @"pfx"]) {
         UTType *type = [UTType typeWithFilenameExtension:extension];
@@ -563,7 +383,7 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
         LSBSettingsViewController *self = weakSelf;
         NSString *password = [weakAlert.textFields.firstObject.text copy] ?: @"";
         weakAlert.textFields.firstObject.text = @"";
-        if (!self || !self->_device.canApply) return;
+        if (!self || !self->_device.canApply || self->_importingIdentity) return;
         self->_importingIdentity = YES;
         [self refreshSigningIdentity];
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -582,7 +402,7 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
     [self presentViewController:alert animated:YES completion:nil];
 }
 - (void)confirmRemoveSigningIdentity {
-    if (self.presentedViewController) return;
+    if (self.presentedViewController || _importingIdentity || !_device.canApply) return;
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:
         NSLocalizedString(@"Remove signing identity?", @"Confirmation before deleting the app's stored P12 identity.")
         message:NSLocalizedString(@"Lazy sign will be turned off. A running simulator keeps its current identity until restarted.",
@@ -593,7 +413,7 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
         style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
         (void)action;
         LSBSettingsViewController *self = weakSelf;
-        if (!self || !self->_device.canApply) return;
+        if (!self || !self->_device.canApply || self->_importingIdentity) return;
         NSError *error = nil;
         BOOL removed = LSBRemoveSigningIdentity(&error);
         self->_signingError = removed ? nil : error.localizedDescription;

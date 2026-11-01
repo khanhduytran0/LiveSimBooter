@@ -20,7 +20,40 @@ Restart uses the same confirmed process-death drain, then boots with the saved c
 session transition. Ordinary child launches do not toggle their availability. A requested Power Off or Restart pauses new
 launch dispatch and waits for any already-submitted child to establish its audited identity and exit monitor before draining.
 If process retirement fails or times out, the host reports the failure and does not overlap old and new guests. Unchanged
-status notifications do not redraw Settings; actual updates replace only the affected sections without animation.
+status notifications do not redraw Settings; actual updates refresh only changed specifiers without animation.
+
+## Native Preferences UI
+
+The native Settings tab and its Device/HUD pickers use `PSListController` and `PSSpecifier` from the device's
+Preferences framework. Sections are ordered Device, Code signing, Display, Audio, Haptics, Background execution, and
+Session controls. Stable specifier IDs identify rows independently of their section positions. The optional Full Width
+row follows the selected device; the device picker still stages a choice until Apply.
+
+Preferences renders the standard controls, while their getters, setters, and actions call the existing settings controllers.
+It does not write preference domains automatically or bypass broker checks. Saved versus active configuration,
+Restart/Later, pending operations, and confirmed guest display readback keep their existing behavior. P12 import and the
+Imported row's remove accessory remain custom. Visible custom accessories are updated after in-place specifier refreshes.
+
+[PreferencesPrivate.h](../Host/Private/PreferencesPrivate.h) declares only the native APIs used here. The checked superclass
+chain is `PSListController` → `PSViewController` → `UIViewController`; the table accessor is `table`. The inherited specifier
+cache is installed through `setSpecifiers:` and inspected through `unprotectedSpecifiers`, without declaring private ivar
+offsets. The tracked framework stub is for linking only; no Apple framework binary is bundled. Preferences is a host-only
+dependency and is never loaded into a simulator guest or its detached-cache preparation path.
+
+The migration's signed native build, `GuestDeviceSettingsTests`, `GuestDisplaySettingsTests`, and whitespace checks passed.
+The build was installed on iPhone16,2 / native iOS 26.1 (23B50), with host UUID
+`80F13481-C6CE-3A45-9946-666A42F68437`. The existing simulator 26.0 / 23A343 shim and cache were retained
+(`0x110000000`, UUID `73ED978A-FD25-3166-A57A-34E21BB7E5B8`). The user confirmed that Settings and the Device picker opened
+normally, Audio output saved its value across tab changes without flashing, selecting a draft device moved the checkmark,
+and the signing file picker opened and canceled normally. Native process inspection identified the installed host
+(historical PID 12467), with no guest or debugger present; a screenshot showed IOSurface's Start button.
+
+The initial picker screenshot exposed Preferences placing device descriptions beside the names despite a subtitle cell
+style. Device rows now use Preferences' `PSSubtitleButtonCell` with `cellSubtitleText`, letting the framework select its
+modern subtitle implementation. The picker overrides the actual row height with `UITableViewAutomaticDimension` because
+Preferences otherwise uses its height estimate as a fixed row height. Stock specifier selection and checkmarks are
+preserved. The corrected subtitle build's host UUID is `9E5687A8-1065-317F-967F-1E3F9CDC6C95`. A final iPhone 15 screenshot
+confirmed all seven device descriptions fully visible beneath their names, with the selected-device checkmark intact.
 
 ## Session-settings verification, 2026-10-29
 

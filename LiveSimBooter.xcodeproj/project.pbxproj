@@ -94,6 +94,7 @@
 				MetalDisplayRenderer.m = "-fobjc-arc";
 				RunningBoardMonitor.m = "-fobjc-arc";
 				RuntimeStorage.m = "-fobjc-arc";
+				SettingsChoiceControllers.m = "-fobjc-arc";
 				SettingsViewController.m = "-fobjc-arc";
 				SigningIdentity.m = "-fobjc-arc";
 				SimulatorDisplayView.m = "-fobjc-arc";
@@ -102,6 +103,7 @@
 				ViewController.m = "-fobjc-arc";
 			};
 			membershipExceptions = (
+				Private/Frameworks/Preferences.framework,
 				Private/Frameworks/RunningBoardServices.framework,
 			);
 			target = E19AD54A308A56D200634F93 /* LiveSimBooter */;
@@ -561,6 +563,8 @@
 					"-framework",
 					RunningBoardServices,
 					"-framework",
+					Preferences,
+					"-framework",
 					IOSurface,
 					"-framework",
 					ImageIO,
@@ -619,6 +623,8 @@
 					"$(inherited)",
 					"-framework",
 					RunningBoardServices,
+					"-framework",
+					Preferences,
 					"-framework",
 					IOSurface,
 					"-framework",

@@ -1,5 +1,5 @@
 #pragma once
-#import <UIKit/UIKit.h>
+#import "Private/PreferencesPrivate.h"
 
-@interface LSBSettingsViewController : UITableViewController
+@interface LSBSettingsViewController : PSListController
 @end

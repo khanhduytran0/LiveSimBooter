@@ -56,6 +56,7 @@
 			additionalCompilerFlagsByRelativePath = {
 				CompactImageInfo.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				DebuggerBridge.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
+				LazySignatureClient.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LocalMach.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LocalPOSIX.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LocalRuntime.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
@@ -89,10 +90,12 @@
 				IOSurfaceServer.m = "-fobjc-arc";
 				IndigoHIDServer.m = "-fobjc-arc";
 				LaunchdConfiguration.m = "-fobjc-arc";
+				LazySigning.m = "-fobjc-arc";
 				MetalDisplayRenderer.m = "-fobjc-arc";
 				RunningBoardMonitor.m = "-fobjc-arc";
 				RuntimeStorage.m = "-fobjc-arc";
 				SettingsViewController.m = "-fobjc-arc";
+				SigningIdentity.m = "-fobjc-arc";
 				SimulatorDisplayView.m = "-fobjc-arc";
 				TerminalSession.m = "-fobjc-arc";
 				TerminalView.m = "-fobjc-arc";
@@ -108,6 +111,7 @@
 			additionalCompilerFlagsByRelativePath = {
 				CompactImageInfo.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				DebuggerBridge.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
+				LazySignatureClient.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LocalMach.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LocalPOSIX.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LocalRuntime.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
@@ -142,6 +146,21 @@
 				A9B7C410000000000000000C /* Exceptions for "LiveProcess" folder in "LiveProcess" target */,
 			);
 			path = LiveProcess;
+			sourceTree = "<group>";
+		};
+		E19297BD3096B979000E3E49 /* NativeMetal */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = NativeMetal;
+			sourceTree = "<group>";
+		};
+		E19297C43096B979000E3E49 /* NativeSigner */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = NativeSigner;
+			sourceTree = "<group>";
+		};
+		E19297EE3096B979000E3E49 /* ProcessSupport */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ProcessSupport;
 			sourceTree = "<group>";
 		};
 		E19A5B71308EE50100634F93 /* Guest */ = {
@@ -193,14 +212,17 @@
 		E19AD542308A56D200634F93 = {
 			isa = PBXGroup;
 			children = (
-				E19A5B71308EE50100634F93 /* Guest */,
-				E19AD584308BA95D00634F93 /* README.md */,
-				E19AD54D308A56D200634F93 /* LiveSimBooter */,
 				A9B7C4100000000000000009 /* Host */,
+				E19A5B71308EE50100634F93 /* Guest */,
+				E19AD54D308A56D200634F93 /* LiveSimBooter */,
+				E19297BD3096B979000E3E49 /* NativeMetal */,
+				E19297C43096B979000E3E49 /* NativeSigner */,
+				E19297EE3096B979000E3E49 /* ProcessSupport */,
 				A9B7C410000000000000000A /* ProcessSupport */,
 				A9B7C410000000000000000B /* LiveProcess */,
 				A9B7C4100000000000000017 /* Frameworks */,
 				F4BC8A4C308B000100000001 /* unused */,
+				E19AD584308BA95D00634F93 /* README.md */,
 				E19AD54C308A56D200634F93 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -225,6 +247,7 @@
 				A9B7C4100000000000000004 /* Frameworks */,
 				A9B7C4100000000000000005 /* Resources */,
 				A9B7C4100000000000000020 /* Prepare native stack */,
+				A9B7C4100000000000000021 /* Build native signer */,
 			);
 			buildRules = (
 			);
@@ -369,12 +392,22 @@
 				"    NO) set -- ;;",
 				"    *) echo \"LSB_ENABLE_NATIVE_STACK_RESERVATION must be YES or NO\" >&2; exit 1 ;;",
 				"esac",
-				"case \"${LSB_PRESERVE_NATIVE_ARGUMENTS:-YES}\" in",
+				"case \"${LSB_PRESERVE_NATIVE_ARGUMENTS:-NO}\" in",
 				"    YES) set -- \"$@\" --preserve-arguments ;;",
 				"    NO) ;;",
 				"    *) echo \"LSB_PRESERVE_NATIVE_ARGUMENTS must be YES or NO\" >&2; exit 1 ;;",
 				"esac",
 				"/usr/bin/python3 \"${SRCROOT}/Tools/prepare-native-stack.py\" \"${TARGET_BUILD_DIR}/${EXECUTABLE_PATH}\" \"$@\"",
+				"",
+			);
+		};
+		A9B7C4100000000000000021 /* Build native signer */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			name = "Build native signer";
+			shellPath = /bin/sh;
+			shellScript = (
+				"sh \"$SRCROOT/Tools/build-native-signer.sh\" \"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Frameworks/NativeSigner/NativeSigner.dylib\"",
 				"",
 			);
 		};
@@ -434,7 +467,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				LSB_ENABLE_NATIVE_STACK_RESERVATION = NO;
-				LSB_PRESERVE_NATIVE_ARGUMENTS = YES;
+				LSB_PRESERVE_NATIVE_ARGUMENTS = NO;
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -479,7 +512,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				LSB_ENABLE_NATIVE_STACK_RESERVATION = NO;
-				LSB_PRESERVE_NATIVE_ARGUMENTS = YES;
+				LSB_PRESERVE_NATIVE_ARGUMENTS = NO;
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -538,6 +571,10 @@
 					"-framework",
 					AVFoundation,
 					"-weak-lMobileGestalt",
+					"-framework",
+					Security,
+					"-framework",
+					UniformTypeIdentifiers,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.kdt.LiveSimBooter;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -593,6 +630,10 @@
 					"-framework",
 					AVFoundation,
 					"-weak-lMobileGestalt",
+					"-framework",
+					Security,
+					"-framework",
+					UniformTypeIdentifiers,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.kdt.LiveSimBooter;
 				PRODUCT_NAME = "$(TARGET_NAME)";

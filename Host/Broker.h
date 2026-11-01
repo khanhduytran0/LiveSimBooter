@@ -15,6 +15,7 @@ BOOL LSBHostConfigurationNeedsRestart(void);
 int LSBHostSaveDeviceType(LSBGuestDeviceType *type);
 int LSBHostSaveHapticsEnabled(BOOL enabled);
 int LSBHostSaveAudioOutputEnabled(BOOL enabled);
+int LSBHostSaveLazySigningEnabled(BOOL enabled);
 // A current child launch reaches authenticated CHECKIN before draining. Restart completes after old-process exit and new-session submission;
 // power off completes only after confirmed owned-process exit.
 void LSBHostRestartSimulator(void (^completion)(int error));

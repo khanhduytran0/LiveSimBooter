@@ -7,6 +7,8 @@
 #include "SessionControlQueue.h"
 #import "DeviceConfiguration.h"
 #import "AudioOutput.h"
+#import "SigningIdentity.h"
+#import "LazySigning.h"
 #import "HapticServer.h"
 #import "RuntimeStorage.h"
 #include "NativeProductionStatus.h"
@@ -161,6 +163,10 @@ static LSBGuestDeviceType *sessionDeviceType, *pendingDeviceType;
 static NSDictionary *pendingDeviceCapabilities;
 static BOOL pendingDevicePreference;
 static BOOL sessionHapticsEnabled, pendingHapticsEnabled, pendingHapticsPreference;
+static LSBLazySigning *lazySigning;
+static uint64_t signerJobIdentifier;
+static BOOL sessionLazySigningEnabled;
+static NSString *sessionSigningIdentityRevision;
 static BOOL sessionAudioEnabled, pendingAudioEnabled, pendingAudioPreference;
 static void (^deviceChangeCompletion)(int, BOOL);
 static void (^sessionControlCompletion)(int);
@@ -224,7 +230,8 @@ BOOL LSBHostCanApplyDeviceType(void) { return LSBHostSimulatorIsOff() || LSBHost
 BOOL LSBHostConfigurationNeedsRestart(void) {
     return jobs && !simulatorPoweredOff &&
         (LSBConfiguredGuestDeviceType() != LSBHostCurrentDeviceType() || LSBExperimentalHapticsEnabled() != sessionHapticsEnabled ||
-         LSBExperimentalAudioOutputEnabled() != sessionAudioEnabled);
+         LSBExperimentalAudioOutputEnabled() != sessionAudioEnabled || LSBLazySigningEnabled() != sessionLazySigningEnabled ||
+         (sessionLazySigningEnabled && ![sessionSigningIdentityRevision isEqual:LSBSigningIdentityRevision()]));
 }
 static int validateSavedConfiguration(LSBGuestDeviceType *type) {
     if (!NSThread.isMainThread) return EPERM;
@@ -250,6 +257,14 @@ int LSBHostSaveAudioOutputEnabled(BOOL enabled) {
     int error = validateSavedConfiguration(LSBConfiguredGuestDeviceType());
     if (!error && enabled != LSBExperimentalAudioOutputEnabled()) { LSBSaveConfiguredAudioOutputEnabled(enabled); notifySessionStateChanged(); }
     return error;
+}
+int LSBHostSaveLazySigningEnabled(BOOL enabled) {
+    if (!NSThread.isMainThread) return EPERM;
+    if (!LSBHostCanApplyDeviceType()) return EBUSY;
+    if (enabled && !LSBSigningIdentityRevision()) return ENOENT;
+    LSBSaveConfiguredLazySigningEnabled(enabled);
+    notifySessionStateChanged();
+    return 0;
 }
 void LSBHostRestartSimulator(void (^completion)(int)) {
     int error = !NSThread.isMainThread ? EPERM : !LSBHostCanControlSimulator() ? EBUSY :
@@ -858,6 +873,11 @@ static void finishJob(LSBJob *job, int error) {
         finishDeviceChange(error ? error : EIO);
     }
     job.finishing = YES;
+    if (job.executionRole == LSB_EXECUTION_NATIVE_SIGNER && job.identifier == signerJobIdentifier) {
+        [lazySigning invalidate];
+        signerJobIdentifier = 0;
+        if (!sessionDraining) fprintf(stderr, "[lazy-sign] Native signer exited; signing is unavailable until the next simulator restart\n");
+    }
     [job.audioOutput invalidate]; job.audioOutput = nil;
     [job.haptics close]; job.haptics = nil;
     releaseGuestProcessIdentity(job);
@@ -1051,7 +1071,7 @@ static void extensionEvent(uint64_t identifier, pid_t pid, int error, void *cont
     audit_token_t identity = job.audit;
     // Process exit also invalidates assertions. Keep its monitor alive to report the actual exit, and never signal a reused PID.
     if (LSBRunningBoardValidateIdentity(&identity) == ESRCH) return;
-    fprintf(stderr, "[Metal] native request=%llu lost its process assertion: %s\n", identifier, strerror(error));
+    fprintf(stderr, "[broker] native request=%llu lost its process assertion: %s\n", identifier, strerror(error));
     // Service cleanup revokes its shared authorization before terminating. The construction probe has no shared control page.
     if (!job.nativeMetalControl) {
         int stopError = signalJob(job, SIGKILL);
@@ -1079,6 +1099,10 @@ static void startNextJob(void) {
     }
     for (LSBJob *job in jobs) {
         if (job.phase != JobQueued) continue;
+        if (sessionLazySigningEnabled && job.executionRole == LSB_EXECUTION_SIMULATOR) {
+            LSBJob *signer = findJob(signerJobIdentifier);
+            if (signer && signer.phase != JobRunning) continue;
+        }
         BOOL waitingForMetal = NO;
         for (NSNumber *dependency in @[@(job.nativeMetalServiceIdentifier), @(job.publicMetalServiceIdentifier)]) {
             if (!dependency.unsignedLongLongValue) continue;
@@ -1125,7 +1149,7 @@ static void startNextJob(void) {
         int error = LSBLaunchExtensionWithOptions(LSB_EXTENSION_IDENTIFIER, identifier, launchOptions, extensionEvent, NULL);
         if (error) { job.phase = JobQueued; finishJob(job, error); return; }
         fprintf(stderr, "[broker] extension request=%llu submitted\n", identifier);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (sessionLazySigningEnabled ? 180 : 30) * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             LSBJob *pending = findJob(identifier);
             if (pending && pending.phase != JobRunning) finishJob(pending, ETIMEDOUT);
         });
@@ -1202,7 +1226,7 @@ static int applySessionEnvironment(LSBSpawnPlan *plan) {
 }
 
 static LSBJob *enqueueJob(LSBReceivedMessage *message, LSBJob *parent, uint32_t executionRole) {
-    if (executionRole > LSB_EXECUTION_NATIVE_METAL_SERVICE) { replyError(message, EINVAL); return nil; }
+    if (executionRole > LSB_EXECUTION_NATIVE_SIGNER) { replyError(message, EINVAL); return nil; }
     // Only a locally constructed host request can select the native role. Guest RPCs never carry this authority.
     if (executionRole != LSB_EXECUTION_SIMULATOR &&
         (parent || message->object || message->ports.registeredPresent || message->ports.bootstrapPresent)) {
@@ -2110,6 +2134,7 @@ static void handleMessage(LSBReceivedMessage *message) {
             if (error) { replyError(message, error); finishJob(job, error); return; }
             LSBBootstrapMetadata metadata = { .guestPID = job.guestPID, .parentPID = LSBChildStatusGetParentPID(job.childStatus),
                 .guestBrokerPort = job.executionRole == LSB_EXECUTION_SIMULATOR ? guestBrokerPort : MACH_PORT_NULL,
+                .lazySigningPort = job.executionRole == LSB_EXECUTION_SIMULATOR ? lazySigning.endpoint : MACH_PORT_NULL,
                 .launchdTankPort = job.simulatorLaunchd ? LSBLaunchdHandshakeTankPort(job.launchdHandshake) : MACH_PORT_NULL,
                 .ports = &job.request->ports, .executionRole = job.executionRole, .taskCapture = job.taskCapture,
                 .nativeProductionStatus = job.executionRole == LSB_EXECUTION_SIMULATOR ? LSBHostNativeProductionStatus() : LSB_NATIVE_PRODUCTION_UNKNOWN };
@@ -2132,7 +2157,7 @@ static void handleMessage(LSBReceivedMessage *message) {
             }
             int error = message->error;
             audit_token_t expectedAudit = sender.audit;
-            BOOL nativeService = sender.executionRole == LSB_EXECUTION_NATIVE_METAL_SERVICE;
+            BOOL nativeService = sender.executionRole == LSB_EXECUTION_NATIVE_METAL_SERVICE || sender.executionRole == LSB_EXECUTION_NATIVE_SIGNER;
             if (memcmp(&message->audit, &expectedAudit, sizeof(expectedAudit))) { replyError(message, EACCES); return; }
             if (!error && sender.executionRole == LSB_EXECUTION_SIMULATOR &&
                 (sender.taskCaptureError || !MACH_PORT_VALID(sender.taskPort))) error = EPROTO;
@@ -2147,6 +2172,11 @@ static void handleMessage(LSBReceivedMessage *message) {
                 // Receive owns one send reference. Move it into the helper before disposing READY and advancing the launch lane.
                 sender.nativeServicePort = message->nativeServicePort;
                 message->nativeServicePort = MACH_PORT_NULL;
+                if (sender.executionRole == LSB_EXECUTION_NATIVE_SIGNER) {
+                    audit_token_t signerAudit = sender.audit;
+                    error = lazySigning && sender.identifier == signerJobIdentifier ?
+                        [lazySigning connectService:sender.nativeServicePort audit:&signerAudit] : EPIPE;
+                }
             }
             LSBJob *parent = findJob(sender.parentIdentifier);
             LSBJob *old = findJob(sender.replacesIdentifier);
@@ -2348,15 +2378,24 @@ static int initialPlan(LSBReceivedMessage *message, int argc, const char *argv[]
     return error ? error : LSBValidateSpawnPlan(plan);
 }
 
-static LSBJob *enqueueNativeMetalHelper(BOOL publicAccess, const char *name, int *result) {
+static int nativeHelperPlan(LSBReceivedMessage *request, const char *path, const char *name) {
+    // Helpers are dependencies of the pending session, not a new initial launch. Preserve its configd and terminal decisions.
+    BOOL terminalPending = initialTerminalPending, configdPending = initialNativeConfigdPending;
     const char *arguments[] = { "LiveSimBooter", "--native-metal-probe", NULL };
+    int error = initialPlan(request, 2, arguments, NULL);
+    initialTerminalPending = terminalPending;
+    initialNativeConfigdPending = configdPending;
+    if (!error) error = LSBPlanAddString(&request->plan, path, &request->plan.path);
+    if (!error) error = LSBPlanAddString(&request->plan, name, &request->plan.argv[0]);
+    return error ? error : LSBValidateSpawnPlan(&request->plan);
+}
+
+static LSBJob *enqueueNativeMetalHelper(BOOL publicAccess, const char *name, int *result) {
     LSBReceivedMessage *request = calloc(1, sizeof(*request));
     if (!request) { *result = ENOMEM; return nil; }
     LSBNativeMetalControl *control = NULL;
     int readOnlyFD = -1;
-    int error = initialPlan(request, 2, arguments, NULL);
-    if (!error) error = LSBPlanAddString(&request->plan, "/__LiveSimBooterNativeMetalService", &request->plan.path);
-    if (!error) error = LSBPlanAddString(&request->plan, name, &request->plan.argv[0]);
+    int error = nativeHelperPlan(request, "/__LiveSimBooterNativeMetalService", name);
     if (!error) error = LSBNativeMetalControlCreate(runtimeRoot.stringByDeletingLastPathComponent.fileSystemRepresentation, &control, &readOnlyFD);
     if (!error && publicAccess) error = LSBNativeMetalControlPublishPublic(control);
     if (!error) {
@@ -2380,7 +2419,43 @@ static LSBJob *enqueueNativeMetalHelper(BOOL publicAccess, const char *name, int
     return helper;
 }
 
+static int prepareLazySigningSession(void) {
+    [lazySigning invalidate];
+    lazySigning = nil;
+    signerJobIdentifier = 0;
+    sessionLazySigningEnabled = LSBLazySigningEnabled();
+    sessionSigningIdentityRevision = [LSBSigningIdentityRevision() copy];
+    if (!sessionLazySigningEnabled) return 0;
+    NSError *credentialError = nil;
+    LSBSigningCredentials *credentials = LSBCopySigningCredentials(&credentialError);
+    if (!credentials) return ENOENT;
+    int error = 0;
+    lazySigning = [[LSBLazySigning alloc] initWithRuntimeRoot:runtimeRoot credentials:credentials
+        identifier:NSBundle.mainBundle.bundleIdentifier authorize:^BOOL(const audit_token_t *audit) {
+            if (sessionDraining || simulatorPoweredOff) return NO;
+            for (LSBJob *job in jobs) {
+                audit_token_t expected = job.audit;
+                if (job.executionRole == LSB_EXECUTION_SIMULATOR && !job.finishing && !job.retiredForExec &&
+                    (job.phase == JobDispatched || job.phase == JobRunning) && !memcmp(audit, &expected, sizeof(expected))) return YES;
+            }
+            return NO;
+        } error:&error];
+    if (error) return error;
+    // Build a fixed native plan locally. The guest protocol has no way to request this role or select the backend path.
+    LSBReceivedMessage *request = calloc(1, sizeof(*request));
+    if (!request) return ENOMEM;
+    error = nativeHelperPlan(request, "/__LiveSimBooterNativeSigner", "Signer");
+    if (error) { disposeMessage(request); return error; }
+    ++finishingDepth;
+    LSBJob *helper = enqueueJob(request, nil, LSB_EXECUTION_NATIVE_SIGNER);
+    signerJobIdentifier = helper.identifier;
+    --finishingDepth;
+    return helper ? 0 : EIO;
+}
+
 static int enqueueInitialJob(LSBReceivedMessage *initial, uint32_t executionRole) {
+    int signingError = prepareLazySigningSession();
+    if (signingError) { disposeMessage(initial); return signingError; }
     if (!enableIndigo) { enqueueJob(initial, nil, executionRole); return 0; }
     // Only host-selected graphics jobs provision services. Each helper has its own control page, endpoint and process-reference namespace.
     // Install every dependency before submitting an extension, including synchronous launch-error paths.
@@ -2531,6 +2606,7 @@ static void completeUserspaceReboot(uint64_t generation) {
 static void beginUserspaceReboot(LSBJob *exitedLaunchd) {
     if (sessionDraining) return;
     sessionDraining = YES;
+    [lazySigning invalidate];
     sessionControlRequested = NO;
     rebootDrainFailed = NO;
     simulatorPoweredOff = NO;

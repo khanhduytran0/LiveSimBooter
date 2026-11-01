@@ -7,16 +7,27 @@ The original starter delegates, controller, and storyboards remain in `unused/`;
 
 The native host weak-links MobileGestalt and calls the guarded weak `MGCopyAnswer` import to cache `EffectiveProductionStatusAp`
 before launching guests. Haptic capability queries use the same native import. An absent symbol remains an unavailable answer.
-Only an exact Boolean false
-permits native-cache detachment; missing, malformed, or true results keep the native cache and hardware workqueue bridge.
+Only an exact Boolean false permits native-cache detachment; missing, malformed, or true results keep the native cache and hardware workqueue bridge.
 This is a device production-status check, not an iOS-version or Developer Mode check. The development iPhone used for detach
 tests has custom boot arguments and relaxed TXM enforcement; those results do not establish support on ordinary iOS 26 phones.
 
-The authenticated XPC check-in reply carries that status separately from the guest's environment. LiveProcess validates the
-policy before switching TLS: non-production defaults to detachment with a direct workqueue-entry trampoline, while production/unknown defaults to
-retain/hardware bridging and rejects an explicit detach request. Explicit retention remains available on development devices.
+The authenticated XPC check-in reply carries that status separately from the guest's environment. Before native launchd
+configuration and again in LiveProcess before switching TLS, a bounded preflight reads the guest cache's validated reservation
+and queries the actual loaded native cache header with `__shared_region_check_np`. The default is retention/hardware when the
+guest reservation ends at or below that header. Automatic detachment requires both native non-production status and the native
+header lying inside the guest reservation; this preserves the tested development iPhone 15's overlapping-cache setup.
+Unavailable or malformed layout information defaults to retention. Explicit environment choices retain their existing semantics,
+and production/unknown still rejects an explicit detach request. The final handoff independently checks its own loaded native
+cache address before retention; a host observation never removes that check. A collision does not itself prove that detached
+execution is supported. No device model or OS version selects the policy.
 No MobileGestalt object or native function pointer crosses the handoff. See
 [retained-cache workqueue redirection](launchd.md#retained-native-cache-with-hardware-redirection) for its device evidence.
+
+The 2026-10-31 iPhone 17 comparison (iPhone18,2, native iOS 27.0/24A435, guest 26.0/23A343) returned native
+`EffectiveProductionStatusAp=false`, but the automatic detached route exited with status 126. The precise failing operation
+was not captured. Explicit retention booted the graphical session and ran probes. The non-production Boolean alone does not
+establish relaxed executable-memory policy. An anonymous executable-page probe at another address would not prove that the
+workqueue trampoline can execute at the former native-cache address.
 
 A normal icon launch waits for **Start** on the IOSurface tab before starting the broker and graphical runtime. Explicit guest
 arguments, including `--launchd-services`, `/bin/df`, and `--terminal`, retain automatic startup for development tests. Startup is

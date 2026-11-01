@@ -1,5 +1,6 @@
 // Host tests use synthetic Mach-O bytes and a fake prepare entry. No simulator code is signed or executed.
 #include "../LiveSimBooter/SimSyscallHelpers.h"
+#include "../LiveSimBooter/LazySignatureClient.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
@@ -13,6 +14,9 @@
 #include <vector>
 
 static bool rejectSegmentMapping = false;
+static bool rejectSignature = false;
+static int lazySignatureError = ENOTSUP;
+static unsigned lazySignatureRetries;
 static int sourceFD = -1, signatureCalls = 0, deallocations = 0, fileUnmaps = 0;
 static void *sourceMapping = MAP_FAILED;
 static off_t registeredSlice = -1;
@@ -42,8 +46,16 @@ static int testFcntl(int, int command, ...) {
     ++signatureCalls;
     registeredSlice = signature->fs_file_start;
     registeredSignature = reinterpret_cast<uintptr_t>(signature->fs_blob_start);
+    if (rejectSignature) { errno = EACCES; return -1; }
     signature->fs_file_start = static_cast<off_t>(registeredSignature);
     return 0;
+}
+
+int LSBLazySignatureRetry(int fd, fsignatures_t *signature) {
+    ++lazySignatureRetries;
+    if (fd < 0 || !signature) return EINVAL;
+    if (!lazySignatureError) signature->fs_file_start = static_cast<off_t>(reinterpret_cast<uintptr_t>(signature->fs_blob_start));
+    return lazySignatureError;
 }
 
 static void *testMmap(void *address, size_t size, int protection, int flags, int fd, off_t offset) {
@@ -1274,6 +1286,10 @@ int main() {
     mappingFailure(universal(true), true);
     partialPageMapping();
     partialPageMapping(true);
+    rejectSignature = true; lazySignatureError = 0;
+    partialPageMapping();
+    check(lazySignatureRetries == 1, "native loader retries failed registration through lazy signing before mapping segments");
+    rejectSignature = false; lazySignatureError = ENOTSUP;
     mappingFailure(thin(), false, true);
     mappingFailure(universal(true, true, executable()), true, true);
     executableMapping(executable(), 0);

@@ -73,10 +73,12 @@ App-owned main-pthread/TSD storage is initialized for the simulator rather than 
 dyld_sim prepares dependencies and returns `start_sim`, which runs the guest's `LC_MAIN` path. Successful handoff never
 returns through native cleanup; unexpected wrapper return uses a raw exit. See [handoff details](runtime-handoff.md).
 
-**Production/unknown devices retain the native cache.** Native pthread registration cannot simply be replaced by the simulator's
+**Prefer retaining the native cache when its loaded header is above the guest reservation.** Native pthread registration cannot simply be replaced by the simulator's
 second registration. Explicit guest pthread creation redirects a never-run suspended thread; workqueue entry uses an inherited
 hardware execution breakpoint to reach the simulator entry. The breakpoint remains installed for new and reused workers.
 Only a cached native non-production MobileGestalt result allows detachment; guest environment values cannot grant it.
+Automatic detachment additionally requires a validated guest reservation containing the actual native cache header. Unavailable
+layout information and production/unknown status keep retention; final child-side collision checks still apply.
 The [handoff policy](runtime-handoff.md) describes the authenticated check-in metadata. The current behavior and evidence are in
 [retained-cache workqueue redirection](launchd.md#retained-native-cache-with-hardware-redirection); older detach experiments
 in the handoff notes are not evidence of production-device support.

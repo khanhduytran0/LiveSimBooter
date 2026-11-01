@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include "NativeCacheLayout.h"
 
 #define LSB_RETAIN_HOST_CACHE_ENV "LSB_RETAIN_HOST_CACHE"
 #define LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV "LSB_WORKQUEUE_HARDWARE_BREAKPOINT"
@@ -35,12 +36,14 @@ static inline bool LSBRuntimeBooleanEnvironment(const char *const environment[],
 }
 
 // status is native host metadata received through authenticated check-in, never a guest environment or simulated OS query.
-// Only a confirmed development device may detach; an explicit retained cache works in every state.
-static inline int LSBResolveNativeRuntimePolicy(uint32_t status, const char *const environment[], LSBNativeRuntimePolicy *policy) {
+// Prefer retention. Automatic detachment additionally requires a confirmed native-header collision; non-production alone does not prove relaxed JIT.
+static inline int LSBResolveNativeRuntimePolicy(uint32_t status, LSBNativeCacheLayout layout,
+                                               const char *const environment[], LSBNativeRuntimePolicy *policy) {
     if (!policy) return EINVAL;
     *policy = (LSBNativeRuntimePolicy){.retainHostCache = true, .hardwareWorkqueue = true};
-    if (!LSBValidNativeProductionStatus(status)) return EINVAL;
-    bool retain = LSBRuntimeBooleanEnvironment(environment, LSB_RETAIN_HOST_CACHE_ENV, status != LSB_NATIVE_DEVELOPMENT);
+    if (!LSBValidNativeProductionStatus(status) || layout < LSB_NATIVE_CACHE_LAYOUT_UNKNOWN || layout > LSB_NATIVE_CACHE_LAYOUT_OVERLAP) return EINVAL;
+    bool defaultRetain = status != LSB_NATIVE_DEVELOPMENT || layout != LSB_NATIVE_CACHE_LAYOUT_OVERLAP;
+    bool retain = LSBRuntimeBooleanEnvironment(environment, LSB_RETAIN_HOST_CACHE_ENV, defaultRetain);
     if (!retain && status != LSB_NATIVE_DEVELOPMENT) return EPERM;
     policy->retainHostCache = retain;
     policy->hardwareWorkqueue = LSBRuntimeBooleanEnvironment(environment, LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV, retain);

@@ -28,6 +28,7 @@
 #include "CompactImageInfo.h"
 #include "LocalRuntime.h"
 #include "LocalPOSIX.h"
+#include "LazySignatureClient.h"
 #include "LocalMach.h"
 
 #include <errno.h>
@@ -107,7 +108,7 @@ const SimSyscallHelpers sHelpers = {
     &lsb::mmap,
     &lsb::munmap,
     &lsb::madvise,
-    &lsb::stat,
+    &LSBLazySignatureDyldStat,
     &lsb::fcntl,
     &lsb::ioctl,
     &lsb::issetugid,

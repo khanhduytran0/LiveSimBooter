@@ -9,9 +9,10 @@ root `SimulatorData` or place roots directly inside a group or Documents; those 
 These notes record experiments since 2026-10-25. The tested 23A343 guest reaches SpringBoard with app icons and opens
 Contacts on iPhone18,2 / iOS 27.0 build 24A435. Touches, the simulator keyboard, the launchd-owned Fish terminal, native Metal
 presentation, the performance HUD, and live touch-marker settings have device evidence. The host keeps persistent IOSurface,
-Fish and Settings tabs. Production or unknown native MobileGestalt status retains the native cache with hardware workqueue
-redirection. Only exact Boolean false for `EffectiveProductionStatusAp` selects development cache detachment; Developer Mode
-alone does not select it. See [handoff policy](runtime-handoff.md).
+Fish and Settings tabs. The default retains the native cache with hardware workqueue redirection when the guest reservation
+fits below the loaded native cache. Automatic detachment requires exact Boolean false for `EffectiveProductionStatusAp` plus
+a confirmed native-header collision; unavailable layout information keeps retention. Production/unknown status never permits
+detachment. Developer Mode alone does not select it. See [handoff policy](runtime-handoff.md).
 
 The user verified **Home Screen → Edit → Edit Wallpaper** and color/gradient wallpaper rendering. PosterBoard's lock-screen
 path and direct activation remain **broken (black output) and deferred**. The working editor's clipped Done button is also deferred;
@@ -24,6 +25,7 @@ Historical sections below describe earlier cache layouts and failures; use the s
 - [Simulator host services](simulator-host-services.md): observed Mac service inventory and the pinned SimRun audio reference.
 - [Device types](device-types.md): original device profiles, phone/iPad choices, display dimensions, and applying a session restart.
 - [Source licensing](licensing.md): MIT original code, Apple-derived APSL files, retained notices, and source availability.
+- [Lazy sign](lazy-signing.md): optional isolated Security signer, P12 import, registration retries and preserved originals.
 - [Runtime handoff](runtime-handoff.md): startup, local callbacks, thread storage, cache detachment, and debugger metadata.
 - [Multiprocess](multiprocess.md): App Group migration, native extension launches, synchronous XPC, FD replay, and current validation limits.
 - [Process inspection](process-inspection.md): authenticated guest process lists, original entitlement metadata, CocoaTop staging, and device-tested limits.

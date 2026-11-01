@@ -3,7 +3,7 @@ set -eu
 cd "$(dirname "$0")/.."
 test_directory=$(mktemp -d /tmp/LiveSimBooter-tests.XXXXXX)
 trap 'rm -rf "$test_directory"' EXIT HUP INT TERM
-for test_name in HostStartupPolicy UserspaceReboot NativeRuntimePolicy InsertedLibraries; do
+for test_name in HostStartupPolicy UserspaceReboot NativeRuntimePolicy NativeCacheLayout InsertedLibraries; do
     xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 "Tests/${test_name}Tests.c" -o "$test_directory/$test_name"
     "$test_directory/$test_name"
 done
@@ -48,21 +48,36 @@ xcrun --sdk macosx clang++ -std=c++17 -Wall -Wextra -Werror -arch arm64 -fno-bui
     Tests/LocalPOSIXTests.cpp LiveSimBooter/LocalPOSIX.cpp -o "$test_directory/LocalPOSIX"
 "$test_directory/LocalPOSIX"
 xcrun --sdk macosx clang++ -std=c++17 -Wall -Wextra -Werror -arch arm64 -fno-builtin -fno-stack-protector \
+    Tests/LazySignatureClientTests.cpp -o "$test_directory/LazySignatureClient"
+"$test_directory/LazySignatureClient"
+xcrun --sdk macosx clang++ -std=c++17 -Wall -Wextra -Werror -arch arm64 -fno-builtin -fno-stack-protector \
+    Tests/LazySignaturePreflightTests.cpp -o "$test_directory/LazySignaturePreflight"
+"$test_directory/LazySignaturePreflight"
+xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
+    Tests/LazyCodeSignerTests.m -framework Foundation -framework Security -o "$test_directory/LazyCodeSigner"
+"$test_directory/LazyCodeSigner"
+sh Tests/run-signing-tests.sh "$test_directory"
+xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
+    Tests/LazySigningTests.m -framework Foundation -o "$test_directory/LazySigning"
+"$test_directory/LazySigning"
+xcrun --sdk macosx clang++ -std=c++17 -Wall -Wextra -Werror -arch arm64 -fno-builtin -fno-stack-protector \
     -DLSB_LOCAL_RUNTIME_RAW_TESTING Tests/LocalRuntimeTests.cpp -o "$test_directory/LocalRuntimeRaw"
 "$test_directory/LocalRuntimeRaw"
 for family in Mach POSIX; do
     xcrun --sdk macosx clang++ -std=c++17 -Wall -Wextra -Werror -arch arm64 -fno-builtin -fno-stack-protector \
-        "Tests/Local${family}LiveTests.cpp" "LiveSimBooter/Local${family}.cpp" LiveSimBooter/LocalRuntime.cpp \
+        "Tests/Local${family}LiveTests.cpp" LiveSimBooter/LocalPOSIX.cpp LiveSimBooter/LocalMach.cpp \
+        LiveSimBooter/LocalRuntime.cpp LiveSimBooter/LazySignatureClient.cpp \
         -o "$test_directory/Local${family}Live"
     "$test_directory/Local${family}Live"
 done
 xcrun --sdk macosx clang++ -std=c++17 -Wall -Wextra -Werror -arch arm64 -fno-builtin -fno-stack-protector \
     Tests/SimSyscallHelpersTests.cpp LiveSimBooter/SimSyscallHelpers.cpp LiveSimBooter/LocalRuntime.cpp \
-    LiveSimBooter/LocalPOSIX.cpp LiveSimBooter/LocalMach.cpp LiveSimBooter/CompactImageInfo.cpp -o "$test_directory/SimSyscallHelpers"
+    LiveSimBooter/LocalPOSIX.cpp LiveSimBooter/LocalMach.cpp LiveSimBooter/LazySignatureClient.cpp \
+    LiveSimBooter/CompactImageInfo.cpp -o "$test_directory/SimSyscallHelpers"
 "$test_directory/SimSyscallHelpers"
 xcrun --sdk macosx clang++ -std=c++17 -Wall -Wextra -Werror -arch arm64 -fno-builtin -fno-stack-protector \
     -DLSB_DEBUGGER_NOTIFICATION_TESTING Tests/DebuggerNotificationTests.cpp LiveSimBooter/SimSyscallHelpers.cpp LiveSimBooter/LocalRuntime.cpp \
-    LiveSimBooter/LocalPOSIX.cpp LiveSimBooter/LocalMach.cpp -o "$test_directory/DebuggerNotification"
+    LiveSimBooter/LocalPOSIX.cpp LiveSimBooter/LocalMach.cpp LiveSimBooter/LazySignatureClient.cpp -o "$test_directory/DebuggerNotification"
 "$test_directory/DebuggerNotification"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/SpawnPlanTests.c Guest/SpawnAttributes.c Guest/ProcessSession.c Guest/ProcessIdentity.c ProcessSupport/SpawnPlan.c ProcessSupport/ChildStatus.c \
@@ -348,12 +363,13 @@ xcrun --sdk macosx clang -std=c11 -fblocks -Wall -Wextra -Werror -arch arm64 -DL
     -o "$test_directory/BrokerConnectionClient"
 XPC_FLAGS=0x2 "$test_directory/BrokerConnectionServer" "$test_directory/BrokerConnectionClient"
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 -IProcessSupport -IHost \
-    Tests/BrokerTests.m Host/SessionControlQueue.c Host/TerminalSession.m Host/LaunchdConfiguration.m ProcessSupport/LaunchdHandshake.c ProcessSupport/LaunchdProbe.c \
+    Tests/BrokerTests.m Host/SessionControlQueue.c Host/TerminalSession.m Host/LaunchdConfiguration.m ProcessSupport/NativeCacheLayout.c \
+    ProcessSupport/LaunchdHandshake.c ProcessSupport/LaunchdProbe.c \
     Host/IndigoHIDServer.m Host/FramebufferServer.m Host/IOSurfaceServer.m ProcessSupport/LaunchdEndpoint.c \
     Host/GuestEntitlementsConversion.m Host/DeviceType.m Host/DeviceConfiguration.m Host/RuntimeStorage.m ProcessSupport/StoreAppGroups.c \
-    ProcessSupport/GuestEntitlements.c \
+    ProcessSupport/GuestEntitlements.c Host/LazySigning.m Host/SigningIdentity.m \
     ProcessSupport/FakePTY.c ProcessSupport/SpawnPlan.c ProcessSupport/ChildStatus.c ProcessSupport/NativeMetalControl.c \
-    -framework Foundation -framework IOSurface -weak-lMobileGestalt -o "$test_directory/Broker"
+    -framework Foundation -framework IOSurface -framework Security -weak-lMobileGestalt -o "$test_directory/Broker"
 "$test_directory/Broker"
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
     Tests/IndigoHIDServerTests.m Host/IndigoHIDServer.m -framework Foundation -o "$test_directory/IndigoHIDServer"

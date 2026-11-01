@@ -36,6 +36,7 @@
 #include "HostPreparation.h"
 #include "SharedCacheHandoff.h"
 #include "SimSyscallHelpers.h"
+#include "LazySignatureClient.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -723,7 +724,8 @@ bool mapImage(const char *path, LSBMappedImage &image, std::string &error, uint3
     signature.fs_file_start = static_cast<off_t>(layout.sliceOffset);
     signature.fs_blob_start = reinterpret_cast<void *>(uintptr_t(layout.signature.dataoff));
     signature.fs_blob_size = layout.signature.datasize;
-    if (fcntl(file.fd, F_ADDFILESIGS_RETURN, &signature) == -1) return systemFailure(error, "fcntl(F_ADDFILESIGS_RETURN)");
+    if (fcntl(file.fd, F_ADDFILESIGS_RETURN, &signature) == -1 && LSBLazySignatureRetry(file.fd, &signature))
+        return systemFailure(error, "fcntl(F_ADDFILESIGS_RETURN)");
     // F_ADDFILESIGS_RETURN replaces fs_file_start with the covered length relative to the slice.
     if (signature.fs_file_start < 0 || uint64_t(signature.fs_file_start) < layout.signature.dataoff)
         return fail(error, "Code signature does not cover the image up to LC_CODE_SIGNATURE.dataoff");

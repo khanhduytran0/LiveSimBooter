@@ -16,6 +16,8 @@
 #include <unistd.h>
 
 static uint32_t nativeProductionStatus = LSB_NATIVE_DEVELOPMENT;
+static LSBNativeCacheLayout nativeCacheLayout = LSB_NATIVE_CACHE_LAYOUT_OVERLAP;
+LSBNativeCacheLayout LSBReadNativeCacheLayout(const char *runtimeRoot) { assert(runtimeRoot && runtimeRoot[0] == '/'); return nativeCacheLayout; }
 uint32_t LSBHostNativeProductionStatus(void) { return nativeProductionStatus; }
 
 static void initialize(LSBReceivedMessage *message) {
@@ -234,11 +236,15 @@ static void testProductionPolicy(LSBReceivedMessage *message, NSString *root, NS
     const char *retain[] = {LSB_RETAIN_HOST_CACHE_ENV "=1", NULL};
     for (uint32_t status = LSB_NATIVE_PRODUCTION_UNKNOWN; status <= LSB_NATIVE_DEVELOPMENT; ++status) {
         nativeProductionStatus = status;
-        assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, NULL));
-        NSDictionary *bootstrap = readPlist(configPath)[@"Bootstrap"];
-        for (NSString *scope in @[@"Self", @"Child"]) for (NSString *key in @[@LSB_RETAIN_HOST_CACHE_ENV, @LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV])
-            assert([bootstrap[scope][key] isEqual:status == LSB_NATIVE_DEVELOPMENT ? @"0" : @"1"]);
-        dispose(message);
+        for (nativeCacheLayout = LSB_NATIVE_CACHE_LAYOUT_UNKNOWN; nativeCacheLayout <= LSB_NATIVE_CACHE_LAYOUT_OVERLAP; ++nativeCacheLayout) {
+            assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, NULL));
+            NSDictionary *bootstrap = readPlist(configPath)[@"Bootstrap"];
+            BOOL detach = status == LSB_NATIVE_DEVELOPMENT && nativeCacheLayout == LSB_NATIVE_CACHE_LAYOUT_OVERLAP;
+            for (NSString *scope in @[@"Self", @"Child"]) for (NSString *key in @[@LSB_RETAIN_HOST_CACHE_ENV, @LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV])
+                assert([bootstrap[scope][key] isEqual:detach ? @"0" : @"1"]);
+            dispose(message);
+        }
+        nativeCacheLayout = LSB_NATIVE_CACHE_LAYOUT_OVERLAP;
         NSData *previous = [NSData dataWithContentsOfFile:configPath];
         int error = LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, detach);
         if (status == LSB_NATIVE_DEVELOPMENT) { assert(!error); dispose(message); }
@@ -248,7 +254,7 @@ static void testProductionPolicy(LSBReceivedMessage *message, NSString *root, NS
             assert([[NSData dataWithContentsOfFile:configPath] isEqual:previous]);
         }
         assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, retain));
-        bootstrap = readPlist(configPath)[@"Bootstrap"];
+        NSDictionary *bootstrap = readPlist(configPath)[@"Bootstrap"];
         for (NSString *scope in @[@"Self", @"Child"]) for (NSString *key in @[@LSB_RETAIN_HOST_CACHE_ENV, @LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV])
             assert([bootstrap[scope][key] isEqual:@"1"]);
         dispose(message);
@@ -1010,7 +1016,7 @@ int main(void) {
         testDeviceProfile(message, root, configPath);
         testDFMode(message, root, dataPath, configPath, inherited);
         LSBNativeRuntimePolicy policy;
-        assert(!LSBResolveNativeRuntimePolicy(nativeProductionStatus, NULL, &policy));
+        assert(!LSBResolveNativeRuntimePolicy(nativeProductionStatus, nativeCacheLayout, NULL, &policy));
         testRuntimeBooleanEnvironment(message, root, configPath, LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV, policy.hardwareWorkqueue);
         testRuntimeBooleanEnvironment(message, root, configPath, LSB_RETAIN_HOST_CACHE_ENV, policy.retainHostCache);
         testRuntimeBooleanEnvironment(message, root, configPath, "LSB_TRACE_HANDOFF", NO);

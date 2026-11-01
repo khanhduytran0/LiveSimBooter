@@ -1,7 +1,8 @@
 # Native process names and argument storage
 
 Every extension still executes the signed `LiveProcess` image. After its authenticated broker check-in, it writes `LSB:<logical PID> <basename>`
-into the original native `argv[0]` allocation, for example `LSB:1234 SpringBoard`. Native `ps`'s PID column remains the genuine native PID,
+into the original native `argv[0]` allocation, for example `LSB:1234 SpringBoard`. The portable 8 MiB-stack build can subsequently lose that
+argument window when the guest cache replaces it; the optional preservation build below keeps it on tested devices. Native `ps`'s PID column remains the genuine native PID,
 which can differ from the logical PID in the name. An exec replacement retains the logical PID and uses its replacement executable's basename. Guest argument
 and environment vectors, signed executable path, audit tokens and broker identity are separate and remain unchanged.
 
@@ -10,12 +11,17 @@ retain the same label. Both the native argv capacity and the independent 32-byte
 only the basename is truncated when necessary. `kern.procname` takes bytes excluding the terminator and adds its own NUL.
 
 `kern.procname` is best effort: failure is logged without preventing launch. Native `p_comm` remains `LiveProcess`, so `ps -o ucomm` still shows
-the native executable. Use `ps -ww -axo pid,pcpu,rss,command` for the name and both PID namespaces. This is diagnostic metadata, not a complete
+the native executable. With argument preservation enabled and validated, use `ps -ww -axo pid,pcpu,rss,command` for the name and both PID namespaces. This is diagnostic metadata, not a complete
 copy of guest argv. Never select a process for a privileged operation by parsing this label instead of validating its actual identity.
 
 ## Preserve native arguments with LC_MAIN
 
-`LSB_PRESERVE_NATIVE_ARGUMENTS=YES` is the default in both Xcode configurations. The pre-signing `Tools/prepare-native-stack.py` phase changes
+`LSB_PRESERVE_NATIVE_ARGUMENTS=NO` is the portable default in both Xcode configurations and the build-script fallback. It keeps the linked
+8 MiB initial stack and the existing guarded simulator-stack relocation. Native `ps` argument names may again show cache bytes when the
+original argument window overlaps the guest cache; guest argv and the broker's logical/native PID records remain separate and correct.
+
+For the tested development iPhone 15, explicitly building with `LSB_PRESERVE_NATIVE_ARGUMENTS=YES` enables preservation.
+The pre-signing `Tools/prepare-native-stack.py` phase changes
 only `LC_MAIN.stacksize` from the linked 8 MiB to `0x90000000` (2.25 GiB). Segment addresses, extents, chained fixups and entry point stay unchanged.
 This initial stack cannot fit at arm64 XNU's ordinary stack address without overlapping PAGEZERO/the executable. `create_unix_stack` therefore
 uses its allocation fallback and records the new address in `p->user_stack`. Native `KERN_PROCARGS2` now reads the preserved argument window there.
@@ -29,7 +35,12 @@ placed this argument window inside the cache, startup fails rather than overwrit
 The lower allocation remains demand-zero virtual address space; it is not a 2.25 GiB resident allocation. Every LiveProcess role, including
 native Metal helpers, has the larger initial virtual reservation. Native helpers retain their native stack bounds. The simple Mac probe used
 approximately 1.6–1.7 MiB RSS; this is not a measurement of a simulator app's total memory cost. Different devices may have different VA limits.
-Set `LSB_PRESERVE_NATIVE_ARGUMENTS=NO` only for a diagnostic comparison with the old argument-overwrite behavior.
+Do not enable the larger reservation for an untested destination merely because it works on the Mac or another phone.
+
+On 2026-10-31, iPhone18,2 / native iOS 27.0 build 24A435 rejected the 2.25 GiB-stack extension before `main`, with RunningBoard
+reporting `posix_spawn` `ENOMEM`. Restoring the same package's 8 MiB stack allowed startup. This isolates the larger initial
+reservation as a launch blocker on that destination; it does not establish the precise kernel allocation limit. The 8 MiB package
+then booted the graphical simulator with native-cache retention. Artifacts are under ignored `tmp/lazy-sign-20261031/`.
 
 ## Why guest names became instructions
 
@@ -119,8 +130,9 @@ the demonstrated readable names are the native argument/command field. No LLDB w
 The full local suite, focused loader guard tests, signed native-stack probes, native build and separate guest-shim build passed.
 
 Artifacts and bounded captures are under ignored `tmp/process-names-20261030/`, with the final package/evidence under `final/`.
-The new LC_MAIN approach has **not yet been tested on iPhone 17 or another production device**. The earlier iPhone 17 failure was from the
-different wide-segment experiment, which remains disabled. Widget rendering itself remains a separate unresolved issue.
+At the time of that capture, the new LC_MAIN approach had not been tested on iPhone 17. Its subsequent pre-main launch failure is
+recorded above and makes preservation opt-in. The earlier iPhone 17 failure was from the different wide-segment experiment,
+which remains disabled. Widget rendering was a separate unresolved issue in that capture.
 
 The subsequent prefix-format build, LiveProcess UUID `6CA5C6B9-0789-3AEA-A24B-B94B56C764BC`, was installed on the same device with unchanged
 host, guest shim and cache. Native `ps` reported `9384 LSB:9365 SpringBoard`, `9398 LSB:9374 fish`, and `9356 LSB:9356 launchd_sim`.

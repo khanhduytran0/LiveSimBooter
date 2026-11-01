@@ -21,7 +21,7 @@
 extern char **environ;
 extern int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *, mach_port_t *, uint32_t);
 static unsigned openDescriptorCount(void);
-enum { MalformedPortsCount = 10, MalformedIdentityCount = 12, MalformedRoleCount = 23, MalformedRoleRequestCount = 24,
+enum { MalformedPortsCount = 10, MalformedIdentityCount = 12, MalformedRoleCount = 29, MalformedRoleRequestCount = 40,
        MalformedBootstrapCount = 14 + MalformedPortsCount + MalformedIdentityCount + MalformedRoleCount,
        MalformedKillCount = 14, MalformedAuditCount = 16, MalformedEntitlementCount = 25, PortRoundTripCount = 7,
        MalformedRebootCount = 30, RebootReplyCount = 23 };
@@ -198,7 +198,9 @@ static void testRoleRequestInjection(const LSBSpawnPlan *plan, int fd, unsigned 
     if (kind == LSB_REQUEST_COPY_PROCESS_IDENTITY) xpc_dictionary_set_int64(request, "target-pid", 4242);
     if (variant / 8 == 0) xpc_dictionary_set_uint64(request, "bootstrap-version", LSB_BOOTSTRAP_VERSION);
     else if (variant / 8 == 1) xpc_dictionary_set_uint64(request, "execution-role", LSB_EXECUTION_NATIVE_METAL_PROBE);
-    else xpc_dictionary_set_uint64(request, "native-production-status", LSB_NATIVE_DEVELOPMENT);
+    else if (variant / 8 == 2) xpc_dictionary_set_uint64(request, "native-production-status", LSB_NATIVE_DEVELOPMENT);
+    else if (variant / 8 == 3) xpc_dictionary_set_uint64(request, "execution-role", LSB_EXECUTION_NATIVE_SIGNER);
+    else xpc_dictionary_set_mach_send(request, "lazy-signing-port", port);
     xpc_object_t reply = NULL;
     assert(!xpc_pipe_routine(pipe, request, &reply));
     assert(reply && xpc_dictionary_get_int64(reply, "error") == EPROTO);
@@ -962,6 +964,23 @@ static int client(void) {
                               .msgh_remote_port = tankAnchor, .msgh_id = 885};
     assert(!mach_msg(&ping, MACH_SEND_MSG, sizeof(ping), 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     registeredPortsClient(&plan, fds);
+    for (unsigned variant = 0; variant < 3; ++variant) {
+        unsigned before = openDescriptorCount();
+        if (variant == 2) {
+            assert(LSBTransportCheckIn(&reply, received) == EINVAL && !reply.lazySigningPort && !reply.guestBrokerPort);
+            assert(openDescriptorCount() == before);
+            continue;
+        }
+        assert(!LSBTransportCheckIn(&reply, received) && reply.requestID == 700 + variant);
+        assert(reply.executionRole == (variant ? LSB_EXECUTION_NATIVE_SIGNER : LSB_EXECUTION_SIMULATOR));
+        assert(reply.brokerAudit.val[5] == (unsigned)getppid() && reply.brokerAudit.val[7]);
+        assert(MACH_PORT_VALID(reply.lazySigningPort) == !variant && MACH_PORT_VALID(reply.guestBrokerPort) == !variant);
+        assert(!reply.launchdTankPort && !reply.ports.count && !reply.taskCapture.port);
+        if (MACH_PORT_VALID(reply.lazySigningPort)) assert(!mach_port_deallocate(mach_task_self(), reply.lazySigningPort));
+        if (MACH_PORT_VALID(reply.guestBrokerPort)) assert(!mach_port_deallocate(mach_task_self(), reply.guestBrokerPort));
+        close(reply.statusFD); close(reply.wakeFD); close(received[0]);
+        assert(openDescriptorCount() == before);
+    }
     for (unsigned variant = 0; variant < MalformedPortsCount; ++variant) testMalformedPorts(&plan, fd, tankAnchor, variant);
     for (unsigned variant = 0; variant < MalformedRoleRequestCount; ++variant) testRoleRequestInjection(&plan, fd, variant);
     signalAcknowledgementFD = fd;
@@ -988,7 +1007,7 @@ static int client(void) {
     for (unsigned variant = 0; variant < MalformedBootstrapCount; ++variant) {
         unsigned before = openDescriptorCount();
         assert(LSBTransportCheckIn(&reply, received) == EPROTO);
-        assert(reply.nativeProductionStatus == LSB_NATIVE_PRODUCTION_UNKNOWN && !reply.guestBrokerPort);
+        assert(reply.nativeProductionStatus == LSB_NATIVE_PRODUCTION_UNKNOWN && !reply.guestBrokerPort && !reply.lazySigningPort);
         assert(reply.statusFD == -1 && reply.wakeFD == -1 && reply.launchdTankPort == MACH_PORT_NULL);
         assert(!reply.ports.count && !reply.ports.registeredPresent && !reply.ports.bootstrapPresent && !reply.ports.bootstrapPort);
         for (unsigned i = 0; i < LSB_MAX_REGISTERED_PORTS; ++i) assert(reply.ports.registered[i] == MACH_PORT_NULL);
@@ -1131,7 +1150,7 @@ static void replyMalformedBootstrap(LSBReceivedMessage *message, const LSBSpawnP
             case 4: xpc_dictionary_set_int64(reply, "bootstrap-version", 1); break;
             case 5: xpc_dictionary_set_string(reply, "execution-role", "native"); break;
             case 6: xpc_dictionary_set_int64(reply, "execution-role", 1); break;
-            case 7: xpc_dictionary_set_uint64(reply, "execution-role", LSB_EXECUTION_NATIVE_METAL_SERVICE + 1); break;
+            case 7: xpc_dictionary_set_uint64(reply, "execution-role", LSB_EXECUTION_NATIVE_SIGNER + 1); break;
             case 8: xpc_dictionary_set_uint64(reply, "execution-role", UINT64_MAX); break;
             case 9: xpc_dictionary_set_uint64(reply, "execution-role", LSB_EXECUTION_NATIVE_METAL_PROBE); break;
             case 10:
@@ -1161,6 +1180,19 @@ static void replyMalformedBootstrap(LSBReceivedMessage *message, const LSBSpawnP
                 xpc_dictionary_set_value(reply, "bootstrap-port", NULL);
                 xpc_dictionary_set_value(reply, "launchd-tank-port", NULL);
                 break;
+            case 23: xpc_dictionary_set_string(reply, "lazy-signing-port", "not a port"); break;
+            case 24: xpc_dictionary_set_uint64(reply, "lazy-signing-port", guestEndpoint); break;
+            case 25: xpc_dictionary_set_mach_send(reply, "lazy-signing-port", MACH_PORT_NULL); break;
+            case 26: case 27:
+                xpc_dictionary_set_uint64(reply, "execution-role", variant - 14 - MalformedPortsCount - MalformedIdentityCount == 26 ?
+                    LSB_EXECUTION_NATIVE_METAL_SERVICE : LSB_EXECUTION_NATIVE_SIGNER);
+                xpc_dictionary_set_value(reply, "registered-ports", NULL);
+                xpc_dictionary_set_value(reply, "bootstrap-port", NULL);
+                xpc_dictionary_set_value(reply, "launchd-tank-port", NULL);
+                xpc_dictionary_set_value(reply, "guest-broker-port", NULL);
+                xpc_dictionary_set_mach_send(reply, "lazy-signing-port", guestEndpoint);
+                break;
+            case 28: xpc_dictionary_set_uint64(reply, "bootstrap-version", 4); break;
             default: assert(false);
         }
     }
@@ -1307,6 +1339,22 @@ static int host(const char *executable) {
     assert(!mach_msg(&ping.header, MACH_RCV_MSG, 0, sizeof(ping), tank, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     assert(ping.header.msgh_id == 885 && ping.header.msgh_size == sizeof(mach_msg_header_t));
     registeredPortsHost(port, &bootstrap);
+    for (unsigned variant = 0; variant < 3; ++variant) {
+        assert(!LSBTransportReceive(port, &message) && message.kind == LSB_REQUEST_CHECKIN);
+        LSBBootstrapMetadata metadata = {.guestPID = child, .parentPID = getpid(),
+            .executionRole = variant ? LSB_EXECUTION_NATIVE_SIGNER : LSB_EXECUTION_SIMULATOR,
+            .guestBrokerPort = variant ? MACH_PORT_NULL : guestEndpoint, .lazySigningPort = variant ? MACH_PORT_NULL : guestEndpoint};
+        if (variant == 2) {
+            metadata.lazySigningPort = guestEndpoint;
+            assert(LSBTransportReplyBootstrapWithMetadata(&message, 0, child, 700 + variant, "/tmp/RuntimeRoot", &pending.plan,
+                pending.fds, bootstrap.status, bootstrap.wake[0], &metadata) == EINVAL && !message.object);
+            LSBTransportDisposeMessage(&message);
+            continue;
+        }
+        assert(!LSBTransportReplyBootstrapWithMetadata(&message, 0, child, 700 + variant, "/tmp/RuntimeRoot", &pending.plan,
+            pending.fds, bootstrap.status, bootstrap.wake[0], &metadata));
+        LSBTransportDisposeMessage(&message);
+    }
     for (unsigned variant = 0; variant < MalformedPortsCount; ++variant) {
         unsigned before = openDescriptorCount();
         assert(LSBTransportReceive(port, &message) == EPROTO && !message.object && !message.ports.count);
@@ -1419,7 +1467,7 @@ static int host(const char *executable) {
 }
 
 int main(int argc, char **argv) {
-    _Static_assert(LSB_TRANSPORT_VERSION == 7 && LSB_BOOTSTRAP_VERSION == 4, "guest connection endpoint requires current transport/bootstrap versions");
+    _Static_assert(LSB_TRANSPORT_VERSION == 8 && LSB_BOOTSTRAP_VERSION == 5, "lazy signing requires current transport/bootstrap versions");
     // Bound a failed regression test without adding a signal handler to the production transport.
     alarm(20);
     return argc == 2 && !strcmp(argv[1], "--client") ? client() : host(argv[0]);

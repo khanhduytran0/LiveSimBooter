@@ -2,6 +2,10 @@
 #import "BackgroundAudio.h"
 #import "GuestDisplaySettings.h"
 #import "GuestDeviceSettings.h"
+#import "SigningIdentity.h"
+#import "Broker.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#include <string.h>
 
 static void reloadSettingsTable(UITableView *table, NSIndexSet *sections) {
     [UIView performWithoutAnimation:^{
@@ -26,6 +30,12 @@ static void offerSimulatorRestart(UIViewController *controller, LSBGuestDeviceSe
         [settings restartSimulator];
     }]];
     [controller presentViewController:alert animated:YES completion:nil];
+}
+
+static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSettings *settings) {
+    if ([controller.presentedViewController isKindOfClass:UIAlertController.class])
+        [controller dismissViewControllerAnimated:YES completion:^{ offerSimulatorRestart(controller, settings); }];
+    else offerSimulatorRestart(controller, settings);
 }
 
 @interface LSBDeviceTypePickerViewController : UITableViewController
@@ -186,11 +196,16 @@ static void offerSimulatorRestart(UIViewController *controller, LSBGuestDeviceSe
 }
 @end
 
+@interface LSBSettingsViewController () <UIDocumentPickerDelegate>
+@end
+
 @implementation LSBSettingsViewController {
     LSBBackgroundAudio *_audio;
     LSBGuestDisplaySettings *_display;
     LSBGuestDeviceSettings *_device;
-    id _audioObserver, _displayObserver, _deviceObserver;
+    id _audioObserver, _displayObserver, _deviceObserver, _signingObserver;
+    NSString *_signingSummary, *_signingError;
+    BOOL _importingIdentity;
 }
 - (instancetype)init {
     if (!(self = [super initWithStyle:UITableViewStyleInsetGrouped])) return nil;
@@ -201,6 +216,7 @@ static void offerSimulatorRestart(UIViewController *controller, LSBGuestDeviceSe
     if (_audioObserver) [NSNotificationCenter.defaultCenter removeObserver:_audioObserver];
     if (_displayObserver) [NSNotificationCenter.defaultCenter removeObserver:_displayObserver];
     if (_deviceObserver) [NSNotificationCenter.defaultCenter removeObserver:_deviceObserver];
+    if (_signingObserver) [NSNotificationCenter.defaultCenter removeObserver:_signingObserver];
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -236,9 +252,15 @@ static void offerSimulatorRestart(UIViewController *controller, LSBGuestDeviceSe
             if (!controller) return;
             [UIView performWithoutAnimation:^{
                 controller.navigationItem.rightBarButtonItem.enabled = !controller->_display.pending && !controller->_device.pending;
-                reloadSettingsTable(controller.tableView, [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(1, 5)]);
+                reloadSettingsTable(controller.tableView, [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(1, 6)]);
             }];
         }];
+    _signingObserver = [NSNotificationCenter.defaultCenter addObserverForName:LSBSigningIdentityDidChangeNotification object:nil
+        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
+            (void)notification;
+            [weakSelf refreshSigningIdentity];
+        }];
+    [self refreshSigningIdentity];
 }
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
@@ -247,10 +269,17 @@ static void offerSimulatorRestart(UIViewController *controller, LSBGuestDeviceSe
 - (void)refreshDisplay {
     [_device refresh];
     if (_device.canControlSimulator) [_display refresh];
+    [self refreshSigningIdentity];
 }
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { (void)tableView; return 6; }
+- (void)refreshSigningIdentity {
+    _signingSummary = LSBSigningIdentitySummary();
+    [_device refresh];
+    reloadSettingsTable(self.tableView, [NSIndexSet indexSetWithIndex:6]);
+}
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { (void)tableView; return 7; }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
+    if (section == 6) return 2;
     if (section == 2) {
         LSBGuestDeviceType *type = LSBGuestDeviceTypeForIdentifier(_device.currentIdentifier);
         return type.hasHomeButton || type.isPad ? 2 : 1;
@@ -264,10 +293,18 @@ static void offerSimulatorRestart(UIViewController *controller, LSBGuestDeviceSe
     if (section == 2) return NSLocalizedString(@"Simulator device", @"Settings section heading for device selection and display sizing.");
     if (section == 3) return NSLocalizedString(@"Experimental haptics", @"Settings section heading for optional haptic passthrough.");
     if (section == 4) return NSLocalizedString(@"Experimental audio", @"Settings section heading for optional simulator audio output.");
+    if (section == 6) return NSLocalizedString(@"Code signing", @"Settings section heading for lazy runtime code signing.");
     return NSLocalizedString(@"Simulator session", @"Settings section heading for Power Off and Restart.");
 }
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     (void)tableView;
+    if (section == 6) {
+        NSString *description = NSLocalizedString(@"Off by default. Sign a runtime binary only when its signature registration fails. "
+            @"The P12 and password stay in this app's device-only keychain. Changes apply on the next simulator start or restart.",
+            @"Description of lazy signing and where its credentials are stored.");
+        return _signingError.length ? [NSString stringWithFormat:NSLocalizedString(@"%@\n\n%@",
+            @"Settings footer: explanatory paragraph, then current status."), description, _signingError] : description;
+    }
     if (section == 5) return _device.sessionStatusText;
     if (section == 4) return _device.audioOutputForced ? NSLocalizedString(@"Enabled by the host launch environment.",
         @"Settings footer when a feature is forced on by the native host environment.") : _device.audioOutputStatusText;
@@ -294,6 +331,61 @@ static void offerSimulatorRestart(UIViewController *controller, LSBGuestDeviceSe
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.textLabel.numberOfLines = 0;
+    if (indexPath.section == 6) {
+        if (indexPath.row == 0) {
+            cell.textLabel.text = NSLocalizedString(@"Lazy sign", @"Switch to sign runtime binaries on signature-registration failure.");
+            UISwitch *toggle = [UISwitch new];
+            toggle.on = LSBLazySigningEnabled();
+            toggle.enabled = _device.canApply && !_importingIdentity && (toggle.on || _signingSummary.length);
+            toggle.accessibilityLabel = cell.textLabel.text;
+            toggle.accessibilityIdentifier = @"simulator-lazy-sign";
+            toggle.accessibilityHint = NSLocalizedString(@"Import a P12 signing identity first. Save this choice, then restart now or later.",
+                @"Accessibility hint for enabling lazy signing.");
+            cell.textLabel.enabled = toggle.enabled;
+            __weak LSBSettingsViewController *weakSelf = self;
+            [toggle addAction:[UIAction actionWithHandler:^(UIAction *action) {
+                LSBSettingsViewController *controller = weakSelf;
+                if (!controller) return;
+                UISwitch *sender = (UISwitch *)action.sender;
+                BOOL requested = sender.on;
+                sender.on = LSBLazySigningEnabled();
+                int error = LSBHostSaveLazySigningEnabled(requested);
+                controller->_signingError = error ? [NSString stringWithFormat:
+                    NSLocalizedString(@"Could not save lazy signing: %s (%d).", @"Lazy signing settings error: description and numeric code."),
+                    strerror(error), error] : nil;
+                [controller refreshSigningIdentity];
+                if (!error) offerSimulatorRestart(controller, controller->_device);
+            }] forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = toggle;
+        } else {
+            cell.textLabel.text = _importingIdentity ? NSLocalizedString(@"Importing…", @"P12 import is in progress.") :
+                _signingSummary.length ? NSLocalizedString(@"Imported", @"A P12 signing identity has been imported; tap to replace it.") :
+                NSLocalizedString(@"Import P12…", @"Choose a PKCS12 signing identity document.");
+            cell.textLabel.numberOfLines = 1;
+            cell.textLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+            cell.userInteractionEnabled = _device.canApply && !_importingIdentity;
+            cell.textLabel.enabled = cell.userInteractionEnabled;
+            cell.textLabel.textColor = cell.userInteractionEnabled ? self.view.tintColor : UIColor.secondaryLabelColor;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            cell.accessibilityIdentifier = @"signing-identity-import";
+            if (_signingSummary.length) {
+                cell.accessibilityValue = _signingSummary;
+                UIButton *remove = [UIButton buttonWithType:UIButtonTypeSystem];
+                remove.frame = CGRectMake(0, 0, 32, 32);
+                [remove setImage:[UIImage systemImageNamed:@"xmark.circle.fill"] forState:UIControlStateNormal];
+                remove.enabled = cell.userInteractionEnabled;
+                remove.accessibilityIdentifier = @"signing-identity-remove";
+                remove.accessibilityLabel = NSLocalizedString(@"Remove signing identity", @"Delete the imported signing identity from this app's keychain.");
+                __weak LSBSettingsViewController *weakSelf = self;
+                [remove addAction:[UIAction actionWithHandler:^(UIAction *action) {
+                    (void)action;
+                    [weakSelf confirmRemoveSigningIdentity];
+                }] forControlEvents:UIControlEventTouchUpInside];
+                cell.accessoryView = remove;
+            }
+        }
+        return cell;
+    }
     if (indexPath.section == 5) {
         BOOL powerOff = indexPath.row == 0;
         cell.textLabel.text = powerOff ? NSLocalizedString(@"Power Off", @"Stop the simulator session without deleting its data.") :
@@ -393,6 +485,10 @@ static void offerSimulatorRestart(UIViewController *controller, LSBGuestDeviceSe
 }
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == 6 && _device.canApply && !_importingIdentity) {
+        if (indexPath.row == 1) [self chooseSigningIdentity];
+        return;
+    }
     if (indexPath.section == 5 && _device.canControlSimulator) {
         if (indexPath.row == 0) [_device powerOffSimulator];
         else [_device restartSimulator];
@@ -400,5 +496,110 @@ static void offerSimulatorRestart(UIViewController *controller, LSBGuestDeviceSe
         [self.navigationController pushViewController:[LSBHUDSettingsViewController new] animated:YES];
     else if (indexPath.section == 2 && indexPath.row == 0)
         [self.navigationController pushViewController:[LSBDeviceTypePickerViewController new] animated:YES];
+}
+- (void)chooseSigningIdentity {
+    if (self.presentedViewController) return;
+    NSMutableArray<UTType *> *types = [NSMutableArray array];
+    for (NSString *extension in @[@"p12", @"pfx"]) {
+        UTType *type = [UTType typeWithFilenameExtension:extension];
+        if (type && ![types containsObject:type]) [types addObject:type];
+    }
+    if (!types.count) [types addObject:UTTypeData];
+    // Open in place and read only: avoid leaving a second private-key document in the app's Inbox.
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:NO];
+    picker.delegate = self;
+    picker.allowsMultipleSelection = NO;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    (void)controller;
+    if (urls.count != 1 || _importingIdentity) return;
+    NSURL *url = urls.firstObject;
+    _importingIdentity = YES;
+    _signingError = nil;
+    [self refreshSigningIdentity];
+    __weak LSBSettingsViewController *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL scoped = [url startAccessingSecurityScopedResource];
+        NSError *error = nil;
+        NSFileHandle *file = [NSFileHandle fileHandleForReadingFromURL:url error:&error];
+        NSData *data = [file readDataUpToLength:LSBSigningPKCS12MaximumSize + 1 error:&error];
+        [file closeAndReturnError:nil];
+        if (scoped) [url stopAccessingSecurityScopedResource];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            LSBSettingsViewController *self = weakSelf;
+            if (!self) return;
+            self->_importingIdentity = NO;
+            if (error || !data.length || data.length > LSBSigningPKCS12MaximumSize) {
+                self->_signingError = error.localizedDescription ?: NSLocalizedString(@"Choose a P12 or PFX file smaller than 16 MB.",
+                    @"Signing import input size error.");
+                [self refreshSigningIdentity];
+                return;
+            }
+            [self refreshSigningIdentity];
+            if (self.presentedViewController == controller)
+                [self dismissViewControllerAnimated:YES completion:^{ [self requestSigningPasswordForData:data]; }];
+            else [self requestSigningPasswordForData:data];
+        });
+    });
+}
+- (void)requestSigningPasswordForData:(NSData *)data {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:NSLocalizedString(@"Import signing identity", @"Title of the P12 password prompt.")
+        message:NSLocalizedString(@"Enter the P12 password. Leave it empty if the file has no password.", @"P12 password prompt instructions.")
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.secureTextEntry = YES;
+        field.textContentType = UITextContentTypePassword;
+        field.placeholder = NSLocalizedString(@"Password", @"Placeholder for the P12 password field.");
+        field.autocorrectionType = UITextAutocorrectionTypeNo;
+        field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"Cancel", @"Cancel the current dialog.") style:UIAlertActionStyleCancel handler:nil]];
+    __weak LSBSettingsViewController *weakSelf = self;
+    __weak UIAlertController *weakAlert = alert;
+    [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"Import", @"Import the selected P12 signing identity.")
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        (void)action;
+        LSBSettingsViewController *self = weakSelf;
+        NSString *password = [weakAlert.textFields.firstObject.text copy] ?: @"";
+        weakAlert.textFields.firstObject.text = @"";
+        if (!self || !self->_device.canApply) return;
+        self->_importingIdentity = YES;
+        [self refreshSigningIdentity];
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSError *error = nil;
+            BOOL imported = LSBImportSigningIdentity(data, password, &error);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                LSBSettingsViewController *controller = weakSelf;
+                if (!controller) return;
+                controller->_importingIdentity = NO;
+                controller->_signingError = imported ? nil : error.localizedDescription;
+                [controller refreshSigningIdentity];
+                if (imported) offerSigningRestart(controller, controller->_device);
+            });
+        });
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+- (void)confirmRemoveSigningIdentity {
+    if (self.presentedViewController) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:
+        NSLocalizedString(@"Remove signing identity?", @"Confirmation before deleting the app's stored P12 identity.")
+        message:NSLocalizedString(@"Lazy sign will be turned off. A running simulator keeps its current identity until restarted.",
+            @"Effect of removing the stored signing identity.") preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"Cancel", @"Cancel the current dialog.") style:UIAlertActionStyleCancel handler:nil]];
+    __weak LSBSettingsViewController *weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"Remove", @"Confirm deletion of a stored signing identity.")
+        style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        (void)action;
+        LSBSettingsViewController *self = weakSelf;
+        if (!self || !self->_device.canApply) return;
+        NSError *error = nil;
+        BOOL removed = LSBRemoveSigningIdentity(&error);
+        self->_signingError = removed ? nil : error.localizedDescription;
+        [self refreshSigningIdentity];
+        if (removed) offerSigningRestart(self, self->_device);
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 @end

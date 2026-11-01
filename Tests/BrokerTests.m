@@ -15,7 +15,27 @@
 #include "../Host/GuestEntitlementsConversion.h"
 #include "../ProcessSupport/TaskPortCapture.h"
 #import "../Host/DeviceConfiguration.h"
+#import "../Host/SigningIdentity.h"
+#import "../Host/LazySigning.h"
 #include "../ProcessSupport/PrivateXPC.h"
+// Session-planning tests never read the developer's signing keychain or start a native signer connection.
+@interface TestLazySigning : NSObject
+@property (nonatomic, readonly) mach_port_t endpoint;
+@property (nonatomic, readonly, copy) NSString *identityRevision;
+- (instancetype)initWithRuntimeRoot:(NSString *)root credentials:(LSBSigningCredentials *)credentials identifier:(NSString *)identifier
+                         authorize:(BOOL (^)(const audit_token_t *audit))authorize error:(int *)error;
+- (int)connectService:(mach_port_t)port audit:(const audit_token_t *)audit;
+- (void)invalidate;
+@end
+static BOOL testLazySigningEnabled(void);
+static void testSaveLazySigningEnabled(BOOL);
+static NSString *testSigningIdentityRevision(void);
+static LSBSigningCredentials *testCopySigningCredentials(NSError **);
+#define LSBLazySigning TestLazySigning
+#define LSBLazySigningEnabled testLazySigningEnabled
+#define LSBSaveConfiguredLazySigningEnabled testSaveLazySigningEnabled
+#define LSBSigningIdentityRevision testSigningIdentityRevision
+#define LSBCopySigningCredentials testCopySigningCredentials
 @interface TestBrokerConnection : NSObject
 @property audit_token_t audit;
 @property (copy) xpc_handler_t handler;
@@ -67,6 +87,11 @@ static int testTaskCaptureReceive(const LSBTaskPortCaptureOffer *, const audit_t
 #define bootstrap_check_in testBootstrapCheckIn
 #define handleMessage brokerHandleMessage
 #include "../Host/Broker.m"
+#undef LSBLazySigning
+#undef LSBLazySigningEnabled
+#undef LSBSaveConfiguredLazySigningEnabled
+#undef LSBSigningIdentityRevision
+#undef LSBCopySigningCredentials
 #undef handleMessage
 #undef xpc_connection_get_audit_token
 #undef xpc_connection_set_target_queue
@@ -90,6 +115,32 @@ static int testTaskCaptureReceive(const LSBTaskPortCaptureOffer *, const audit_t
 #undef LSBConfiguredGuestDeviceType
 #undef LSBSaveConfiguredGuestDeviceType
 #undef LSBInstallGuestDeviceCapabilitiesWithNativeHaptics
+
+static BOOL configuredLazySigning, hasSigningCredentials;
+static unsigned signingCredentialReads, signingCoordinatorCreates;
+static BOOL testLazySigningEnabled(void) { return configuredLazySigning; }
+static void testSaveLazySigningEnabled(BOOL enabled) { configuredLazySigning = enabled; }
+static NSString *testSigningIdentityRevision(void) { return hasSigningCredentials ? @"fixture-revision" : nil; }
+static LSBSigningCredentials *testCopySigningCredentials(NSError **error) {
+    ++signingCredentialReads;
+    if (error) *error = nil;
+    return hasSigningCredentials ? [LSBSigningCredentials new] : nil;
+}
+@implementation TestLazySigning
+- (instancetype)initWithRuntimeRoot:(NSString *)root credentials:(LSBSigningCredentials *)credentials identifier:(NSString *)identifier
+                         authorize:(BOOL (^)(const audit_token_t *))authorize error:(int *)error {
+    (void)identifier;
+    assert(root && credentials && authorize && error);
+    if (!(self = [super init])) return nil;
+    *error = 0;
+    ++signingCoordinatorCreates;
+    return self;
+}
+- (mach_port_t)endpoint { return MACH_PORT_NULL; }
+- (NSString *)identityRevision { return @"fixture-revision"; }
+- (int)connectService:(mach_port_t)port audit:(const audit_token_t *)audit { (void)port; (void)audit; return ENOTSUP; }
+- (void)invalidate {}
+@end
 
 static TestBrokerConnection *fakeConnection(xpc_connection_t connection) {
     id object = (id)connection;
@@ -659,6 +710,11 @@ static void resetBroker(void) {
     sessionDeviceType = pendingDeviceType = nil;
     sessionHapticsEnabled = pendingHapticsEnabled = pendingHapticsPreference = sessionAudioEnabled = NO;
     pendingAudioEnabled = pendingAudioPreference = savedAudio = NO;
+    [lazySigning invalidate]; lazySigning = nil;
+    signerJobIdentifier = 0;
+    configuredLazySigning = hasSigningCredentials = sessionLazySigningEnabled = NO;
+    sessionSigningIdentityRevision = nil;
+    signingCredentialReads = signingCoordinatorCreates = 0;
     savedHaptics = testNativeHaptics = NO;
     hapticsPreferenceWrites = audioPreferenceWrites = 0;
     pendingDeviceCapabilities = nil;
@@ -983,6 +1039,42 @@ static void testInitialGuestArguments(void) {
         [hostTerminal close]; hostTerminal = nil;
     }
     assert([NSFileManager.defaultManager removeItemAtPath:[NSString stringWithUTF8String:directory] error:nil]);
+}
+
+static void testNativeHelperPlansPreserveSessionFlags(void) {
+    for (unsigned flags = 0; flags < 4; ++flags) for (unsigned enabled = 0; enabled < 2; ++enabled) {
+        resetBroker();
+        initialTerminalPending = flags & 1;
+        initialNativeConfigdPending = !!(flags & 2);
+        configuredLazySigning = enabled;
+        hasSigningCredentials = YES;
+        assert(!prepareLazySigningSession());
+        assert(initialTerminalPending == (BOOL)(flags & 1) && initialNativeConfigdPending == (BOOL)!!(flags & 2));
+        assert(sessionLazySigningEnabled == enabled && [sessionSigningIdentityRevision isEqual:@"fixture-revision"]);
+        assert(signingCredentialReads == enabled && signingCoordinatorCreates == enabled && jobs.count == enabled);
+        assert(!submittedLaunches && !hostTerminal);
+        if (enabled) {
+            LSBJob *signer = jobs[0];
+            assert(signer.identifier == signerJobIdentifier && signer.executionRole == LSB_EXECUTION_NATIVE_SIGNER);
+            assert(!signer.terminalSession && !signer.nativeConfigdSelected);
+            LSBSpawnPlan *plan = &signer.request->plan;
+            assert(!LSBValidateSpawnPlan(plan) && plan->argc == 1 && !plan->envc);
+            assert(!strcmp(plan->strings + plan->path, "/__LiveSimBooterNativeSigner"));
+            assert(!strcmp(plan->strings + plan->argv[0], "Signer"));
+        } else assert(!lazySigning && !signerJobIdentifier);
+        LSBReceivedMessage *metal = calloc(1, sizeof(*metal));
+        assert(metal && !nativeHelperPlan(metal, "/__LiveSimBooterNativeMetalService", "Metal.public"));
+        assert(initialTerminalPending == (BOOL)(flags & 1) && initialNativeConfigdPending == (BOOL)!!(flags & 2));
+        assert(!strcmp(metal->plan.strings + metal->plan.path, "/__LiveSimBooterNativeMetalService"));
+        assert(!strcmp(metal->plan.strings + metal->plan.argv[0], "Metal.public"));
+        disposeMessage(metal);
+    }
+    resetBroker();
+    initialTerminalPending = initialNativeConfigdPending = YES;
+    configuredLazySigning = YES;
+    assert(prepareLazySigningSession() == ENOENT);
+    assert(initialTerminalPending && initialNativeConfigdPending && signingCredentialReads == 1 && !signingCoordinatorCreates && !jobs.count);
+    resetBroker();
 }
 
 static void testNativeProbeRoleIsHostOnly(void) {
@@ -2807,6 +2899,7 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
     for (unsigned explicitMode = 0; explicitMode < 2; ++explicitMode) {
         resetBroker();
         runtimeRoot = root;
+        configuredLazySigning = hasSigningCredentials = explicitMode;
         const char *arguments[] = {"LiveSimBooter", "--launchd-services", NULL};
         const char *environment[] = {"LSB_FAKE_PTY_STATE=/untrusted", NULL};
         LSBReceivedMessage *initial = calloc(1, sizeof(*initial));
@@ -2910,7 +3003,7 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
         assert([status[@"RunAtLoad"] boolValue] && ![status[@"KeepAlive"] boolValue] && ![status[@"EnableTransactions"] boolValue]);
         assert(!enqueueInitialJob(initial, LSB_EXECUTION_SIMULATOR));
         assert(jobs.lastObject.simulatorLaunchd && jobs.lastObject.nativeConfigdSelected);
-        assert(!initialNativeConfigdPending); // Native helper plans reset the temporary flag; the launchd snapshot must survive them.
+        assert(initialNativeConfigdPending); // Both signer and Metal helpers leave the initial session's configd decision intact.
         for (LSBJob *job in jobs) if (job != jobs.lastObject) assert(!job.nativeConfigdSelected);
     }
     resetBroker();
@@ -5502,6 +5595,7 @@ int main(void) {
         testSubmissionFailureAndSpawnAuthentication();
         testInitialGuestArguments();
         testLaunchdTerminalLineage();
+        testNativeHelperPlansPreserveSessionFlags();
         testNativeProbeRoleIsHostOnly();
         testProductionStatusIsHostOnly();
         testExitStatusesAndRepeatedReaping();

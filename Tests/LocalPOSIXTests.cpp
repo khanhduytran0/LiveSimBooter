@@ -1,5 +1,6 @@
 #include "../LiveSimBooter/LocalPOSIX.h"
 #include "../LiveSimBooter/LocalRuntime.h"
+#include "../LiveSimBooter/LazySignatureClient.h"
 
 #include <array>
 #include <cassert>
@@ -18,7 +19,15 @@ namespace {
 using Arguments = std::array<uintptr_t, 8>;
 std::function<lsb::SyscallResult(uintptr_t, const Arguments &)> handle;
 int localError = 0;
+unsigned signatureRetries = 0;
+int signatureRetryError = ENOTSUP;
 uintptr_t ptr(const void *value) { return reinterpret_cast<uintptr_t>(value); }
+}
+
+int LSBLazySignatureRetry(int fd, fsignatures_t *signature) {
+    assert(fd == 17 && signature);
+    ++signatureRetries;
+    return signatureRetryError;
 }
 
 namespace lsb {
@@ -79,12 +88,20 @@ void testForwardingAndErrors()
     assert(lsb::fcntl(17, F_SETFD, FD_CLOEXEC) == 0);
     expected = {17, F_ADDFILESIGS_RETURN, ptr(buffer)};
     assert(lsb::fcntl(17, F_ADDFILESIGS_RETURN, buffer) == 0);
+    assert(!signatureRetries);
+    response = {EACCES, EACCES};
+    assert(lsb::fcntl(17, F_ADDFILESIGS_RETURN, buffer) == -1 && localError == EACCES && signatureRetries == 1);
+    signatureRetryError = 0;
+    assert(lsb::fcntl(17, F_ADDFILESIGS_RETURN, buffer) == 0 && signatureRetries == 2);
+    response = {EFAULT, EFAULT};
+    assert(lsb::fcntl(17, F_ADDFILESIGS_RETURN, buffer) == -1 && localError == EFAULT && signatureRetries == 2);
+    response = {0, 0};
     expectedNumber = SYS_ioctl;
     expected = {17, FIOCLEX};
     assert(lsb::ioctl(17, FIOCLEX) == 0);
     expected = {17, FIONREAD, ptr(buffer)};
     assert(lsb::ioctl(17, FIONREAD, buffer) == 0);
-    assert(calls == 11);
+    assert(calls == 14);
 
     struct stat info;
     expectedNumber = SYS_stat64;

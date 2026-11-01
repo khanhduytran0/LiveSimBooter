@@ -3,6 +3,8 @@
 #include "PrivateXPC.h"
 #include "ChildStatus.h"
 #include "NativeProbeLoader.h"
+#include "NativeSignerLoader.h"
+#include "LazySignatureClient.h"
 #include "ExecutablePath.h"
 #include "ProcessDisplayName.h"
 #include "NativeRuntimePolicy.h"
@@ -27,6 +29,8 @@ static void closeStatus(void) {
     LSBSpawnPortsDispose(&launch.ports);
     if (MACH_PORT_VALID(launch.guestBrokerPort)) mach_port_deallocate(mach_task_self(), launch.guestBrokerPort);
     launch.guestBrokerPort = MACH_PORT_NULL;
+    if (MACH_PORT_VALID(launch.lazySigningPort)) mach_port_deallocate(mach_task_self(), launch.lazySigningPort);
+    launch.lazySigningPort = MACH_PORT_NULL;
     if (MACH_PORT_VALID(launch.launchdTankPort)) mach_port_deallocate(mach_task_self(), launch.launchdTankPort);
     launch.launchdTankPort = MACH_PORT_NULL;
     if (launch.statusFD >= 0) close(launch.statusFD);
@@ -123,6 +127,24 @@ static int runNativeMetalService(int error, int planApplied) {
     return 1; // The service owns the process until the broker terminates it.
 }
 
+static int runNativeSigner(int error) {
+    LSBNativeSignerRunFunction run = NULL;
+    mach_port_t broker = MACH_PORT_NULL, endpoint = MACH_PORT_NULL;
+    int transportError = LSBTransportCopyBrokerPort(&broker);
+    if (!error) error = transportError;
+    if (!error) error = LSBLoadNativeSigner(&launch.brokerAudit, &endpoint, &run);
+    int readyError = MACH_PORT_VALID(broker) ? LSBTransportReadyNativeServiceOnPort(broker, launch.requestID, error, endpoint) : EPIPE;
+    if (MACH_PORT_VALID(endpoint)) mach_port_deallocate(mach_task_self(), endpoint);
+    if (MACH_PORT_VALID(broker)) mach_port_deallocate(mach_task_self(), broker);
+    closeStatus();
+    if (error || readyError) {
+        fprintf(stderr, "[LiveProcess] Native signer preparation failed: %s\n", strerror(error ? error : readyError));
+        return 1;
+    }
+    run();
+    return 1;
+}
+
 int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char *apple[]) {
     (void)envp;
     char *nativeArgv0 = argc > 0 && argv && argv[0] ? (char *)argv[0] : NULL;
@@ -140,7 +162,8 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
         if (error == EAGAIN) usleep(100000);
     }
     if (error) { fprintf(stderr, "[LiveProcess] Check-in failed: %s\n", strerror(error)); return 1; }
-    const char *displayName = launch.plan.strings + (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_SERVICE ?
+    const char *displayName = launch.plan.strings + (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_SERVICE ||
+        launch.executionRole == LSB_EXECUTION_NATIVE_SIGNER ?
         launch.plan.argv[0] : launch.plan.path);
     pid_t displayPID = launch.executionRole == LSB_EXECUTION_SIMULATOR ? launch.guestPID : 0;
     int nameError = LSBSetProcessDisplayName(displayName, displayPID, nativeArgv0, nativeArgv0Capacity);
@@ -152,6 +175,8 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     // Only the authenticated broker bootstrap can select this role; no environment value or executable path is consulted.
     if (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_PROBE) return runNativeProbe(error);
     if (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_SERVICE) return runNativeMetalService(error, planApplied);
+    if (launch.executionRole == LSB_EXECUTION_NATIVE_SIGNER) return runNativeSigner(error);
+    if (!error) LSBConfigureLazySignature(launch.lazySigningPort, &launch.brokerAudit);
     // The native host receives a kernel-created movable task right through this one-shot thread exception.
     // Restore the thread's prior handlers before simulator TLS/workqueue initialization; never send mach_task_self() over XPC.
     if (!error) error = MACH_PORT_VALID(launch.taskCapture.port) ? LSBTaskPortCapturePerform(&launch.taskCapture) : EPROTO;
@@ -161,7 +186,9 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     for (unsigned index = 0; index < launch.plan.envc; ++index) policyEnvironment[index] = launch.plan.strings + launch.plan.envp[index];
     policyEnvironment[launch.plan.envc] = NULL;
     LSBNativeRuntimePolicy nativePolicy = {0};
-    if (!error) error = LSBResolveNativeRuntimePolicy(launch.nativeProductionStatus, policyEnvironment, &nativePolicy);
+    // Repeat the native preflight in this child; host configuration is not evidence about this process's actual cache address.
+    if (!error) error = LSBResolveNativeRuntimePolicy(launch.nativeProductionStatus, LSBReadNativeCacheLayout(launch.runtimeRoot),
+                                                     policyEnvironment, &nativePolicy);
     char executablePath[PATH_MAX], dyldPath[PATH_MAX], insertLibrary[LSB_INSERT_LIBRARIES_BYTES], brokerEnvironment[64], detail[1024] = {0};
     char capabilitiesEnvironment[PATH_MAX + sizeof("SIMULATOR_CAPABILITIES=")];
     char statusEnvironment[64], wakeEnvironment[64];

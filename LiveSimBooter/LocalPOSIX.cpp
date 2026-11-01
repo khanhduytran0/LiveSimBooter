@@ -1,5 +1,6 @@
 #include "LocalPOSIX.h"
 #include "LocalRuntime.h"
+#include "LazySignatureClient.h"
 
 #include <cerrno>
 #include <cstdarg>
@@ -120,7 +121,10 @@ int fcntl(int fd, int command, ...)
             break;
     }
     va_end(arguments);
-    return static_cast<int>(result(syscall(SYS_fcntl, fd, command, argument)));
+    SyscallResult original = syscall(SYS_fcntl, fd, command, argument);
+    if (command == F_ADDFILESIGS_RETURN && original.error && original.error != EFAULT && original.error != EBADF &&
+        !LSBLazySignatureRetry(fd, reinterpret_cast<fsignatures_t *>(argument))) return 0;
+    return static_cast<int>(result(original));
 }
 
 int ioctl(int fd, unsigned long command, ...)

@@ -32,11 +32,13 @@ not a real tank PID or evidence that a tank process exited. A launchd update req
 
 ## Workqueue handoff
 
-Production or unknown devices keep the native shared cache mapped and enable hardware redirection of its registered workqueue entry.
+The default keeps the native shared cache mapped and enables hardware redirection when the guest reservation fits below it.
 The host caches an exact Boolean `EffectiveProductionStatusAp` result through a guarded weak `MGCopyAnswer` import and supplies
 it through authenticated check-in metadata. An absent symbol remains unknown. Only false permits the development detach path;
-production/unknown rejects `LSB_RETAIN_HOST_CACHE=0`.
-Explicit retention is available on development devices, and launchd propagates the resolved settings to descendants.
+production/unknown rejects `LSB_RETAIN_HOST_CACHE=0`. Automatic detachment additionally requires the loaded native header to
+fall inside the validated guest reservation. Missing layout information keeps retention. The host and each child run their own
+native layout preflight, and final handoff collision checks remain in place. Explicit overrides keep their existing semantics,
+and launchd propagates the resolved settings to descendants.
 Rebuild the native app, extension, and guest shim together after this bootstrap-metadata change. See [handoff policy](runtime-handoff.md).
 The retained-cache evidence
 below establishes the workqueue handoff without a debugger. The later metadata-name patch reached a home screen with app

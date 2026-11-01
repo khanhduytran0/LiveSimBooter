@@ -122,6 +122,17 @@
         }
       }
     },
+    "Cancel": {
+      "comment": "Cancel the current dialog.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel"
+          }
+        }
+      }
+    },
     "Changes can be saved now and applied with Restart or Later.": {
       "comment": "Settings footer describing the restart prompt choices.",
       "localizations": {
@@ -144,6 +155,17 @@
         }
       }
     },
+    "Choose a P12 or PFX file smaller than 16 MB.": {
+      "comment": "Signing import input size error.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a P12 or PFX file smaller than 16 MB."
+          }
+        }
+      }
+    },
     "Choose a device, then tap Apply to save its screen resolution. While running, choose Restart or Later.": {
       "comment": "Device picker instructions.",
       "localizations": {
@@ -162,6 +184,28 @@
           "stringUnit": {
             "state": "translated",
             "value": "Choose…"
+          }
+        }
+      }
+    },
+    "Code signing": {
+      "comment": "Settings section heading for lazy runtime code signing.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code signing"
+          }
+        }
+      }
+    },
+    "Could not access the signing identity in this app's keychain.": {
+      "comment": "Signing identity error when app-private keychain storage is unavailable.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not access the signing identity in this app's keychain."
           }
         }
       }
@@ -195,6 +239,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "Could not save haptic passthrough: %1$s (%2$d)."
+          }
+        }
+      }
+    },
+    "Could not save lazy signing: %s (%d).": {
+      "comment": "Lazy signing settings error: description and numeric code.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not save lazy signing: %s (%d)."
           }
         }
       }
@@ -250,6 +305,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "Enabled by the host launch environment."
+          }
+        }
+      }
+    },
+    "Enter the P12 password. Leave it empty if the file has no password.": {
+      "comment": "P12 password prompt instructions.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter the P12 password. Leave it empty if the file has no password."
           }
         }
       }
@@ -397,6 +463,72 @@
         }
       }
     },
+    "Import": {
+      "comment": "Import the selected P12 signing identity.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Import"
+          }
+        }
+      }
+    },
+    "Import P12…": {
+      "comment": "Choose a PKCS12 signing identity document.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Import P12…"
+          }
+        }
+      }
+    },
+    "Import a P12 signing identity first. Save this choice, then restart now or later.": {
+      "comment": "Accessibility hint for enabling lazy signing.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Import a P12 signing identity first. Save this choice, then restart now or later."
+          }
+        }
+      }
+    },
+    "Import signing identity": {
+      "comment": "Title of the P12 password prompt.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Import signing identity"
+          }
+        }
+      }
+    },
+    "Imported": {
+      "comment": "A P12 signing identity has been imported; tap to replace it.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Imported"
+          }
+        }
+      }
+    },
+    "Importing…": {
+      "comment": "P12 import is in progress.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importing…"
+          }
+        }
+      }
+    },
     "Later": {
       "comment": "Keep saved simulator settings without restarting now.",
       "localizations": {
@@ -404,6 +536,28 @@
           "stringUnit": {
             "state": "translated",
             "value": "Later"
+          }
+        }
+      }
+    },
+    "Lazy sign": {
+      "comment": "Switch to sign runtime binaries on signature-registration failure.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lazy sign"
+          }
+        }
+      }
+    },
+    "Lazy sign will be turned off. A running simulator keeps its current identity until restarted.": {
+      "comment": "Effect of removing the stored signing identity.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lazy sign will be turned off. A running simulator keeps its current identity until restarted."
           }
         }
       }
@@ -441,6 +595,17 @@
         }
       }
     },
+    "Off by default. Sign a runtime binary only when its signature registration fails. The P12 and password stay in this app's device-only keychain. Changes apply on the next simulator start or restart.": {
+      "comment": "Description of lazy signing and where its credentials are stored.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off by default. Sign a runtime binary only when its signature registration fails. The P12 and password stay in this app's device-only keychain. Changes apply on the next simulator start or restart."
+          }
+        }
+      }
+    },
     "Off by default. Use this device's haptic feedback. %@": {
       "comment": "Haptic settings description followed by a complete sentence about applying saved choices.",
       "localizations": {
@@ -470,6 +635,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "Particles"
+          }
+        }
+      }
+    },
+    "Password": {
+      "comment": "Placeholder for the P12 password field.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Password"
           }
         }
       }
@@ -602,6 +778,39 @@
           "stringUnit": {
             "state": "translated",
             "value": "Refresh simulator settings"
+          }
+        }
+      }
+    },
+    "Remove": {
+      "comment": "Confirm deletion of a stored signing identity.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove"
+          }
+        }
+      }
+    },
+    "Remove signing identity": {
+      "comment": "Delete the imported signing identity from this app's keychain.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove signing identity"
+          }
+        }
+      }
+    },
+    "Remove signing identity?": {
+      "comment": "Confirmation before deleting the app's stored P12 identity.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove signing identity?"
           }
         }
       }
@@ -958,6 +1167,28 @@
         }
       }
     },
+    "The P12 could not be opened. Check its password and that the file contains a signing identity.": {
+      "comment": "Signing import error for a wrong password or malformed PKCS12 file.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The P12 could not be opened. Check its password and that the file contains a signing identity."
+          }
+        }
+      }
+    },
+    "The P12 must contain exactly one certificate with its private key.": {
+      "comment": "Signing import error for ambiguous or missing identities.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The P12 must contain exactly one certificate with its private key."
+          }
+        }
+      }
+    },
     "The audio player did not start.": {
       "comment": "Background audio error",
       "localizations": {
@@ -1020,6 +1251,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "The simulator is starting, restarting, or powering off. Wait, then try again."
+          }
+        }
+      }
+    },
+    "The stored signing identity is invalid. Import the P12 again.": {
+      "comment": "Signing identity error when a keychain payload is malformed.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The stored signing identity is invalid. Import the P12 again."
           }
         }
       }

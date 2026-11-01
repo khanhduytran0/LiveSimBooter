@@ -12,11 +12,13 @@
 #include <sys/sysctl.h>
 
 #define LSB_BROKER_PORT_ENV "LSB_BROKER_PORT"
-#define LSB_TRANSPORT_VERSION 7
+#define LSB_TRANSPORT_VERSION 8
 
 // Bootstrap-only metadata is versioned independently from the outer transport envelope.
-#define LSB_BOOTSTRAP_VERSION 4
-enum LSBExecutionRole { LSB_EXECUTION_SIMULATOR = 0, LSB_EXECUTION_NATIVE_METAL_PROBE = 1, LSB_EXECUTION_NATIVE_METAL_SERVICE = 2 };
+#define LSB_BOOTSTRAP_VERSION 5
+enum LSBExecutionRole {
+    LSB_EXECUTION_SIMULATOR = 0, LSB_EXECUTION_NATIVE_METAL_PROBE = 1, LSB_EXECUTION_NATIVE_METAL_SERVICE = 2, LSB_EXECUTION_NATIVE_SIGNER = 3
+};
 
 enum LSBRequestKind {
     LSB_REQUEST_SPAWN = 1, LSB_REQUEST_CHECKIN = 2, LSB_REQUEST_READY = 3, LSB_REQUEST_KILL = 4, LSB_REQUEST_EXEC = 5,
@@ -33,6 +35,8 @@ typedef struct {
     int statusFD, wakeFD;
     mach_port_t launchdTankPort;
     mach_port_t guestBrokerPort; // Simulator-only owned endpoint reference for RPC after the native-cache handoff.
+    mach_port_t lazySigningPort; // Optional simulator-only owned low-level endpoint; usable before guest TLS initialization.
+    audit_token_t brokerAudit; // Genuine kernel sender of the bootstrap reply, never a dictionary-supplied identity.
     LSBTaskPortCaptureOffer taskCapture; // Optional simulator-only offer; owns one send reference after successful CheckIn.
     LSBSpawnPorts ports;
     char runtimeRoot[LSB_PATH_BYTES];
@@ -44,6 +48,7 @@ typedef struct {
     pid_t guestPID, parentPID;
     mach_port_t launchdTankPort;
     mach_port_t guestBrokerPort; // Borrowed simulator-to-host connection endpoint; forbidden for native service roles.
+    mach_port_t lazySigningPort; // Borrowed, optional and simulator-only; policy comes from the native session.
     const LSBSpawnPorts *ports;
     uint32_t executionRole; // Chosen by the native broker, never supplied by a guest spawn plan.
     uint32_t nativeProductionStatus;

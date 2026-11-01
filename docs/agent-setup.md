@@ -114,7 +114,7 @@ background audio. AudioQueue, AVAudioEngine and AVAudioPlayer tone probes have p
 
 The optional audio-output and haptic dylibs are separate from the always-loaded C spawn shim. Stage them before enabling either
 feature in the native host; a missing enabled helper prevents guest startup. These settings are broker-owned session decisions,
-not guest environment overrides. The current transport is **ABI 7** (bootstrap ABI 4, child ledger ABI 5): rebuild and deploy the native host,
+not guest environment overrides. The current transport is **ABI 8** (bootstrap ABI 5, child ledger ABI 5): rebuild and deploy the native host,
 LiveProcess extension, core spawn shim and optional helpers together. Do not mix an older installed host with the new overlay.
 Native check-in and readiness retain the single-threaded pipe path. The authenticated check-in additionally supplies a guest-only
 connection endpoint; the simulator creates its sim-to-host XPC connection after libSystem/TLS initialization. Native Metal helpers
@@ -418,10 +418,10 @@ PY
 
 ## Build and package the native host
 
-LiveProcess defaults to `LSB_PRESERVE_NATIVE_ARGUMENTS=YES`. Its pre-signing phase adjusts `LC_MAIN.stacksize` so the kernel places native argv
-outside the guest cache, allowing native `ps` to show `LSB:<logical PID> <name>` beside the real PID. The guest uses a guarded 8 MiB stack; the larger
-initial demand-zero reservation consumes virtual address space. The old wide-segment experiment stays disabled. This approach has device
-evidence on the development iPhone 15; production-device validation is still pending. See [process names](process-names.md).
+LiveProcess defaults to `LSB_PRESERVE_NATIVE_ARGUMENTS=NO`, retaining the linked 8 MiB stack and guarded simulator-stack relocation.
+The larger initial reservation used to preserve native `ps` argument names caused a pre-main `posix_spawn` `ENOMEM` on iPhone 17;
+native argument names may therefore be overwritten by the guest cache in portable builds. The tested development iPhone 15 can opt in
+with `LSB_PRESERVE_NATIVE_ARGUMENTS=YES` on its build command. The old wide-segment experiment remains disabled. See [process names](process-names.md).
 
 ```sh
 sh Tests/run.sh > "$LSB_WORK/tests.log" 2>&1
@@ -515,11 +515,14 @@ Repeat that check after restoring files to the selected store group; copy succes
 On the tested iOS 27/24A435 device, removing the native cache caused a code-signing fault when a kernel workqueue entered
 the previously registered native `start_wqthread`. Retaining the native cache with hardware redirection passed real workqueue
 tasks and launchd spawning df without LLDB. The native host now caches MobileGestalt `EffectiveProductionStatusAp` and sends
-it through authenticated child check-in. Only an exact Boolean false enables development cache detachment; production/unknown
-keeps retention and hardware bridging, and rejects an explicit detach request. The tested iPhone 15 has custom boot arguments
+it through authenticated child check-in. Retention/hardware is preferred when the guest reservation fits below the actual native
+cache header, or the layout query is unavailable. Automatic detachment requires both exact Boolean false and a native header
+inside the guest reservation. Production/unknown never detaches. The tested iPhone 15 has custom boot arguments
 and relaxed TXM enforcement; its detach success is not evidence that stock iOS 26 permits this. Detached development mode now
 maps a direct workqueue-entry trampoline, avoiding recurring instruction-fault exceptions. Developer Mode alone is not this
-status. Explicit `LSB_RETAIN_HOST_CACHE=1` remains available on a development device. See [handoff policy](runtime-handoff.md).
+status. Its tested native mapping overlaps the guest reservation and therefore keeps automatic detachment under this policy.
+The iPhone 17 returned native false in the later comparison but exited 126 on the detached route and booted with retention;
+the precise detached failure was not captured. See [handoff policy](runtime-handoff.md).
 Set `DEVICECTL_CHILD_LSB_DEBUG_STOP_CHILDREN=0` and
 `DEVICECTL_CHILD_LSB_DEBUG_STOP_BEFORE_HANDOFF=0` for an unattended test. The handoff rejects a guest cache
 reservation overlapping the current native cache; do not assume a historical ASLR address. Keeping the existing native

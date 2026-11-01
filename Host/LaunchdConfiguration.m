@@ -424,7 +424,7 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
             }
         }
         LSBNativeRuntimePolicy nativePolicy;
-        int policyError = LSBResolveNativeRuntimePolicy(LSBHostNativeProductionStatus(), inheritedEnv, &nativePolicy);
+        int policyError = LSBResolveNativeRuntimePolicy(LSBHostNativeProductionStatus(), LSBReadNativeCacheLayout(runtimeRoot), inheritedEnv, &nativePolicy);
         if (policyError) return policyError;
         for (NSString *key in @[@LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV, @LSB_RETAIN_HOST_CACHE_ENV, @"LSB_TRACE_HANDOFF"]) {
             bool defaultValue = [key isEqualToString:@LSB_RETAIN_HOST_CACHE_ENV] ? nativePolicy.retainHostCache :

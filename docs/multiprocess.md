@@ -144,7 +144,7 @@ terminal-state file alongside RuntimeRoot. Device-platform executables/dylibs ad
 
 ## Native startup pipes and guest connections
 
-Transport **ABI 7**, bootstrap **ABI 4** separates native startup from guest RPC. Both ends retain the same owned spawn plans,
+Transport **ABI 8**, bootstrap **ABI 5** separates native startup from guest RPC. Both ends retain the same owned spawn plans,
 descriptor transfer and full audit-token authorization. The guest endpoint is supplied only by authenticated native check-in;
 native Metal roles cannot receive or select it. Failed preparation releases both endpoints. The native pipe right is released
 after READY; only the guest endpoint's send reference survives a successful handoff.
@@ -351,7 +351,7 @@ delivery to launchd using the retained extension instance. Hosting an extension 
 Each guest receives a 4 KiB shared mapping with 120 child slots and a nonblocking wake-pipe reader. Ledger ABI version 5 uses
 3872 bytes of that mapping; the backing-file and mapping sizes remain unchanged. Widget discovery exhausted the former 64-child
 limit and prevented app launches. Version and capacity checks reject the old 16/64-slot ABIs, so the host, extension and guest shim
-must be deployed together. The outer spawn transport remains ABI 7. The host creates the backing
+must be deployed together. The outer spawn transport is ABI 8. The host creates the backing
 file inside the App Group, unlinks it immediately, and transfers its descriptor at check-in. Native preparation maps it, closes
 the file descriptor, and preserves the reader outside file-action destinations and close sweeps. The mapping and FD survive
 cache detachment; no native object or callback is retained. The spawn shim excludes this private reader from ordinary FD inheritance.

@@ -40,12 +40,12 @@ static mach_port_t savedPorts[EXC_TYPES_COUNT];
 static exception_behavior_t savedBehaviors[EXC_TYPES_COUNT];
 static thread_state_flavor_t savedFlavors[EXC_TYPES_COUNT];
 static exception_mask_t bridgeMask = EXC_MASK_BAD_ACCESS;
-static bool hardwareMode, trampolineMode, breakpointNeedsRestore;
+static bool hardwareMode, trampolineMode, breakpointNeedsRestore, traceHandoff;
 static int hardwareSlot = -1;
 static arm_debug_state64_t originalDebugState;
 static unsigned hardwareTrapCount, hardwareRejectedCount;
 
-// Keep startup diagnostics independent of stdio/dispatch. The explicitly selected legacy fault mode stays silent.
+// Cache the opt-in during guest initialization; exception handling must not query the environment or use stdio/dispatch.
 static char *traceNumber(char *output, uint64_t value) {
     static const char digits[] = "0123456789abcdef";
     char reversed[16];
@@ -57,7 +57,7 @@ static char *traceNumber(char *output, uint64_t value) {
 }
 
 static void hardwareTrace(const char *event, kern_return_t result, uint64_t detail) {
-    if (!hardwareMode) return;
+    if (!hardwareMode || (!traceHandoff && result == KERN_SUCCESS)) return;
     int saved = errno;
     char line[256], *cursor = line;
     const char *prefix = "[LSB workqueue hardware] ";
@@ -463,6 +463,8 @@ static void initializeBridge(void) {
     int features;
     bridgeError = ENOTSUP;
     if (!guestEntry || !parseMetadata(&nativeEntry, &features) || nativeEntry == guestEntry) return;
+    const char *trace = getenv("LSB_TRACE_HANDOFF");
+    traceHandoff = trace && !strcmp(trace, "1");
     const char *hardware = getenv(LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV);
     hardwareMode = !hardware || !strcmp(hardware, "1");
     const char *retain = getenv(LSB_RETAIN_HOST_CACHE_ENV);

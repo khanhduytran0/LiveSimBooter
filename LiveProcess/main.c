@@ -122,8 +122,6 @@ static int runNativeMetalService(int error, int planApplied) {
         fprintf(stderr, "[LiveProcess] Native Metal service preparation failed: %s %s\n", strerror(error ? error : readyError), detail);
         return 1;
     }
-    fprintf(stderr, "[LiveProcess] pid=%d %s ready; host cache retained\n", getpid(), launch.plan.strings + launch.plan.argv[0]);
-    fflush(stderr);
     run();
     return 1; // The service owns the process until the broker terminates it.
 }

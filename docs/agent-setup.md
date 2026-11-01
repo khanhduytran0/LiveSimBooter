@@ -550,8 +550,9 @@ HTTPS certificate evaluation needs the stock guest `com.apple.trustd` service an
 `System/Library/Security/Certificates.bundle` resources, both covered by the default staging scopes. Keep trustd in custom
 graphical service selections that need HTTPS. This uses normal certificate validation; see [networking evidence](networking.md).
 
-Handoff success logs are disabled by default. To inspect guest entry, main-stack relocation, and the retained/detached cache
-choice, prefix the development launch command with `DEVICECTL_CHILD_LSB_TRACE_HANDOFF=1`. Launchd propagates this exact opt-in to
+Launch and handoff success logs are disabled by default. To inspect extension launches, guest entry,
+main-stack relocation, the retained/detached cache choice, and hardware workqueue setup/redirection, prefix the development launch
+command with `DEVICECTL_CHILD_LSB_TRACE_HANDOFF=1`. Launchd propagates this exact opt-in to
 its children; preparation failures remain visible without it. The Start policy and trace propagation have focused local tests;
 [device verification](guest-control.md#device-verification-2026-10-27) also covers the Start screen and default-off banners.
 Repeat the boot checks below on your destination device.

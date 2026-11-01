@@ -510,7 +510,7 @@ static void initializationPolicyTests(void) {
         initializeBridge();
         assert(hardwareMode == cases[i].enabled);
         assert(bridgeMask == (EXC_MASK_BAD_ACCESS | (cases[i].enabled ? EXC_MASK_BREAKPOINT : 0)));
-        assert(environmentReads == 4 && allocationCalls == 1 && bridgeError == ENOTSUP && !trampolineMode);
+        assert(environmentReads == 5 && allocationCalls == 1 && bridgeError == ENOTSUP && !trampolineMode);
         assert(!taskGetCalls && !taskSetCalls); // Default selection precedes allocation but does not arm through a failed setup.
     }
     overrideEnvironment = false;

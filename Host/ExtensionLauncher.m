@@ -23,6 +23,7 @@
 @property (nonatomic) BOOL completed;
 @property (nonatomic) BOOL failed;
 @property (nonatomic) BOOL assertionInvalidated;
+@property (nonatomic) BOOL traceHandoff;
 @end
 
 @implementation LSBExtensionSession
@@ -129,12 +130,14 @@ static void LSBExtensionReady(LSBExtensionSession *session, NSError *error, NSAr
         });
     };
     BOOL acquired = [session.assertion acquire];
-    NSLog(@"[LiveProcess] request %llu PID %d assertion flags=0x%x acquired=%d", (unsigned long long)session.requestID, session.pid, flags, acquired);
+    if (!acquired || session.traceHandoff)
+        NSLog(@"[LiveProcess] request %llu PID %d assertion flags=0x%x acquired=%d", (unsigned long long)session.requestID, session.pid, flags, acquired);
     if (!acquired) {
         LSBExtensionReport(session, 0, EACCES);
         return;
     }
-    NSLog(@"[LiveProcess] request %llu instance %@ launched PID %d via pkd", (unsigned long long)session.requestID, session.instanceIdentifier, session.pid);
+    if (session.traceHandoff)
+        NSLog(@"[LiveProcess] request %llu instance %@ launched PID %d via pkd", (unsigned long long)session.requestID, session.instanceIdentifier, session.pid);
     LSBExtensionReport(session, session.pid, 0);
 }
 
@@ -167,6 +170,7 @@ int LSBLaunchExtensionWithOptions(const char *identifier, uint64_t requestID, ui
         session.bundleIdentifier = bundleIdentifier;
         session.requestID = requestID;
         session.launchOptions = options;
+        session.traceHandoff = [NSProcessInfo.processInfo.environment[@"LSB_TRACE_HANDOFF"] isEqualToString:@"1"];
         session.event = event;
         session.context = context;
         session.active = YES;
@@ -178,7 +182,8 @@ int LSBLaunchExtensionWithOptions(const char *identifier, uint64_t requestID, ui
                            ready:^(NSError *error, NSArray<NSNumber *> *pids, NSArray<NSUUID *> *uuids) {
             LSBOnMainThread(^{ LSBExtensionReady(weakSession, error, pids, uuids); });
         }];
-        NSLog(@"[LiveProcess] submitted launch-only request %llu instance %@ for %@", (unsigned long long)requestID, instanceIdentifier, bundleIdentifier);
+        if (session.traceHandoff)
+            NSLog(@"[LiveProcess] submitted launch-only request %llu instance %@ for %@", (unsigned long long)requestID, instanceIdentifier, bundleIdentifier);
         return 0;
     } @catch (NSException *exception) {
         NSLog(@"[LiveProcess] request %llu raised %@: %@", (unsigned long long)requestID, exception.name, exception.reason);

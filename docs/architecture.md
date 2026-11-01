@@ -119,7 +119,7 @@ the data root and tabs; an ordinary exit or crash does not request a restart.
 The debugger bridge publishes simulator images, compact AppleArchive snapshots and an app-resident notification function.
 It adapts the snapshot format to native debugserver, retains source visibility for the loader and uses bounded storage.
 This is not a full implementation of dyld's asynchronous monitor/cache Atlas APIs. Use [the debugging guide](debugging.md)
-for hardware-only breakpoint requirements and detach caveats. `LSB_TRACE_HANDOFF=1` enables entry/stack/cache success logs;
+for hardware-only breakpoint requirements and detach caveats. `LSB_TRACE_HANDOFF=1` enables launch, entry/stack/cache, and workqueue success logs;
 failures stay visible by default. Local tests cannot establish device signing acceptance or complete simulator behavior.
 
 The original mapping flow follows Apple's pinned [prepareSim](https://github.com/apple-oss-distributions/dyld/blob/fd8d0c4d52320ebf64db34f3cb280310d905c5ae/dyld/dyldMain.cpp#L300-L469).

@@ -45,10 +45,12 @@ inherited `ptr_munge` values with a fresh nonzero random token. The apple vector
 consumes and clears the token. [Dyld diagnostics](debugging.md#simulator-dyld-diagnostics) are disabled by default; explicit
 diagnostic variables and output destinations are copied unchanged into the simulator environment. Native launch settings are untouched.
 
-Successful handoff messages are also quiet by default. Set `LSB_TRACE_HANDOFF=1` to print the LiveProcess entry message, main-stack
-relocation/preservation details, and the retaining/detaching-cache banner. Only the first exact value `1` enables this trace;
+Successful handoff messages are also quiet by default. Set `LSB_TRACE_HANDOFF=1` to print extension launch/assertion messages,
+the LiveProcess entry message, main-stack relocation/preservation details, the retaining/detaching-cache
+banner, and hardware workqueue setup/redirection diagnostics. Only the first exact value `1` enables this trace;
 launchd preserves the normalized setting in its own configuration and child environment. The loader captures it before changing
-TLS or crossing the cache handoff. Preparation failures and an explicitly requested LLDB-stop message remain visible.
+TLS or crossing the cache handoff. The guest workqueue bridge caches the flag during initialization, before starting its exception
+server; exception handling never reads the environment. Preparation/bridge failures and an explicitly requested LLDB-stop message remain visible.
 
 [MainThreadBootstrap.cpp](../LiveSimBooter/MainThreadBootstrap.cpp) supplies an aligned, zeroed 16 KiB app-owned block for
 the main pthread and TSD. It initializes only self, errno, and the kernel thread ID after validating the host layout.

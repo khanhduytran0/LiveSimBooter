@@ -14,8 +14,9 @@ fits below the loaded native cache. Automatic detachment requires exact Boolean 
 a confirmed native-header collision; unavailable layout information keeps retention. Production/unknown status never permits
 detachment. Developer Mode alone does not select it. See [handoff policy](runtime-handoff.md).
 
-The user verified **Home Screen → Edit → Edit Wallpaper** and color/gradient wallpaper rendering. PosterBoard's lock-screen
-path and direct activation remain **broken (black output) and deferred**. The working editor's clipped Done button is also deferred;
+The user verified **Home Screen → Edit → Edit Wallpaper** and color/gradient wallpaper rendering. The ordinary lock screen also
+renders now; the lock-screen long-press picker and Customize editor work with the scoped scene-presentation helper on iPhone 15.
+Direct PosterBoard activation still has a malformed layout, and the older Home Screen editor's clipped Done button remains deferred;
 see [current wallpaper status](springboard-services.md#current-wallpaper-status).
 This remains an experimental partial simulator: generic fork/exec and complete job control are unsupported, and the observed
 Spotlight last-character crash is deferred.

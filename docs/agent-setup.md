@@ -274,6 +274,7 @@ python3 Tools/patch-ios26-launchd-identity.py --source "$LSB_RUNTIME_SOURCE/sbin
 sh Tools/build-spawn-shim.sh "$LSB_WORK/guest/libLiveSimSpawn.dylib" "$LSB_WORK/guest/spawn-probe"
 sh Tools/build-audio-output-shim.sh "$LSB_WORK/guest/libLiveSimAudio.dylib"
 sh Tools/build-haptic-shim.sh "$LSB_WORK/guest/libLiveSimHaptics.dylib"
+sh Tools/build-scene-presentation-shim.sh "$LSB_WORK/guest/libLiveSimScene.dylib"
 sh Tools/build-terminal-fish.sh "$LSB_WORK/guest"
 sh Tools/build-display-settings.sh "$LSB_WORK/guest"
 sh Tools/build-launchctl-control.sh "$LSB_WORK/guest"
@@ -310,7 +311,9 @@ For an overlay of an existing runtime, sign fresh copies first with
 stop all affected guests before atomically replacing the matching `RuntimeRoot/usr/lib` files, retain rollback copies, and install
 the matching native package. Disabling audio or haptics omits that helper from insertion; merely staging the file does not enable it.
 The installation compatibility helper loads only in the pinned MobileInstallationHelperService and redirects its hardcoded
-installation staging directory into this runtime's writable data tree.
+installation staging directory into this runtime's writable data tree. The scene compatibility helper loads only in stock SpringBoard;
+it refreshes the stale background of PosterBoard's empty root presentation view after its content moves into CoverSheet.
+Stage this dylib before installing the matching native package, which selects it by canonical executable path.
 For executables the staging tool uses [sign-sim-executable.py](../Tools/sign-sim-executable.py), which removes only
 `CS_EXECSEG_MAIN_BINARY` from the generated CodeDirectory and re-signs it. Guest signatures use the app's identifier and
 carry no application entitlements. Original simulator mock entitlement sections (`__TEXT,__ents_der` and related data)
@@ -400,6 +403,7 @@ python3 Tools/setup-ios26-runtime.py --runtime-root "$LSB_RUNTIME_SOURCE" \
   --add-binary "/usr/lib/libLiveSimAudio.dylib=$LSB_WORK/guest/libLiveSimAudio.dylib" \
   --add-binary "/usr/lib/libLiveSimHaptics.dylib=$LSB_WORK/guest/libLiveSimHaptics.dylib" \
   --add-binary "/usr/lib/libLiveSimInstall.dylib=$LSB_WORK/guest/libLiveSimInstall.dylib" \
+  --add-binary "/usr/lib/libLiveSimScene.dylib=$LSB_WORK/guest/libLiveSimScene.dylib" \
   --add-binary "/usr/local/bin/spawn-probe=$LSB_WORK/guest/spawn-probe" \
   --add-binary "/usr/libexec/terminal-fish=$LSB_WORK/guest/terminal-fish" \
   --add-binary "/usr/libexec/display-settings=$LSB_WORK/guest/display-settings" \
@@ -486,8 +490,9 @@ PY
 
 LiveProcess defaults to `LSB_PRESERVE_NATIVE_ARGUMENTS=NO`, retaining the linked 8 MiB stack and guarded simulator-stack relocation.
 The larger initial reservation used to preserve native `ps` argument names caused a pre-main `posix_spawn` `ENOMEM` on iPhone 17;
-native argument names may therefore be overwritten by the guest cache in portable builds. The tested development iPhone 15 can opt in
-with `LSB_PRESERVE_NATIVE_ARGUMENTS=YES` on its build command. The old wide-segment experiment remains disabled. See [process names](process-names.md).
+native argument names may therefore be overwritten by the guest cache in portable builds. Keep this default with automatic cache relocation: an
+iPhone 15 build using the older `LSB_PRESERVE_NATIVE_ARGUMENTS=YES` experiment collided with the cache selected at `0x300000000`
+and failed the guarded handoff. The old wide-segment experiment also remains disabled. See [process names](process-names.md).
 
 ```sh
 sh Tests/run.sh > "$LSB_WORK/tests.log" 2>&1

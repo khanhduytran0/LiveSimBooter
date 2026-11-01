@@ -96,6 +96,9 @@ xcrun --sdk macosx clang -arch arm64 -fobjc-arc -fblocks -Wall -Wextra -Werror \
 xcrun --sdk macosx clang -arch arm64 -fobjc-arc -fblocks -Wall -Wextra -Werror \
     Tests/InstallationCompatibilityTests.m -framework Foundation -o "$test_directory/InstallationCompatibility"
 "$test_directory/InstallationCompatibility"
+xcrun --sdk macosx clang -arch arm64 -fobjc-arc -fblocks -Wall -Wextra -Werror \
+    Tests/ScenePresentationCompatibilityTests.m -framework Foundation -framework CoreGraphics -o "$test_directory/ScenePresentationCompatibility"
+"$test_directory/ScenePresentationCompatibility"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -O1 \
     Tests/LaunchServicesNotificationsTests.c -o "$test_directory/LaunchServicesNotifications"
 "$test_directory/LaunchServicesNotifications"

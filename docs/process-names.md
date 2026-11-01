@@ -26,7 +26,9 @@ copy of guest argv. Never select a process for a privileged operation by parsing
 8 MiB initial stack and the existing guarded simulator-stack relocation. Native `ps` argument names may again show cache bytes when the
 original argument window overlaps the guest cache; guest argv and the broker's logical/native PID records remain separate and correct.
 
-For the tested development iPhone 15, explicitly building with `LSB_PRESERVE_NATIVE_ARGUMENTS=YES` enables preservation.
+The older low-cache development iPhone 15 experiment enabled preservation with `LSB_PRESERVE_NATIVE_ARGUMENTS=YES`.
+Do not carry that override into the automatic-cache setup: the 2026-11-01 retest selected cache base `0x300000000` and the
+guarded handoff rejected the preserved stack overlap with `EADDRINUSE`. The default `NO` layout avoids that reservation.
 The pre-signing `Tools/prepare-native-stack.py` phase changes
 only `LC_MAIN.stacksize` from the linked 8 MiB to `0x90000000` (2.25 GiB). Segment addresses, extents, chained fixups and entry point stay unchanged.
 This initial stack cannot fit at arm64 XNU's ordinary stack address without overlapping PAGEZERO/the executable. `create_unix_stack` therefore

@@ -46,6 +46,26 @@ static void testInstallerRole(void) {
     assert(LSBBuildGuestInsertedLibraries("/RuntimeRoot", "relative", spoofed, output, sizeof(output)) == EINVAL && !output[0]);
 }
 
+static void testSpringBoardRole(void) {
+    const char *path = "/RuntimeRoot/System/Library/CoreServices/SpringBoard.app/SpringBoard";
+    const char *environment[] = {"LSB_AUDIO_OUTPUT=1", "LSB_EXPERIMENTAL_HAPTICS=1", NULL};
+    const char *expected = "DYLD_INSERT_LIBRARIES=/RuntimeRoot/usr/lib/libLiveSimSpawn.dylib:/RuntimeRoot/usr/lib/libLiveSimAudio.dylib:"
+        "/RuntimeRoot/usr/lib/libLiveSimHaptics.dylib:/RuntimeRoot/usr/lib/libLiveSimScene.dylib";
+    char output[LSB_INSERT_LIBRARIES_BYTES];
+    assert(!LSBBuildGuestInsertedLibraries("/RuntimeRoot", path, environment, output, sizeof(output)));
+    assert(!strcmp(output, expected));
+    assert(!strstr(output, "libLiveSimInstall"));
+    assert(LSBBuildGuestInsertedLibraries("/RuntimeRoot", path, environment, output, strlen(expected)) == ENAMETOOLONG && !output[0]);
+    const char *unrelated[] = {"/RuntimeRoot/Applications/PosterBoard.app/PosterBoard", "/RuntimeRoot/Applications/SpringBoard.app/SpringBoard",
+        "/RuntimeRoot/System/Library/CoreServices/SpringBoard.app/SpringBoard.extra", "/RuntimeRoot-other/System/Library/CoreServices/SpringBoard.app/SpringBoard",
+        "/data/Containers/Bundle/Application/container/SpringBoard.app/SpringBoard", path + strlen("/RuntimeRoot")};
+    const char *spoofed[] = {"LSB_SCENE_HELPER=1", "DYLD_INSERT_LIBRARIES=/RuntimeRoot/usr/lib/libLiveSimScene.dylib", NULL};
+    for (unsigned i = 0; i < sizeof(unrelated) / sizeof(*unrelated); ++i) {
+        assert(!LSBBuildGuestInsertedLibraries("/RuntimeRoot", unrelated[i], spoofed, output, sizeof(output)));
+        assert(!strcmp(output, "DYLD_INSERT_LIBRARIES=/RuntimeRoot/usr/lib/libLiveSimSpawn.dylib"));
+    }
+}
+
 int main(void) {
     char output[LSB_INSERT_LIBRARIES_BYTES];
     const char *base = "DYLD_INSERT_LIBRARIES=/RuntimeRoot/usr/lib/libLiveSimSpawn.dylib";
@@ -85,6 +105,7 @@ int main(void) {
     assert(!LSBBuildGuestInsertedLibraries(root, "/RuntimeRoot/bin/df", both, output, sizeof(output)));
     assert(strlen(output) < sizeof(output));
     testInstallerRole();
-    puts("InsertedLibraries: fixed C shim, exact optional flags, stock installer role, and bounded physical paths passed");
+    testSpringBoardRole();
+    puts("InsertedLibraries: fixed C shim, exact optional flags, stock installer/SpringBoard roles, and bounded physical paths passed");
     return 0;
 }

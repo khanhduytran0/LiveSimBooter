@@ -1567,16 +1567,59 @@ not part of normal runtime setup.
 
 ### Current wallpaper status
 
-On 2026-10-27, after the FLEX inspection, the user confirmed that PosterBoard's lock-screen path still shows black output
-and explicitly asked to stop investigating it for now. Treat this as a **known broken, deferred feature**, not a successful
-wallpaper bring-up. Direct PosterBoard activation also remains black. No root cause or compositor fix has been established.
+The 2026-10-27 lock-screen wallpaper-picker failure was reopened on 2026-11-01 using iPhone 15 and the pinned 23A343 runtime.
+The ordinary lock screen now renders its wallpaper and glass clock. Long-pressing it to open PosterBoard's picker still
+produced black output in the baseline. Direct PosterBoard activation reproduced that failure.
 
-The separately verified path is **Home Screen → Edit → Edit Wallpaper**: the editor opens, and color/gradient wallpaper
-rendering works. Its Done button remains clipped on the right, with the live constraint evidence recorded above; that fix
-is independently deferred. Saving every wallpaper type, lock-screen wallpaper presentation and all wallpaper providers
-are not established by the working Home Screen editor. FLEX remains a temporary inspection aid in SpringBoard and
-PosterBoard; loading it did not establish a lock-screen rendering fix. No additional runtime changes or restarts were made
-when recording this deferral.
+A main-thread view/layer diagnostic found the picker content-ready and attached inside CoverSheet. The separate root-window
+presenter for the same PosterBoard scene had stopped hosting, but its empty full-screen view retained a solid black
+background above the main SpringBoard presentation group. Calling that view's stock `_updateBackgroundColor` changed its
+background from black to nil and immediately revealed the wallpaper preview, Customize button and add button. Restoring
+only the old black background restored the blackout. Neither test changed the hosted surface, presenter priority or visibility.
+
+The original 23A343 UIKitCore implementation explains this stale state.
+`-[_UIScenePresenterOwner _setActivePrioritizedPresenter:]` clears the old view's host container before updating presenters' cached hosting state.
+`setHostContainerView:nil` refreshes its background while `presenter.isHosting` is still true, selecting the hosting color.
+The owner then changes the cached state to false; only the new view receives another container/background refresh. The old
+view's nonhosting background policy is nil. The relevant original UIKitCore UUID is
+`F3921C0A-1332-3779-97C7-62D9F3FA6B77`; method offsets are `0xb75104` (owner transition), `0xb71664` (container setter),
+`0xb73608` (hosting-state update), and `0xb724c8` (background refresh). These are original image offsets, not absolute
+addresses in a rebuilt cache. This is a demonstrated explanation for the observed runtime path, not a claim about every
+stock simulator or device configuration.
+
+The separate scene compatibility helper is selected only for canonical stock SpringBoard. It validates the pinned UIKit
+implementation and refreshes the existing root PosterBoard presentation view after a hosting-to-nonhosting transition.
+It does not use the lazy presentation-view getter, create a view, remove layers, hide windows or alter scene priorities.
+See the source and private declarations in `Guest/ScenePresentationCompatibility.m` and `Guest/Private/ScenePresentation.h`.
+The native package and signed `RuntimeRoot/usr/lib/libLiveSimScene.dylib` must be deployed together; the early C shim and
+other guest executable roles are unchanged.
+
+The signed helper and matching native package were tested on iPhone 15 Pro Max, native iOS 26.1/23B50, with runtime
+23A343 and the 1,353-image cache UUID `44EAAA94-7C15-563D-A394-13296CB1AD7A`, preferred base `0x180000000`, automatically
+mapped at `0x300000000`. SpringBoard native PID 20123 / logical PID 20099 and PosterBoard native PID 20150 / logical PID
+20149 stayed running. No debugger was attached. Real touch input through the user's existing device-HID environment verified
+lock-screen long-press → picker → Customize → editor → Cancel → selected card → Home. Contacts then opened and displayed
+normally. The temporary timed probe had been removed before these checks; the production helper does not poll or schedule
+background refreshes. Local integrated tests, focused transition/role tests, separate native/helper builds and signature
+verification passed. Post-copy checksums were skipped as requested.
+
+A subsequent cleanup replaced runtime method/ivar encoding comparisons with the declared private interfaces, retaining the
+UIKit image/code and scene-scope checks. Its focused tests and simulator helper build passed; this cleanup has not been
+redeployed to the phone yet.
+
+Direct generic PosterBoard activation is **not fully fixed**: its output now paints wallpaper rather than solid black, but
+shows a vertically stretched clock instead of the normal picker. Home navigation and subsequent Contacts launch worked.
+Use the lock-screen long-press flow for the verified picker. This separate activation/layout issue is not covered by a
+blanket scene or geometry override.
+
+Screenshots and temporary before/after/restore evidence are local under `tmp/poster-lockscreen-20261101/`:
+`fixed-picker.png`, `fixed-editor.png`, `fixed-return-home.png`, `fixed-contacts-settled.png`, and
+`fixed-direct-settled.png`. Original view diagnostics showed black → stock background refresh → working picker → restored
+black, establishing the occlusion cause independently of the final hook.
+
+The previously verified **Home Screen → Edit → Edit Wallpaper** path and color/gradient wallpaper rendering remain separate
+results. The editor's clipped Done button remains deferred. Saving every wallpaper type and all wallpaper providers are
+not established by these tests.
 
 ## Guest certificate evaluation service (2026-10-28)
 

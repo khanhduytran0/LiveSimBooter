@@ -27,7 +27,7 @@ struct LSBDyldSimLaunch {
     // The entire validated cache span, including gaps, becomes owned PROT_NONE memory before dyld maps its segments.
     uintptr_t cacheAddress = 0;
     size_t cacheSize = 0;
-    // Retain native mappings only when the entire simulator cache reservation lies below them; false selects legacy detachment.
+    // Retain native mappings for a disjoint ordinary low cache or a validated slidable reservation; false selects legacy detachment.
     bool retainHostCache = true;
 };
 

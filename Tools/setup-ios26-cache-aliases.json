@@ -1,0 +1,321 @@
+{
+  "version": 1,
+  "runtime_build": "23A343",
+  "aliases": [
+    {
+      "path": "/System/Cryptexes/OS/usr/lib/swift/libswiftWebKit.dylib",
+      "target": "/System/Library/Frameworks/WebKit.framework/WebKit",
+      "source_link": "../../../System/Library/Frameworks/WebKit.framework/WebKit"
+    },
+    {
+      "path": "/System/Library/Frameworks/AVFoundation.framework/libAVFAudio.dylib",
+      "target": "/System/Library/Frameworks/AVFAudio.framework/AVFAudio",
+      "source_link": "../AVFAudio.framework/AVFAudio"
+    },
+    {
+      "path": "/System/Library/Frameworks/IOKit.framework/IOKit",
+      "target": "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+      "source_link": "Versions/Current/IOKit"
+    },
+    {
+      "path": "/System/Library/Frameworks/System.framework/System",
+      "target": "/usr/lib/libSystem.B.dylib",
+      "source_link": "../../../../usr/lib/libSystem.B.dylib"
+    },
+    {
+      "path": "/usr/lib/libCRFSuite0.12.dylib",
+      "target": "/usr/lib/libCRFSuite.dylib",
+      "source_link": "libCRFSuite.dylib"
+    },
+    {
+      "path": "/usr/lib/libSystem.dylib",
+      "target": "/usr/lib/libSystem.B.dylib",
+      "source_link": "libSystem.B.dylib"
+    },
+    {
+      "path": "/usr/lib/libarchive.dylib",
+      "target": "/usr/lib/libarchive.2.dylib",
+      "source_link": "libarchive.2.dylib"
+    },
+    {
+      "path": "/usr/lib/libbsm.dylib",
+      "target": "/usr/lib/libbsm.0.dylib",
+      "source_link": "libbsm.0.dylib"
+    },
+    {
+      "path": "/usr/lib/libbz2.dylib",
+      "target": "/usr/lib/libbz2.1.0.dylib",
+      "source_link": "libbz2.1.0.dylib"
+    },
+    {
+      "path": "/usr/lib/libc++.dylib",
+      "target": "/usr/lib/libc++.1.dylib",
+      "source_link": "libc++.1.dylib"
+    },
+    {
+      "path": "/usr/lib/libc.dylib",
+      "target": "/usr/lib/libSystem.B.dylib",
+      "source_link": "libSystem.dylib"
+    },
+    {
+      "path": "/usr/lib/libcharset.dylib",
+      "target": "/usr/lib/libcharset.1.dylib",
+      "source_link": "libcharset.1.dylib"
+    },
+    {
+      "path": "/usr/lib/libcurses.dylib",
+      "target": "/usr/lib/libncurses.5.4.dylib",
+      "source_link": "libncurses.5.4.dylib"
+    },
+    {
+      "path": "/usr/lib/libdbm.dylib",
+      "target": "/usr/lib/libSystem.B.dylib",
+      "source_link": "libSystem.dylib"
+    },
+    {
+      "path": "/usr/lib/libdl.dylib",
+      "target": "/usr/lib/libSystem.B.dylib",
+      "source_link": "libSystem.dylib"
+    },
+    {
+      "path": "/usr/lib/libeasyperf.dylib",
+      "target": "/usr/lib/libperfcheck.dylib",
+      "source_link": "libperfcheck.dylib"
+    },
+    {
+      "path": "/usr/lib/libedit.2.dylib",
+      "target": "/usr/lib/libedit.3.dylib",
+      "source_link": "libedit.3.dylib"
+    },
+    {
+      "path": "/usr/lib/libedit.3.0.dylib",
+      "target": "/usr/lib/libedit.3.dylib",
+      "source_link": "libedit.3.dylib"
+    },
+    {
+      "path": "/usr/lib/libedit.dylib",
+      "target": "/usr/lib/libedit.3.dylib",
+      "source_link": "libedit.3.dylib"
+    },
+    {
+      "path": "/usr/lib/libexpat.dylib",
+      "target": "/usr/lib/libexpat.1.dylib",
+      "source_link": "libexpat.1.dylib"
+    },
+    {
+      "path": "/usr/lib/libextension.dylib",
+      "target": "/System/Library/Frameworks/Foundation.framework/Foundation",
+      "source_link": "../../System/Library/Frameworks/Foundation.framework/Foundation"
+    },
+    {
+      "path": "/usr/lib/libiconv.dylib",
+      "target": "/usr/lib/libiconv.2.dylib",
+      "source_link": "libiconv.2.dylib"
+    },
+    {
+      "path": "/usr/lib/libicucore.dylib",
+      "target": "/usr/lib/libicucore.A.dylib",
+      "source_link": "libicucore.A.dylib"
+    },
+    {
+      "path": "/usr/lib/libinfo.dylib",
+      "target": "/usr/lib/libSystem.B.dylib",
+      "source_link": "libSystem.dylib"
+    },
+    {
+      "path": "/usr/lib/liblzma.dylib",
+      "target": "/usr/lib/liblzma.5.dylib",
+      "source_link": "liblzma.5.dylib"
+    },
+    {
+      "path": "/usr/lib/libm.dylib",
+      "target": "/usr/lib/libSystem.B.dylib",
+      "source_link": "libSystem.dylib"
+    },
+    {
+      "path": "/usr/lib/libncurses.5.dylib",
+      "target": "/usr/lib/libncurses.5.4.dylib",
+      "source_link": "libncurses.5.4.dylib"
+    },
+    {
+      "path": "/usr/lib/libncurses.dylib",
+      "target": "/usr/lib/libncurses.5.4.dylib",
+      "source_link": "libncurses.5.4.dylib"
+    },
+    {
+      "path": "/usr/lib/libnetwork.dylib",
+      "target": "/System/Library/Frameworks/Network.framework/Network",
+      "source_link": "../../System/Library/Frameworks/Network.framework/Network"
+    },
+    {
+      "path": "/usr/lib/libobjc.dylib",
+      "target": "/usr/lib/libobjc.A.dylib",
+      "source_link": "libobjc.A.dylib"
+    },
+    {
+      "path": "/usr/lib/libpoll.dylib",
+      "target": "/usr/lib/libSystem.B.dylib",
+      "source_link": "libSystem.dylib"
+    },
+    {
+      "path": "/usr/lib/libproc.dylib",
+      "target": "/usr/lib/libSystem.B.dylib",
+      "source_link": "libSystem.dylib"
+    },
+    {
+      "path": "/usr/lib/libpthread.dylib",
+      "target": "/usr/lib/libSystem.B.dylib",
+      "source_link": "libSystem.dylib"
+    },
+    {
+      "path": "/usr/lib/libresolv.dylib",
+      "target": "/usr/lib/libresolv.9.dylib",
+      "source_link": "libresolv.9.dylib"
+    },
+    {
+      "path": "/usr/lib/librpcsvc.dylib",
+      "target": "/usr/lib/libSystem.B.dylib",
+      "source_link": "libSystem.dylib"
+    },
+    {
+      "path": "/usr/lib/libsqlite3.0.dylib",
+      "target": "/usr/lib/libsqlite3.dylib",
+      "source_link": "libsqlite3.dylib"
+    },
+    {
+      "path": "/usr/lib/libtidy.dylib",
+      "target": "/usr/lib/libtidy.A.dylib",
+      "source_link": "libtidy.A.dylib"
+    },
+    {
+      "path": "/usr/lib/libutil1.0.dylib",
+      "target": "/usr/lib/libutil.dylib",
+      "source_link": "libutil.dylib"
+    },
+    {
+      "path": "/usr/lib/libxml2.dylib",
+      "target": "/usr/lib/libxml2.2.dylib",
+      "source_link": "libxml2.2.dylib"
+    },
+    {
+      "path": "/usr/lib/libxslt.dylib",
+      "target": "/usr/lib/libxslt.1.dylib",
+      "source_link": "libxslt.1.dylib"
+    },
+    {
+      "path": "/usr/lib/libz.1.1.3.dylib",
+      "target": "/usr/lib/libz.1.dylib",
+      "source_link": "libz.1.dylib"
+    },
+    {
+      "path": "/usr/lib/libz.1.2.11.dylib",
+      "target": "/usr/lib/libz.1.dylib",
+      "source_link": "libz.1.dylib"
+    },
+    {
+      "path": "/usr/lib/libz.1.2.12.dylib",
+      "target": "/usr/lib/libz.1.dylib",
+      "source_link": "libz.1.dylib"
+    },
+    {
+      "path": "/usr/lib/libz.1.2.5.dylib",
+      "target": "/usr/lib/libz.1.dylib",
+      "source_link": "libz.1.dylib"
+    },
+    {
+      "path": "/usr/lib/libz.1.2.8.dylib",
+      "target": "/usr/lib/libz.1.dylib",
+      "source_link": "libz.1.dylib"
+    },
+    {
+      "path": "/usr/lib/libz.dylib",
+      "target": "/usr/lib/libz.1.dylib",
+      "source_link": "libz.1.dylib"
+    },
+    {
+      "path": "/usr/lib/swift/libswiftCloudKit.dylib",
+      "target": "/System/Library/Frameworks/CloudKit.framework/CloudKit",
+      "source_link": "../../../System/Library/Frameworks/CloudKit.framework/CloudKit"
+    },
+    {
+      "path": "/usr/lib/swift/libswiftCompatibilitySpan.dylib",
+      "target": "/usr/lib/swift/libswiftCore.dylib",
+      "source_link": "libswiftCore.dylib"
+    },
+    {
+      "path": "/usr/lib/swift/libswiftHomeKit.dylib",
+      "target": "/System/Library/Frameworks/HomeKit.framework/HomeKit",
+      "source_link": "../../../System/Library/Frameworks/HomeKit.framework/HomeKit"
+    },
+    {
+      "path": "/usr/lib/swift/libswiftIdentityLookup.dylib",
+      "target": "/System/Library/Frameworks/IdentityLookup.framework/IdentityLookup",
+      "source_link": "/System/Library/Frameworks/IdentityLookup.framework/IdentityLookup"
+    },
+    {
+      "path": "/usr/lib/swift/libswiftNetwork.dylib",
+      "target": "/System/Library/Frameworks/Network.framework/Network",
+      "source_link": "../../../System/Library/Frameworks/Network.framework/Network"
+    },
+    {
+      "path": "/usr/lib/swift/libswiftPencilKit.dylib",
+      "target": "/System/Library/Frameworks/PencilKit.framework/PencilKit",
+      "source_link": "../../../System/Library/Frameworks/PencilKit.framework/PencilKit"
+    },
+    {
+      "path": "/usr/lib/swift/libswiftQuickLook.dylib",
+      "target": "/System/Library/Frameworks/QuickLook.framework/QuickLook",
+      "source_link": "/System/Library/Frameworks/QuickLook.framework/QuickLook"
+    },
+    {
+      "path": "/usr/lib/swift/libswiftShazamKit.dylib",
+      "target": "/System/Library/Frameworks/ShazamKit.framework/ShazamKit",
+      "source_link": "../../../System/Library/Frameworks/ShazamKit.framework/ShazamKit"
+    },
+    {
+      "path": "/usr/lib/swift/libswiftSoundAnalysis.dylib",
+      "target": "/System/Library/Frameworks/SoundAnalysis.framework/SoundAnalysis",
+      "source_link": "../../..//System/Library/Frameworks/SoundAnalysis.framework/SoundAnalysis"
+    },
+    {
+      "path": "/usr/lib/swift/libswiftSoundAnalysis_Private.dylib",
+      "target": "/System/Library/Frameworks/SoundAnalysis.framework/SoundAnalysis",
+      "source_link": "../../..//System/Library/Frameworks/SoundAnalysis.framework/SoundAnalysis"
+    },
+    {
+      "path": "/usr/lib/swift/libswiftWebKit.dylib",
+      "target": "/System/Library/Frameworks/WebKit.framework/WebKit",
+      "source_link": "../../../System/Library/Frameworks/WebKit.framework/WebKit"
+    },
+    {
+      "path": "/usr/lib/usd/libAlembic.dylib",
+      "target": "/usr/lib/usd/libusd_ms.dylib",
+      "source_link": "./libusd_ms.dylib"
+    },
+    {
+      "path": "/usr/lib/usd/libHalf.dylib",
+      "target": "/usr/lib/usd/libusd_ms.dylib",
+      "source_link": "./libusd_ms.dylib"
+    },
+    {
+      "path": "/usr/lib/usd/libIex.dylib",
+      "target": "/usr/lib/usd/libusd_ms.dylib",
+      "source_link": "./libusd_ms.dylib"
+    },
+    {
+      "path": "/usr/lib/usd/libImath.dylib",
+      "target": "/usr/lib/usd/libusd_ms.dylib",
+      "source_link": "./libusd_ms.dylib"
+    },
+    {
+      "path": "/usr/lib/usd/libOSD.dylib",
+      "target": "/usr/lib/usd/libusd_ms.dylib",
+      "source_link": "./libusd_ms.dylib"
+    },
+    {
+      "path": "/usr/lib/usd/libtbb.dylib",
+      "target": "/usr/lib/usd/libusd_ms.dylib",
+      "source_link": "./libusd_ms.dylib"
+    }
+  ]
+}

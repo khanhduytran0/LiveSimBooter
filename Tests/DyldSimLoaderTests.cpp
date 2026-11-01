@@ -980,6 +980,8 @@ int LSBPrepareHostMainThread(lsb::MainThreadBootstrap *bootstrap) {
 static const mach_header *initializedHeader = nullptr;
 static std::string initializedPath;
 const SimSyscallHelpers *LSBGetSimSyscallHelpers() { return &fakeHelpers; }
+int LSBPrepareSlidableCacheData(const char *, uint64_t actualBase, const uint8_t *, bool) { return actualBase ? ENOTSUP : 0; }
+const LSBSlidableDataHeader *LSBPreparedSlidableCacheData() { return nullptr; }
 bool LSBInitializeSimProcessInfo(const mach_header *header, const char *path) {
     initializedHeader = header; initializedPath = path; return true;
 }
@@ -1209,6 +1211,48 @@ static void terminalEntryTest(bool large) {
     check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "terminal startup vector survives native preparation allocations");
 }
 
+static void slidableDyldTests() {
+    check(LSBConfigureRuntimeCacheBase(0x300000001) == EINVAL && LSBConfigureRuntimeCacheBase(0x100000000) == EINVAL,
+          "trusted cache base still requires a valid aligned high range");
+    std::vector<uint8_t> bytes(0x84000);
+    auto *header = reinterpret_cast<mach_header_64 *>(bytes.data());
+    header->magic = MH_MAGIC_64; header->cputype = CPU_TYPE_ARM64; header->cpusubtype = CPU_SUBTYPE_ARM64_ALL;
+    header->ncmds = 1; header->sizeofcmds = sizeof(segment_command_64) + sizeof(section_64);
+    auto *segment = reinterpret_cast<segment_command_64 *>(header + 1);
+    segment->cmd = LC_SEGMENT_64; segment->cmdsize = header->sizeofcmds;
+    memcpy(segment->segname, "__DATA_DIRTY", sizeof("__DATA_DIRTY"));
+    segment->vmaddr = 0x7c000; segment->vmsize = 0x4000; segment->fileoff = 0x5c000; segment->filesize = 0x4000;
+    segment->initprot = segment->maxprot = VM_PROT_READ | VM_PROT_WRITE; segment->nsects = 1;
+    auto *section = reinterpret_cast<section_64 *>(segment + 1);
+    section->addr = 0x7c000; section->size = 0x154;
+    LSBMappedImage image = {reinterpret_cast<const mach_header *>(header), bytes.size(), reinterpret_cast<uintptr_t>(header), 0};
+    auto *configuration = reinterpret_cast<LSBDyldSlideConfiguration *>(bytes.data() + LSB_DYLD_SLIDE_CONFIG_VM_OFFSET);
+    const LSBDyldSlideConfiguration initial = {LSB_DYLD_SLIDE_CONFIG_MAGIC, 1, sizeof(*configuration), LSB_DYLD_SLIDE_PREFERRED_BASE, 0, 0, {}};
+    std::string error;
+    for (uint64_t base : {UINT64_C(0x300000000), UINT64_C(0x7000000000)}) {
+        check(!LSBConfigureRuntimeCacheBase(base), "host may select either tested address before images are mapped");
+        LSBSlidableDataHeader backing = {};
+        backing.preferredBase = LSB_DYLD_SLIDE_PREFERRED_BASE; backing.actualBase = base; backing.cacheSpan = LSB_SLIDABLE_CACHE_SPAN;
+        backing.cacheUUID[0] = 0x42;
+        *configuration = initial;
+        auto original = bytes;
+        check(configureSlidableDyld(image, backing, error), "native preparation accepts the pinned writable marker");
+        check(configuration->actualBase == base && configuration->cacheSpan == backing.cacheSpan && configuration->cacheUUID[0] == 0x42,
+              "selected base and cache identity are written to DATA");
+        *configuration = initial;
+        check(bytes == original, "no bytes outside the writable config are changed, including TEXT and all Mach-O commands");
+        section->size = 0x300;
+        check(!configureSlidableDyld(image, backing, error), "configuration may not overlap any original section");
+        section->size = 0x154;
+        configuration->magic[0] ^= 1;
+        check(!configureSlidableDyld(image, backing, error), "missing dynamic-loader marker fails before entry");
+        *configuration = initial;
+        ++backing.actualBase;
+        check(!configureSlidableDyld(image, backing, error), "sidecar base must equal trusted bootstrap base");
+    }
+    check(!LSBConfigureRuntimeCacheBase(0), "ordinary cache fallback clears the selection before mapping");
+}
+
 static void entryTest() {
     LSBMappedImage image = {&fakeDyld, 0, 42, reinterpret_cast<uintptr_t>(&fakeEntry)};
     const char *argv[] = {"/RuntimeRoot/bin/df", "arg", nullptr};
@@ -1255,6 +1299,7 @@ static void oversizedEntryTest() {
 }
 
 int main() {
+    slidableDyldTests();
     check(!LSBTraceHandoffRequested(nullptr), "successful handoff diagnostics are disabled by default");
     const char *trace[] = {"LSB_TRACE_HANDOFF_EXTRA=1", "LSB_TRACE_HANDOFF=1", "LSB_TRACE_HANDOFF=0", nullptr};
     const char *noTrace[] = {"LSB_TRACE_HANDOFF=0", "LSB_TRACE_HANDOFF=1", nullptr};
@@ -1297,6 +1342,7 @@ int main() {
     executableMapping(universal(true, true, executable()), page);
     executableMapping(dylibVariant(executable()), 0);
     executableMapping(universal(true, true, dylibVariant(executable())), page);
+    check(LSBConfigureRuntimeCacheBase(0x300000000) == EBUSY, "cache base cannot change after any image mapping starts");
     mainStackBoundsTest();
     nativeStackExclusionTests();
     cacheReservationTests();

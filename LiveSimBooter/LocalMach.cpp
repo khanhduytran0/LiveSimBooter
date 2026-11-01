@@ -208,6 +208,34 @@ kern_return_t vm_protect(vm_map_t task, vm_address_t address, vm_size_t size, bo
     return rpc.simple(task, 4802);
 }
 
+// Diagnostic-local wrapper. mach_vm.defs exports this LP64 wire operation as ID 4815;
+// SDK mach_vm.h also lists { "mach_vm_region_recurse", 4815 }. The legacy vm32 IDs are not interchangeable.
+kern_return_t vm_region_recurse_64(vm_map_read_t task, vm_address_t *address, vm_size_t *size, natural_t *depth,
+                                 vm_region_recurse_info_t info, mach_msg_type_number_t *count)
+{
+    using Request = __Request__vm_region_recurse_64_t;
+    using Reply = __Reply__vm_region_recurse_64_t;
+    static_assert(sizeof(Request) == 48 && offsetof(Reply, info) == 60 && sizeof(Reply) == 144);
+    constexpr mach_msg_type_number_t capacity = sizeof(Reply::info) / sizeof(integer_t);
+    if (!address || !size || !depth || !info || !count || !*count || *count > capacity) return KERN_INVALID_ARGUMENT;
+    RPC<Request, Reply> rpc;
+    rpc.data.request.NDR = kNDR;
+    rpc.data.request.address = *address;
+    rpc.data.request.nesting_depth = *depth;
+    rpc.data.request.infoCnt = *count;
+    kern_return_t result = rpc.simple(task, 4815, offsetof(Reply, info));
+    if (result != KERN_SUCCESS) return result;
+    const Reply &reply = rpc.data.reply;
+    if (reply.infoCnt > capacity || reply.infoCnt > *count ||
+        reply.Head.msgh_size < offsetof(Reply, info) + size_t(reply.infoCnt) * sizeof(integer_t)) return MIG_TYPE_ERROR;
+    for (mach_msg_type_number_t index = 0; index < reply.infoCnt; ++index) info[index] = reply.info[index];
+    *address = reply.address;
+    *size = reply.size;
+    *depth = reply.nesting_depth;
+    *count = reply.infoCnt;
+    return KERN_SUCCESS;
+}
+
 kern_return_t vm_copy(vm_map_t task, vm_address_t source, vm_size_t size, vm_address_t destination)
 {
     RPC<__Request__vm_copy_t, mig_reply_error_t> rpc;

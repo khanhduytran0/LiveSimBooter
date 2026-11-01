@@ -35,6 +35,18 @@ int main(void) {
     assert(compareCache(&header, 512, end + 1) == LSB_NATIVE_CACHE_LAYOUT_UNKNOWN);
     assert(compareCache(&header, 239, end) == LSB_NATIVE_CACHE_LAYOUT_UNKNOWN);
     assert(compareCache(&header, 260, end) == LSB_NATIVE_CACHE_LAYOUT_UNKNOWN);
+    NativeCacheReservationHeader slidable = header;
+    slidable.mappingCount = 6;
+    slidable.sharedRegionStart = LSB_SLIDABLE_CACHE_PREFERRED_BASE;
+    slidable.sharedRegionSize = LSB_SLIDABLE_CACHE_SPAN;
+    assert(compareCache(&slidable, 512, 0x190000000) == LSB_NATIVE_CACHE_LAYOUT_SLIDABLE);
+    assert(compareCache(&slidable, 512, 0x280000000) == LSB_NATIVE_CACHE_LAYOUT_SLIDABLE);
+    assert(compareCache(&slidable, 400, 0x190000000) == LSB_NATIVE_CACHE_LAYOUT_UNKNOWN);
+    slidable.mappingCount = 5;
+    assert(compareCache(&slidable, 512, 0x190000000) == LSB_NATIVE_CACHE_LAYOUT_OVERLAP);
+    slidable.mappingCount = 6; slidable.sharedRegionSize -= 0x4000;
+    assert(compareCache(&slidable, 512, 0x190000000) == LSB_NATIVE_CACHE_LAYOUT_OVERLAP);
+    slidable.sharedRegionSize = LSB_SLIDABLE_CACHE_SPAN;
     for (unsigned fault = 0; fault < 8; ++fault) {
         malformed = header;
         switch (fault) {

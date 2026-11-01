@@ -16,6 +16,7 @@
 #include "StoreAppGroups.h"
 #include "ChildStatus.h"
 #include "SpawnTransport.h"
+#include "SlidableCache.h"
 #include "PrivateXPC.h"
 #include "LaunchdHandshake.h"
 #include "LaunchdProbe.h"
@@ -145,6 +146,8 @@ static NSMutableArray<LSBPendingAdoption *> *pendingAdoptions;
 static dispatch_source_t adoptionRetrySource;
 static LSBJob *startingJob;
 static NSString *runtimeRoot;
+static uint64_t sessionCacheBase;
+static uint8_t sessionCacheUUID[16];
 static uint64_t nextIdentifier = 1;
 static BOOL launchLaneFailed;
 static unsigned finishingDepth;
@@ -2131,6 +2134,7 @@ static void handleMessage(LSBReceivedMessage *message) {
                 .lazySigningPort = job.executionRole == LSB_EXECUTION_SIMULATOR ? lazySigning.endpoint : MACH_PORT_NULL,
                 .launchdTankPort = job.simulatorLaunchd ? LSBLaunchdHandshakeTankPort(job.launchdHandshake) : MACH_PORT_NULL,
                 .ports = &job.request->ports, .executionRole = job.executionRole, .taskCapture = job.taskCapture,
+                .simulatorCacheBase = job.executionRole == LSB_EXECUTION_SIMULATOR ? sessionCacheBase : 0,
                 .nativeProductionStatus = job.executionRole == LSB_EXECUTION_SIMULATOR ? LSBHostNativeProductionStatus() : LSB_NATIVE_PRODUCTION_UNKNOWN };
             error = LSBTransportReplyBootstrapWithMetadata(message, 0, pid, identifier, runtimeRoot.fileSystemRepresentation,
                 &job.request->plan, job.request->fds, job.statusFD, job.wakeReadFD, &metadata);
@@ -2448,7 +2452,40 @@ static int prepareLazySigningSession(void) {
     return helper ? 0 : EIO;
 }
 
+// Called on the native main queue only, before any job in a new session. Reboots reach here after all old guests have exited.
+static int prepareRuntimeCache(void) {
+    NSString *directory = [runtimeRoot stringByAppendingPathComponent:@"System/Library/Caches/com.apple.dyld"];
+    int directoryFD = open(directory.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (directoryFD < 0) {
+        if (errno != ENOENT) return errno;
+        sessionCacheBase = 0;
+        return 0; // Loose-library runtimes do not have a cache.
+    }
+    int cacheFD = openat(directoryFD, "dyld_sim_shared_cache_arm64", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int error = cacheFD < 0 && errno != ENOENT ? errno : 0;
+    LSBSlidableCacheInfo info;
+    int supported = cacheFD < 0 ? 0 : LSBInspectSlidableCache(cacheFD, &info);
+    if (supported < 0) error = errno;
+    if (!error && !supported) sessionCacheBase = 0;
+    if (!error && supported > 0) {
+        uint64_t base = !memcmp(sessionCacheUUID, info.uuid, sizeof(sessionCacheUUID)) ? sessionCacheBase : 0;
+        if (!base) error = LSBSelectSlidableCacheBase(&info, &base);
+        LSBSlidableCachePreparation prepared;
+        if (!error) error = LSBPrepareSlidableCache(cacheFD, directoryFD, base, &prepared);
+        if (!error) {
+            sessionCacheBase = base;
+            memcpy(sessionCacheUUID, info.uuid, sizeof(sessionCacheUUID));
+            fprintf(stderr, "[broker] Simulator cache base=0x%llx DATA=%s (%s)\n", base, prepared.fileName, prepared.reused ? "reused" : "created");
+        }
+    }
+    if (cacheFD >= 0) close(cacheFD);
+    close(directoryFD);
+    return error;
+}
+
 static int enqueueInitialJob(LSBReceivedMessage *initial, uint32_t executionRole) {
+    int cacheError = executionRole == LSB_EXECUTION_SIMULATOR ? prepareRuntimeCache() : 0;
+    if (cacheError) { disposeMessage(initial); return cacheError; }
     int signingError = prepareLazySigningSession();
     if (signingError) { disposeMessage(initial); return signingError; }
     if (!enableIndigo) { enqueueJob(initial, nil, executionRole); return 0; }

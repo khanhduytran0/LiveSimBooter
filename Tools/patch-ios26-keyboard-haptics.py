@@ -184,7 +184,7 @@ def image_sections(data, locate, base):
     return found
 
 
-def inspect_cache(data, profile=PROFILE):
+def inspect_cache(data, profile=PROFILE, pointer_reader=None):
     locate, base, signature = cache_layout(data, profile)
     sections = image_sections(data, locate, base)
     got = sections[('__DATA_CONST', '__got')]['address']
@@ -199,7 +199,9 @@ def inspect_cache(data, profile=PROFILE):
         slot = selectors + slot_relative
         expect(relative, words(adrp(stub, slot, 1), load64(slot, 1, 1)))
         expect(relative + 16, words(0xD61F0200, 0xD4200020, 0xD4200020, 0xD4200020))
-        pointer = struct.unpack_from('<Q', data, locate(slot, 8, 3))[0]
+        # Slidable-cache callers supply a reader that proves membership in a validated relocation chain before decoding.
+        offset = locate(slot, 8, 3)
+        pointer = pointer_reader(offset) if pointer_reader is not None else struct.unpack_from('<Q', data, offset)[0]
         offset = locate(pointer, len(name) + 1)
         require(data[offset:offset + len(name) + 1] == name.encode() + b'\0', 'Unexpected Objective-C selector target')
 

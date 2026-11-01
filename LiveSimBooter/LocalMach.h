@@ -2,6 +2,7 @@
 
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <mach/vm_map.h>
 
 // These callbacks use executable-local code/data and kernel traps only.
 namespace lsb {
@@ -9,6 +10,7 @@ decltype(::vm_allocate) vm_allocate;
 decltype(::vm_deallocate) vm_deallocate;
 decltype(::vm_protect) vm_protect;
 decltype(::vm_copy) vm_copy;
+decltype(::vm_region_recurse_64) vm_region_recurse_64;
 decltype(::mach_thread_self) mach_thread_self;
 decltype(::mach_port_deallocate) mach_port_deallocate;
 decltype(::mach_port_insert_right) mach_port_insert_right;

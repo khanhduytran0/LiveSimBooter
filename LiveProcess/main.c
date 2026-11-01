@@ -176,6 +176,7 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     if (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_PROBE) return runNativeProbe(error);
     if (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_SERVICE) return runNativeMetalService(error, planApplied);
     if (launch.executionRole == LSB_EXECUTION_NATIVE_SIGNER) return runNativeSigner(error);
+    if (!error) error = LSBConfigureRuntimeCacheBase(launch.simulatorCacheBase);
     if (!error) LSBConfigureLazySignature(launch.lazySigningPort, &launch.brokerAudit);
     // The native host receives a kernel-created movable task right through this one-shot thread exception.
     // Restore the thread's prior handlers before simulator TLS/workqueue initialization; never send mach_task_self() over XPC.

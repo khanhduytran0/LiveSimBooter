@@ -12,10 +12,10 @@
 #include <sys/sysctl.h>
 
 #define LSB_BROKER_PORT_ENV "LSB_BROKER_PORT"
-#define LSB_TRANSPORT_VERSION 8
+#define LSB_TRANSPORT_VERSION 9
 
 // Bootstrap-only metadata is versioned independently from the outer transport envelope.
-#define LSB_BOOTSTRAP_VERSION 5
+#define LSB_BOOTSTRAP_VERSION 6
 enum LSBExecutionRole {
     LSB_EXECUTION_SIMULATOR = 0, LSB_EXECUTION_NATIVE_METAL_PROBE = 1, LSB_EXECUTION_NATIVE_METAL_SERVICE = 2, LSB_EXECUTION_NATIVE_SIGNER = 3
 };
@@ -30,6 +30,7 @@ enum LSBRequestKind {
 typedef struct {
     uint64_t requestID;
     uint32_t executionRole;
+    uint64_t simulatorCacheBase; // Session-selected by the native host; zero for ordinary caches and native helper roles.
     uint32_t nativeProductionStatus; // Authenticated native host classification, never supplied through a guest spawn plan.
     int32_t error, pid, guestPID, parentPID;
     int statusFD, wakeFD;
@@ -51,6 +52,7 @@ typedef struct {
     mach_port_t lazySigningPort; // Borrowed, optional and simulator-only; policy comes from the native session.
     const LSBSpawnPorts *ports;
     uint32_t executionRole; // Chosen by the native broker, never supplied by a guest spawn plan.
+    uint64_t simulatorCacheBase; // Session-selected by the native host; zero for ordinary caches and native helper roles.
     uint32_t nativeProductionStatus;
     LSBTaskPortCaptureOffer taskCapture; // Borrowed endpoint and nonce supplied only by the native broker.
 } LSBBootstrapMetadata;

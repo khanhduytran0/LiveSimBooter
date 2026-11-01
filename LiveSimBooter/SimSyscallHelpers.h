@@ -147,3 +147,8 @@ bool LSBInitializeSimProcessInfo(const mach_header *dyldHeader, const char *dyld
 // Switch to persistent writable metadata after debugger publication. The caller supplies a non-null, initialized structure.
 void LSBSetSimProcessInfo(dyld_all_image_infos *info);
 extern "C" void LSBDebuggerImageNotification(dyld_image_mode mode, uint32_t count, const dyld_image_info *images);
+
+// Native startup only: retain immutable data backing before guest TLS. Zero selects the ordinary cache path.
+int LSBPrepareSlidableCacheData(const char *runtimeRoot, uint64_t actualBase, const uint8_t cacheUUID[16], bool trace);
+#include "../ProcessSupport/SlidableCache.h"
+const LSBSlidableDataHeader *LSBPreparedSlidableCacheData();

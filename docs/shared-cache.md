@@ -865,3 +865,323 @@ in another checkout.
 The requested local cleanup on 2026-10-24 removed large generated cache copies, upload staging trees, and build caches.
 Historical binary paths above may therefore no longer exist locally; experiment logs, scripts, and manifests were retained.
 The deletion inventory and retained-evidence details are under `tmp/cleanup-20261024/`.
+
+## High executable-address limits, 2026-11-01
+
+A native-only LiveProcess probe compared the current iPhone 17 Pro Max (`iPhone18,2`, iOS 27.0 / `24A435`) with the
+development iPhone 15 Pro Max (`iPhone16,2`, iOS 26.1 / `23B50`, using its existing relaxed boot configuration). Both kept
+the native cache loaded, used their installed extension's unchanged entitlements, including Increased Memory Limit, and
+ran without LLDB. Neither profile added Extended Virtual Addressing. `csops` reported `CS_DEBUGGED=0` in both probes.
+This comparison does not isolate the effects of hardware, OS version, and boot configuration.
+
+The probe registered the same plain-arm64, identity-signed leaf dylib with `F_ADDFILESIGS_RETURN`, mapped its original
+signed code, queried current/maximum VM protections, and called `mov w0, #42; ret`. Ordinary free destinations were reserved
+without overwriting existing mappings. Within the native shared region, it descended through the `VM_MEMORY_SHARED_PMAP`
+submap and replaced only a fully covering nested guard with both protections zero; loaded cache mappings were excluded.
+
+| Check | iPhone 17 | iPhone 15 development device |
+| --- | --- | --- |
+| Signed code at `0x400000000`, inside the native shared region | `r--`, maximum `rw-`; not called | `r-x`, maximum `rwx`; returned 42 |
+| Signed code at `0x7000000000` | `r-x`, maximum `rwx`; returned 42 | Address rejected |
+| `TASK_VM_INFO.max_address` (exclusive) | `0x8000000000` (512 GiB) | `0xfc0000000` (63 GiB) |
+| Highest 16 KiB page | `0x7fffffc000`, `r-x`; returned 42 | `0xfbfffc000`, `r-x`; returned 42 |
+| Allocation at the reported limit or one page above | `KERN_INVALID_ADDRESS` | `KERN_INVALID_ADDRESS` |
+
+The earlier October 24 `r--`/failed-`mprotect` control was on iPhone 17, not iPhone 15. The present iPhone 15 setup does
+**not** reproduce that protection loss inside the shared region, but its smaller task address limit excludes the entire
+`0x7000000000` range. The measured ceiling is per tested task/configuration, not a universal ARM64 or PAC limit.
+
+The unchanged signed iOS Simulator 26.0 / `23A343` cache, UUID `73ED978A-FD25-3166-A57A-34E21BB7E5B8`, original base
+`0x110000000`, also passed signature registration on both devices. Its 1,549,352,960-byte TEXT mapping received `r-x`
+with maximum `rwx`. With no address hint, the kernel placed it at `0x7000008000` on iPhone 17 and `0x300000000` in the
+final iPhone 15 run. These were protection-only mappings: no cache fixups were applied and no cache code was entered.
+They do not establish that the complete runtime can boot at those addresses.
+
+A separate anonymous **writable** 3 GiB allocation at exactly `0x7000000000` succeeded on iPhone 17. A full `bzero`
+completed in 167.695 ms in the final run; sampled page starts and the final byte were zero. The measured footprint reached
+3,223,998,224 bytes and returned to 1,197,584 bytes after successful deallocation. This test ran before other high mappings;
+a prior ordering had encountered an occupied range and stopped before zeroing. On iPhone 15 the allocation was rejected
+before any touch (`vm_allocate`: `KERN_INVALID_ADDRESS`; anonymous fixed `mmap`: `ENOMEM`). No memory at another address
+was substituted for the requested test.
+
+Evidence is under ignored `tmp/high-map-700-20261101/`: the C probe, signed package/rollback copies, JSON-lines VM results,
+and bounded native AMFI/TXM captures. Final comparison PIDs were 20316 and 16430. Both original app packages were restored;
+the runtime caches and simulator data were not replaced. The iPhone 17 simulator was restarted, while iPhone 15 returned
+to its prior powered-off state. No debugger was attached during these experiments.
+
+An explicit iPhone 15 follow-up tested `0x8000000000` with **direct** 16 KiB `mmap(PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_FIXED)`
+calls, without the previous `vm_allocate` reservation gate. Both the registered signed file-backed page and an anonymous page
+returned `MAP_FAILED` with `errno=12` (`ENOMEM`). Signature registration succeeded, and the kernel-placed signed control at
+`0x103400000` was `r-x`, maximum `rwx`, and returned 42. PID 16542 retained the native cache and had `CS_DEBUGGED=0` without LLDB.
+An earlier probe had skipped the calls because `mach_vm_region_recurse` queried at `0x8000000000` returned a low region address;
+that query is not evidence that a mapping succeeded or failed. The corrected direct-call result is recorded in
+`tmp/high-map-800-iphone15-20261101/results.jsonl`, with probe source, security capture, and app-restoration records alongside.
+
+## Slidable iOS 26 cache on iPhone 17, 2026-11-01
+
+An isolated **219-image arm64 simulator 26.0 / 23A343** cache executed successfully at both `0x7000000000` and
+`0x7100000000` on iPhone18,2 / native iOS 27.0 build 24A435. The same signed cache file served both bases; only the
+experimental loader and its native helper configuration changed. This establishes execution after rebasing, beyond the
+earlier mapping-only tests. It does not establish full SpringBoard boot with a high-address cache.
+
+### Builder and loader changes
+
+The original 23A343 builder's instruction at file offset `0x5eb14`, `0x37000360`, skips slide-info generation for simulator
+inputs. Replacing that validated instruction with `NOP` enabled its existing arm64 v2 slide format. The original 217-image
+minimum closure plus stock `libxo` and `libutil` covers `df`; original runtime inputs were preserved.
+
+The output retains preferred base `0x180000000`, six mappings, and a `0x1550c000` VM span. Its three data mappings contain
+**2,131,232 exact fixups**, including **14,673 tagged pointers**, in standard v2 chains: 4 KiB pages, delta mask
+`0x00ffff0000000000`, shift 38, zero value-add, and no extras. The no-rebase sentinel is `0x4000`.
+Decoding these chains reproduces every data byte in an independently built stock-cache control. All 550 instruction-marked
+sections, totaling 145,339,368 bytes, are identical between those two builds.
+
+An experimental `dyld_sim` patch sets a nonzero slide and corrects a second buffer calculation that otherwise cancels it.
+The native loader reserves the complete high range without overwrite before entering dyld. Its executable-local mmap helper
+validates the cache UUID and layout, rejects an unexpected mapping address, then applies the exact v2 chains after all
+regions have mapped. It temporarily makes data writable with `VM_PROT_COPY` and restores the protections dyld requested,
+including writable TPRO data. Signed TEXT is not modified after mapping. Local tests independently checked every rebased
+pointer against the builder inventory and verified that the complete TEXT mapping stayed unchanged.
+
+The custom mapper forces the two selected slides, `0x6e80000000` and `0x6f80000000`. The builder still emits its ordinary
+`maxSlide=0x20000000`; this prototype does not implement general address selection or a completed max-slide policy.
+The experiment remains under ignored `tmp/slidable-cache-20261101/`, outside the normal build and setup tools.
+
+### High-address Objective-C constant
+
+The first `df` run passed at `0x7000000000`, but a Foundation smoke test looped in `CFStringGetCString`. A hardware-only
+LLDB attachment found `__NSCFString` repeatedly dispatching `_fastCharacterContents`. The cache's exported
+`objc_debug_isa_class_mask` was `0x0000000ffffffff8`, narrower than the simulator runtime's actual ISA decoding mask,
+`0x007ffffffffffff8`. CoreFoundation consumes that exported mask and misclassified its own high-address class.
+
+The exact scalar at cache file offset `0x39bb8` was widened to match the pinned runtime's decoder. It lies in `__TEXT,__const`,
+so the correction was made **on disk before signing**, never by dirtying live executable pages. A new cache UUID distinguishes
+this variant. All other payload bytes except the UUID remain identical; instructions and slide metadata are unchanged.
+After this correction, the same Foundation probe passed at both bases without a debugger.
+
+Final signed cache UUID: `4A00BEA1-55DE-530B-8B6D-242D4FBED3D4`; size 292,765,696 bytes;
+SHA-256 `2c0984897d4092c9d07fee68976293784d681928b63e1418901bece9b0ab0694`.
+It uses the configured development identity and app identifier, contiguous 16 KiB signature pages, no entitlements,
+and no executable-segment privileges. USB rsync transfers omitted post-copy checksums.
+
+### Device results and limits
+
+| Actual base | Guest | Native PID | Result |
+| --- | --- | --- | --- |
+| `0x7000000000` | Foundation/CF smoke | 20882 | String conversion, array bridging, binary-plist roundtrip; exit 0 |
+| `0x7000000000` | Stock `df` | 20884 | Filesystem table; exit 0 |
+| `0x7100000000` | Stock `df` | 20898 | Filesystem table; exit 0 |
+| `0x7100000000` | Foundation/CF smoke | 20900 | Same operations; exit 0 |
+
+Kernel VM queries reported TEXT **current `r-x`, maximum `rwx`** at both bases. DATA_CONST returned to `r--` after its private
+fixups. The native cache remained loaded, and native workqueue entries redirected to guest code at the selected high base.
+The successful AMFI/TXM captures contained no signature rejection or TXM error. All four final runs used fresh guests without
+LLDB attached. The earlier CF diagnostic debugger was detached and its debugserver verified gone before the retests.
+
+Two earlier failures are kept separate in the evidence. The initial mapper accidentally canceled the slide, wrote mappings
+at the preferred base, and faulted when reading the intended high cache header; that capture had a TXM overlap error.
+After correcting the mapper, a direct-command run reached Foundation but trapped because its required `SIMULATOR_ROOT`
+environment was absent. Supplying both simulator root variables resolved that setup error. A nano allocator reservation
+warning remained during the successful runs; the allocator fell back and the probes completed.
+
+The test used a separate `slide-probe/RuntimeRoot` with empty sibling `data`, temporarily disabled optional audio/haptic
+helpers and lazy signing for this session, and preserved saved settings and the normal runtime. The native MobileGestalt
+answer was development, but retention was explicitly forced for these successful tests; no security state was changed.
+The normal app and original cache UUID were verified after restoration; its original-runtime `df` run (PID 20907) exited 0.
+The simulator returned to its initial powered-off state. The unrelated pre-existing device debugger session was preserved.
+General ASLR, arbitrary runtime builds, full-cache/UI boot, and production integration
+remain untested. The iOS 27 stock simulator cache still lacks the exact relocation inventory used by this new iOS 26 build.
+
+Evidence includes `builder/cache-manifest.json`, `builder/stock-twin-verification.json`, `loader/`, `vmquery/`,
+`audit/cache-wide-isa/verification.json`, signed manifests, `device/console-{cf,df}-wide.log`,
+`device/console-{cf,df}-710.log`, bounded security captures, and restoration records under the ignored experiment directory.
+
+### Full-cache preparation at the high base
+
+The subsequent full 23A343 build contains the tracked 1,350 runtime images plus the three recorded host-support images.
+It retains preferred base `0x180000000`, has six mappings and a `0x7e1b0000` VM span, and targets actual base `0x7000000000`.
+Its v2 chains contain **15,156,132 pointers**, including **40,252 tagged values**. Independently decoding every chain reproduces
+the stock control's complete data mappings; all 3,698 instruction sections match that control before compatibility patches.
+The final variant preserves all five container-metadata literal replacements and seven CoreHaptics instruction patches,
+and widens the export-resolved ISA mask at file offset `0x61bb8`. Its UUID is `F79708E3-14B8-5968-A655-9E5E5791EFDD`.
+
+Rebasing those data mappings independently in every guest would dirty 47,435 4 KiB pages, about 185 MiB per process.
+For this experiment a separate 236,158,976-byte file holds the three already-relocated, non-executable data mappings.
+The native helper opens it before switching TLS, validates its versioned header against the exact cache UUID/base/span and
+mapping table, maps it `MAP_PRIVATE`, and closes the descriptor after mapping. Initial pages can be shared between guests;
+only later guest writes require CoW. A local two-view test verified that a guest write changes neither the other view nor the file.
+TEXT and read-only metadata still map from the signed cache. The sidecar's payload is **trusted, unsigned runtime input**:
+its UUID/layout checks are consistency checks, not authentication by the cache signature. The cache itself stays slidable;
+this prepared sidecar is specific to the selected base.
+
+The experimental native package reserves the high span without overwriting existing mappings and requires native-cache
+retention with hardware workqueue redirection. It rejects an explicit detach request for this cache. The matching loader
+preserves all eleven existing iOS-platform compatibility patches and the ordinary low-cache fallback. Routine diagnostics
+remain off unless `LSB_TRACE_HANDOFF=1`. These experimental artifacts and reproducible receipts are under ignored
+`tmp/slidable-full-20261101/`; the tracked setup commands still build the established low-address cache.
+
+The full cache was signed and deployed over USB to iPhone18,2 / iOS 27.0 build 24A435, preserving the working cache,
+loader and shim outside RuntimeRoot. Transfers omitted post-copy checksums. The final signed cache is 2,064,596,992 bytes,
+SHA-256 `100acf7af897d4c93d95c55d05471257a1d539960abdf49845c627b058da5598`.
+Stock `df`, native PID 21165, exited 0. Kernel queries showed TEXT at `0x7000000000` with current `r-x`, maximum `rwx`;
+the ordinary DATA_CONST mapping was `r--`, and the small TPRO mapping retained dyld's requested `rw-` protection.
+All three data regions used the prepared backing without per-process rebase writes.
+
+The normal graphical session then booted with native host PID 21169, launchd 21174, backboardd 21220 and SpringBoard 21221.
+A device screenshot shows the populated Home Screen, wallpaper, icons, and Maps/Calendar widgets. The user confirmed Contacts
+and Fish responded normally; `df` launched from Fish as PID 21343 and exited 0. Contacts was independently observed as PID 21341.
+A later ten-second sample contained 80 project processes and about 2,200.7 MiB of combined physical footprint, including
+the native host and Metal helpers; SpringBoard used about 93.8 MiB and launchd 17.5 MiB. Launchd still consumed about 15%
+of one CPU in that sample, so this is not evidence of an idle-CPU improvement. The bounded AMFI/TXM capture contained no
+signature rejection or TXM event. No debugger was attached for these tests, and the final inventory showed no traced project process.
+
+This is a successful full-cache boot and basic app/terminal test, not a complete compatibility pass. An optional FinanceKitUI
+widget process trapped through Swift's `swift_unexpectedError`; a SiriAnalytics service executable was absent. Neither report
+establishes a relocation defect. The new deployment remains active with the previous files retained for rollback. General
+ASLR, other load bases for the full cache, and integration into the tracked setup/native source remain separate work.
+
+### ANYWHERE executable reservation, 2026-11-01
+
+A native-only probe tested automatic placement on both phones, retaining the native cache without LLDB or new entitlements:
+
+```c
+mach_vm_address_t base = 0x180000000;
+kern_return_t result = mach_vm_map(mach_task_self(), &base, 0xc0000000, 0,
+    VM_FLAGS_ANYWHERE, MACH_PORT_NULL, 0, FALSE,
+    VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_READ | VM_PROT_EXECUTE, VM_INHERIT_DEFAULT);
+```
+
+The 3 GiB anonymous reservation was never read, written, or executed. VM queries sampled its first, middle and final pages.
+After measuring the untouched reservation, the probe replaced only its owned first 16 KiB page with a registered, signed
+leaf containing `mov w0, #42; ret`, called it, then deallocated the complete owned range. All eleven signed-leaf controls
+passed on each device; every release succeeded.
+
+| Device / native build | Probe PID | First returned base | Reservation current/max | Untouched resident / footprint increase | Signed leaf |
+| --- | --- | --- | --- | --- | --- |
+| iPhone16,2 / 23B50, existing development configuration | 16968 | `0x300000000` | `r-x` / `r-x` | 0 / 0 bytes | 42 |
+| iPhone18,2 / 24A435 | 21567 | `0x7000000000` | `r-x` / `r-x` | 0 / 0 bytes | 42 |
+
+The reservation increased reported virtual size by exactly 3,221,225,472 bytes. Mapping and executing the single signed page
+subsequently faulted that page; this does not contradict the untouched reservation's zero physical-memory increase.
+The signed replacement page had current `r-x`, maximum `rwx`. No AMFI rejection or actual TXM event appeared in the bounded
+captures. Both probes reported `CS_DEBUGGED=0`. An unrelated pre-existing iPhone 15 debugger session was left untouched.
+
+The full-cache-span control (`0x7e1b0000` bytes) also mapped and executed its signed leaf. Later iPhone 17 allocations
+returned addresses incremented by 16 KiB, so the first base is an observation, not a stable per-model contract. In particular,
+a consumer must use the returned address and a matching relocated DATA backing; independent per-process ANYWHERE choices
+would not automatically share the same already-rebased data file.
+
+Public [XNU allocation logic](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/vm/vm_map.c)
+selects VM ranges using size/tag and preserves the `mach_vm_map` hint, searching upward inside the selected range.
+Its [arm64 threshold](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/mach/arm/vm_param.h)
+classifies allocations of at least 1 GiB as large-file allocations. This source explains why a large reservation can choose a
+different range from a small page; it does not make `VM_FLAGS_ANYWHERE` a TXM-executable-address search API. Actual protection
+and execution checks remain necessary. Exact private-kernel policy is bounded by the device measurements above.
+
+Evidence is under `tmp/anywhere-cache-20261101/`, including the native C source, signature/packaging logs, complete JSON-lines
+measurements, and restoration records. Runtime files and DATA sidecars were unchanged. Both original app packages were
+restored afterward; iPhone 15 returned to its initially powered-off simulator state and iPhone 17's working high-cache session
+was restarted. The deployed loader still uses its existing fixed base; this experiment validates the candidate-selection step.
+
+### Automatic base selection and shared DATA preparation
+
+The tracked implementation now extends the fixed-`0x7000000000` prototype above. Before queuing a new simulator session,
+the native broker inspects the supported slidable cache, obtains a 3 GiB RX `mach_vm_map` ANYWHERE reservation using
+`0x180000000` as the hint, and releases it without touching pages. The returned address is the session's common cache base;
+it is not hardcoded by phone model. A previously selected base can be reused for the same cache UUID across a userspace reboot.
+The authenticated bootstrap carries this value to guests (transport ABI 9, bootstrap ABI 6); native helper roles receive zero.
+Rebuild the host, extension and guest transport consumers together.
+
+The host decodes the exact v2 chains once into an immutable `lsb-slide-<cache UUID>-<base>.data` file beside the cache.
+It publishes completed output atomically and validates its header before reuse. Each guest compares the selected base,
+UUID and exact mapping profile, opens the file before changing TLS, and maps its three non-executable regions `MAP_PRIVATE`.
+This shares their initial pages and leaves later guest writes private. It avoids dirtying about 185 MiB separately in every guest.
+The file is **trusted unsigned DATA**, not authenticated by the cache's signature; keep it with the matching trusted runtime.
+It is never used for executable mappings. Signed cache TEXT and read-only metadata continue to use the original cache file.
+
+[The dynamic loader patch](../Tools/patch-ios26-cache-slide.py) takes the original, hash-pinned 23A343 `dyld_sim`, preserves
+the eleven iOS-platform compatibility changes, and installs a signed instruction stub plus a marked 64-byte record in verified
+unused `__DATA_DIRTY` padding. Native preparation validates that writable record and its section boundaries, then supplies the
+selected base there. Changing the base does not modify signed TEXT or require another loader signature. Ordinary low caches
+retain the zero-slide path.
+
+The same tool provides a read-only `--find-only` patchfinder. It searches the entire original pure-instruction section for unique
+contexts covering all five mapping/cleanup edits, then derives the two zero-filled tail locations from parsed segment/section
+boundaries. It emits file/VM addresses and matched context bytes as JSON. The patch path repeats discovery and checks every
+result against the reviewed locations; the complete 23A343 hash pin remains mandatory. This is reproducible discovery for the
+supported loader, not an automatic patcher for unfamiliar dyld versions.
+
+Each guest reserves the complete selected cache span without overwriting existing mappings before the destructive `MAP_FIXED`
+stage. Slidable sessions require retaining the native cache and the native workqueue bridge, even on development devices.
+After mapping cache TEXT, an executable-local VM query must confirm current read/execute permission across the entire mapping;
+successful mmap alone is insufficient. Failure stops that guest before it returns to dyld. Detailed region logs remain opt-in
+through `LSB_TRACE_HANDOFF=1`.
+
+Support remains pinned to the reviewed 1,353-image 23A343 layout: six exact mapping profiles, span `0x7e1b0000`, standard
+v2 chains with no extras or cross-page pointers, 15,156,132 fixups, and the corrected high-address ISA mask. Unknown layouts
+fail closed. Cache UUIDs may differ between compatible builds; UUID equality still binds each prepared data file to its cache.
+The host does not retry another address automatically if a child's reservation conflicts. The first preparation performs about
+225 MiB of data I/O synchronously; it is not evidence of improved boot latency. Local tests cover both observed address ranges,
+configuration boundaries, DATA descriptor routing, VM permission rejection, and ordinary-cache fallback.
+
+On iPhone 15 Pro Max running native iOS 26.1, the automatic path selected `0x300000000` for cache UUID
+`F79708E3-14B8-5968-A655-9E5E5791EFDD`. Initial DATA preparation completed in about 0.4 seconds; later launches reused the same
+read-only file and inode. The first permission probe exposed an SDK compatibility issue: this OS returns 19 words of VM region
+information rather than the current SDK's full structure. The loader now accepts the older response length that contains both
+protection fields and still rejects a mapping without read/execute permission. The repeated `df` run exited zero with cache
+TEXT at `0x300000000`, current protection `r-x`, and all three DATA mappings backed by the prepared file. Cold boot displayed
+SpringBoard and widgets, Contacts rendered its main screen, and a Fish job spawned `df` with exit status zero. These tests used
+no LLDB and retained the native cache.
+
+Userspace reboot remains under investigation: two attempts started a new simulator launchd which died with SIGSEGV after
+about two seconds; a third attempt with an otherwise equivalent exception-reporting shim completed and displayed SpringBoard.
+No exception was reported in that successful attempt. A later normal-shim restart with the alias-corrected cache also completed,
+starting a fresh launchd, SpringBoard and Fish. This does not explain the earlier SIGSEGV failures. The same cache base and DATA inode were reused in the first three attempts,
+so a successful cold boot alone must not be reported as proof of reliable restart. The temporary reporting shim was restored
+to the normal build after capture. Local evidence is under ignored `tmp/base-relocator-20261101/`.
+
+
+### Cached aliases and Swift overlays
+
+The 1,353-image cache is the pinned graphical dependency set, not every dylib in the supplied runtime. Other staged code remains
+in loose files. The original source inventory contains additional private frameworks, plugins and application libraries;
+adding cache aliases does not enlarge that image set.
+
+An application importing `/usr/lib/swift/libswiftNetwork.dylib` exposed missing alias metadata. The original 23A343 file is a
+symlink to `Network.framework/Network`, whose implementation and Swift exports are already cached. The simulator builder's
+filesystem driver does not register symlinks with its cache builder, and runtime staging omits cached Mach-O files. Restoring
+only that symlink on iPhone 15 therefore left a dangling target: native open returned `ENOENT` and guest `dlopen` still failed.
+The temporary symlink was removed after the control test.
+
+[The alias patcher](../Tools/patch-ios26-cache-aliases.py) restores the original 63 cached aliases in the existing signed path-trie
+allocation. It shares identical terminal/subtree nodes and places small nodes first, retaining all 1,353 canonical image indices.
+The 1,416 lookup paths occupy 57,124 of 57,200 bytes. Both pinned Apple traversal implementations accept shared nodes. Independent
+whole-trie decoding and per-path lookup verify the result; every other payload byte is checked unchanged except the cache UUID.
+Mapping extents, prebuilt-loader indices, instructions and v2 fixups are unchanged. The cache is re-signed afterward.
+
+The complete original `libswift*` symlink audit found 12 paths, all targeting cached images: CloudKit, CompatibilitySpan, HomeKit,
+IdentityLookup, Network, PencilKit, QuickLook, ShazamKit, SoundAnalysis, SoundAnalysis_Private, and WebKit at two paths.
+The WebKit source lies under `/System/Cryptexes/OS`, but its install name is `/System/Library/Frameworks/WebKit.framework/WebKit`.
+Alias validation therefore compares resolved source files with the pinned input's source path, independently of its install name.
+The two WebKit aliases are `/usr/lib/swift/libswiftWebKit.dylib` and `/System/Cryptexes/OS/usr/lib/swift/libswiftWebKit.dylib`.
+
+On stock macOS Simulator, resolving a filesystem symlink can still select the cached image. In the
+[expected-on-disk path](https://github.com/apple-oss-distributions/dyld/blob/fd8d0c4d52320ebf64db34f3cb280310d905c5ae/dyld/Loader.cpp#L969-L1022),
+dyld compares filesystem identity, inode and modification time with the cache image entry, rather than comparing Mach-O UUIDs.
+A newly created empty file is not equivalent to the original target; it may be treated as a disk override and rejected as an
+invalid image. The tests above establish the dangling-symlink failure and cache-alias success; no empty-placeholder strategy is
+part of setup.
+
+The first 61-alias cache (UUID `61503381-9FE5-5792-BEE5-717FC5C53033`) passed a pre-main `LC_LOAD_DYLIB` import of Swift Network,
+all 61 cache-path queries, and dynamic loading on iPhone 15 at automatically selected base `0x300000000`. Network was supplied
+by the cache at `0x30fcc1000`; both probes exited zero. The user also confirmed Feather opens. The additional WebKit audit
+reproduced exactly two missing Swift paths before the final 63-alias build.
+
+Final cache UUID `44EAAA94-7C15-563D-A394-13296CB1AD7A` passed all 12 Swift cache-path queries on the same phone. Both WebKit
+aliases successfully loaded the same cached framework at `0x316c70000` and resolved the same `WKWebView` class; the probe
+reported `missing=0 failed=0` and exited zero. The signer verified 125,035 contiguous 16 KiB pages. No AMFI/TXM rejection
+appeared in the captured test window. The native cache remained loaded, no debugger was attached, and transfer checks used
+size/header inspection rather than a post-copy checksum. The final normal cold boot displayed SpringBoard and left launchd and Fish running, with no debugger or diagnostic environment.
+Prior cache files and their prepared DATA remain available for rollback.
+Evidence and source-audit manifests are under ignored `tmp/slidable-full-swift-aliases-20261101/` and
+`tmp/base-relocator-20261101/device15/`.

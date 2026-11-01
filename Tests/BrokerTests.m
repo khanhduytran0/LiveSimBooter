@@ -203,6 +203,7 @@ typedef struct {
     mach_port_t launchdTank;
     pid_t guestPID, parentPID;
     uint32_t executionRole, nativeProductionStatus;
+    uint64_t simulatorCacheBase;
 } RecordedReply;
 
 typedef struct { unsigned identifier; int retainedFD; } TestMessageObject;
@@ -578,7 +579,8 @@ int LSBTransportReply(LSBReceivedMessage *message, int error, pid_t pid, uint64_
         for (unsigned i = 0; i < plan->fdCount; ++i) assert(fcntl(fds[i], F_GETFD) >= 0);
     }
     unsigned identifier = ((TestMessageObject *)message->object)->identifier;
-    replies[replyCount++] = (RecordedReply){identifier, message->kind, error, sendError, pid, requestID, plan != NULL, MACH_PORT_NULL, 0, 0, 0, 0};
+    replies[replyCount++] = (RecordedReply){.objectID = identifier, .kind = message->kind, .error = error, .sendError = sendError,
+        .pid = pid, .requestID = requestID, .deliveredPlan = plan != NULL};
     releaseMessageObject(message->object);
     message->object = NULL;
     if (message->kind == LSB_REQUEST_READY && readyReplyHook) readyReplyHook();
@@ -656,6 +658,7 @@ int LSBTransportReplyBootstrapWithMetadata(LSBReceivedMessage *message, int erro
                                            const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD,
                                            const LSBBootstrapMetadata *metadata) {
     assert(metadata && metadata->guestPID > 0 && metadata->parentPID >= 0 && metadata->ports);
+    assert(metadata->simulatorCacheBase == (metadata->executionRole == LSB_EXECUTION_SIMULATOR ? sessionCacheBase : 0));
     assert(metadata->nativeProductionStatus == (metadata->executionRole == LSB_EXECUTION_SIMULATOR ? testNativeProductionStatus : LSB_NATIVE_PRODUCTION_UNKNOWN));
     if (metadata->executionRole == LSB_EXECUTION_SIMULATOR) {
         assert(metadata->guestBrokerPort == guestBrokerPort && MACH_PORT_VALID(guestBrokerPort));
@@ -677,6 +680,7 @@ int LSBTransportReplyBootstrapWithMetadata(LSBReceivedMessage *message, int erro
     replies[replyCount - 1].parentPID = metadata->parentPID;
     replies[replyCount - 1].executionRole = metadata->executionRole;
     replies[replyCount - 1].nativeProductionStatus = metadata->nativeProductionStatus;
+    replies[replyCount - 1].simulatorCacheBase = metadata->simulatorCacheBase;
     return result;
 }
 void LSBTransportDisposeMessage(LSBReceivedMessage *message) {
@@ -803,6 +807,8 @@ static void resetBroker(void) {
     memset(registeredPorts, 0, sizeof(registeredPorts));
     memset(registeredAudits, 0, sizeof(registeredAudits));
     memset(registeredTimeouts, 0, sizeof(registeredTimeouts));
+    sessionCacheBase = 0;
+    memset(sessionCacheUUID, 0, sizeof(sessionCacheUUID));
     reportedPID = getpid();
     submitError = readySendError = rebootSendError = launchdBootstrapSendError = monitorCreateError = identityCheckError = 0;
     runningBoardError = EACCES;
@@ -1134,6 +1140,7 @@ static void testProductionStatusIsHostOnly(void) {
     for (uint32_t status = LSB_NATIVE_PRODUCTION_UNKNOWN; status <= LSB_NATIVE_DEVELOPMENT; ++status) {
         resetBroker();
         testNativeProductionStatus = status;
+        sessionCacheBase = status == LSB_NATIVE_DEVELOPMENT ? 0x300000000 : 0x7000000000;
         int fd;
         unsigned object;
         LSBReceivedMessage *request = spawnRequest(&fd, &object);
@@ -1144,6 +1151,7 @@ static void testProductionStatusIsHostOnly(void) {
         assert(startingJob);
         handleMessage(messageFor(LSB_REQUEST_CHECKIN, getpid(), 3, 0));
         assert(replies[replyCount - 1].nativeProductionStatus == status);
+        assert(replies[replyCount - 1].simulatorCacheBase == sessionCacheBase);
         assert(replies[replyCount - 1].executionRole == LSB_EXECUTION_SIMULATOR);
     }
     resetBroker();

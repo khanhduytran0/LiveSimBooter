@@ -114,7 +114,7 @@ background audio. AudioQueue, AVAudioEngine and AVAudioPlayer tone probes have p
 
 The optional audio-output and haptic dylibs are separate from the always-loaded C spawn shim. Stage them before enabling either
 feature in the native host; a missing enabled helper prevents guest startup. These settings are broker-owned session decisions,
-not guest environment overrides. The current transport is **ABI 8** (bootstrap ABI 5, child ledger ABI 5): rebuild and deploy the native host,
+not guest environment overrides. The current transport is **ABI 9** (bootstrap ABI 6, child ledger ABI 5): rebuild and deploy the native host,
 LiveProcess extension, core spawn shim and optional helpers together. Do not mix an older installed host with the new overlay.
 Native check-in and readiness retain the single-threaded pipe path. The authenticated check-in additionally supplies a guest-only
 connection endpoint; the simulator creates its sim-to-host XPC connection after libSystem/TLS initialization. Native Metal helpers
@@ -126,6 +126,10 @@ The tracked [cache inventory](../Tools/setup-ios26-cache-inputs.json) freezes 1,
 also imports three `/usr/lib/system` host-support dylibs from the Mac. Their paths/hashes are recorded separately in the build
 manifest. They are not falsely presented as fixed 23A343 inputs, and another Mac OS can produce a different cache requiring
 device validation.
+
+This is the project's full graphical cache, not every dylib in the OS. The original-runtime dependency inventory contains
+many additional plain-arm64 images outside this curated set, including private frameworks and plugins. Keep the uncached
+code/resource staging step below; a cache image count alone does not establish that every app's dependencies are available.
 
 ```sh
 python3 Tools/setup-ios26-cache.py --runtime-root "$LSB_RUNTIME_SOURCE" --validate-only \
@@ -196,6 +200,63 @@ python3 Tools/setup-ios26-cache.py --check-cache "$LSB_WORK/signed-cache/dyld_si
 The signer uses the selected keychain identity without exporting its key. macOS may ask for key access. It generates the
 validated contiguous 16 KiB/v0x20400 signature and fixes the signature-size field before hashing. Ordinary `codesign` alone
 is not the cache signing recipe. The final layout check does not replace the signer's CMS/page-hash checks.
+
+### Optional slidable cache
+
+Keep the established low-cache runtime and loader as a rollback. This alternative builds the same 1,353-image closure at its
+stock preferred base `0x180000000`, retaining exact v2 relocation chains. The native host selects a common address for each
+session and prepares shared, non-executable DATA backing there; see [automatic cache preparation](shared-cache.md#automatic-base-selection-and-shared-data-preparation).
+Use a new output directory and the matching host, extension and guest transport build.
+
+```sh
+LSB_SLIDABLE="$LSB_WORK/slidable"
+mkdir -p "$LSB_SLIDABLE/patched" "$LSB_SLIDABLE/signed"
+python3 -B Tools/setup-ios26-slidable-cache.py --runtime-root "$LSB_RUNTIME_SOURCE" --output-dir "$LSB_SLIDABLE/build" --include-cache-aliases \
+  > "$LSB_SLIDABLE/build-result.json"
+python3 -B Tools/patch-ios26-slidable-cache.py \
+  --source "$LSB_SLIDABLE/build/aliases/dyld_sim_shared_cache_arm64" \
+  --output "$LSB_SLIDABLE/patched/dyld_sim_shared_cache_arm64" > "$LSB_SLIDABLE/compatibility.json"
+python3 Tools/sign-dyld-cache.py "$LSB_SLIDABLE/patched/dyld_sim_shared_cache_arm64" \
+  "$LSB_SLIDABLE/signed/dyld_sim_shared_cache_arm64" \
+  --identity "$LSB_SIGNING_IDENTITY" --identifier "$LSB_BUNDLE_ID" --team "$LSB_TEAM" > "$LSB_SLIDABLE/signing.json"
+python3 -B Tools/setup-ios26-slidable-cache.py --check-cache "$LSB_SLIDABLE/signed/dyld_sim_shared_cache_arm64" --include-cache-aliases \
+  > "$LSB_SLIDABLE/signed-layout.json"
+python3 -B Tools/patch-ios26-cache-slide.py --source "$LSB_RUNTIME_SOURCE/usr/lib/dyld_sim" --find-only \
+  > "$LSB_SLIDABLE/loader-discovery.json"
+python3 -B Tools/patch-ios26-cache-slide.py --source "$LSB_RUNTIME_SOURCE/usr/lib/dyld_sim" \
+  --output "$LSB_SLIDABLE/patched/dyld_sim" > "$LSB_SLIDABLE/loader-patch.json"
+cp "$LSB_SLIDABLE/patched/dyld_sim" "$LSB_SLIDABLE/signed/dyld_sim"
+codesign --force --sign "$LSB_SIGNING_IDENTITY" --identifier "$LSB_BUNDLE_ID" --timestamp=none "$LSB_SLIDABLE/signed/dyld_sim"
+```
+
+The alias option validates the [63 original cached symlinks](../Tools/setup-ios26-cache-aliases.json), then
+[repacks the cache's path trie](../Tools/patch-ios26-cache-aliases.py) in a separate CoW output. The original simulator builder
+ignores symlinks, so merely copying them into its input tree is insufficient. For example, `libswiftNetwork.dylib` is an alias
+of cached `Network.framework/Network`, not another missing binary. All 1,353 canonical indices remain unchanged; the repaired
+trie has 1,416 paths and fits its existing read-only allocation. This includes both normal and Cryptex paths for `libswiftWebKit.dylib`;
+validation uses the pinned input's filesystem source, which can differ from its install name. No additional images, guest hooks or mapping changes are needed.
+The canonical-only `build/unsigned` output remains available for diagnosis; deploy the alias-aware output shown above.
+Copying only the filesystem symlink is insufficient when its canonical target exists solely in the cache: the on-device control
+still failed with `ENOENT` and the same `dlopen` error. The cache needs the alias-to-image entry itself.
+
+The combined compatibility patcher applies the existing metadata and AHAP fixes plus the exported Objective-C ISA mask correction.
+It checks exact original bytes and derives a distinct UUID from the source payload; it does not relabel another cache with a
+known-working UUID. The loader patch includes iOS-platform compatibility and ordinary low-cache support; do not additionally
+run the older base/platform patchers on it. For a fresh runtime staging operation below, substitute
+`$LSB_SLIDABLE/patched/dyld_sim` for `$LSB_WORK/dyld_sim` as the loader input. For an existing runtime, deploy the signed pair
+to `RuntimeRoot/usr/lib/dyld_sim` and `RuntimeRoot/System/Library/Caches/com.apple.dyld/dyld_sim_shared_cache_arm64` only after
+stopping its guests, preserving the previous pair until boot is verified.
+
+The loader's `--find-only` mode writes no binary. It finds unique instruction contexts across the original `__text` section and
+derives the available stub/configuration padding from Mach-O section boundaries. Its JSON records discovered file/VM addresses
+and the original context bytes. Patching repeats discovery and requires agreement with the reviewed 23A343 layout and full
+input hash; missing, ambiguous or moved sites fail rather than accepting another runtime version.
+
+Both setup and native validation currently require the reviewed six-mapping profile, span `0x7e1b0000`, and exact relocation
+counts. Different Mac host-support libraries may fail that check even with the correct 23A343 runtime; audit the new layout
+instead of weakening it. Session DATA files are generated on the phone and remain trusted unsigned input. No per-address
+cache or loader signing is needed, and the native cache stays loaded for these sessions. Local validation alone does not prove
+device signature acceptance or execution.
 
 ## Prepare the loader and guest tools
 

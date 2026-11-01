@@ -9,7 +9,7 @@ static void assertFlags(const char *const environment[], bool retain, bool hardw
 
 static void testDefaultInjection(void) {
     for (uint32_t status = LSB_NATIVE_PRODUCTION_UNKNOWN; status <= LSB_NATIVE_DEVELOPMENT; ++status) {
-        for (LSBNativeCacheLayout layout = LSB_NATIVE_CACHE_LAYOUT_UNKNOWN; layout <= LSB_NATIVE_CACHE_LAYOUT_OVERLAP; ++layout) {
+        for (LSBNativeCacheLayout layout = LSB_NATIVE_CACHE_LAYOUT_UNKNOWN; layout <= LSB_NATIVE_CACHE_LAYOUT_SLIDABLE; ++layout) {
             const char *environment[8] = {"PATH=/usr/bin", LSB_RETAIN_HOST_CACHE_ENV "_EXTRA=1", LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV,
                 "EffectiveProductionStatusAp=0", "LSB_NATIVE_PRODUCTION_STATUS=2", NULL};
             LSBNativeRuntimePolicy policy;
@@ -69,7 +69,7 @@ static void testInvalidInputsAndCapacity(void) {
     LSBNativeRuntimePolicy policy;
     assert(LSBResolveNativeRuntimePolicy(LSB_NATIVE_DEVELOPMENT + 1, LSB_NATIVE_CACHE_LAYOUT_UNKNOWN, NULL, &policy) == EINVAL);
     assert(policy.retainHostCache && policy.hardwareWorkqueue);
-    assert(LSBResolveNativeRuntimePolicy(LSB_NATIVE_DEVELOPMENT, LSB_NATIVE_CACHE_LAYOUT_OVERLAP + 1, NULL, &policy) == EINVAL);
+    assert(LSBResolveNativeRuntimePolicy(LSB_NATIVE_DEVELOPMENT, LSB_NATIVE_CACHE_LAYOUT_SLIDABLE + 1, NULL, &policy) == EINVAL);
     assert(LSBResolveNativeRuntimePolicy(LSB_NATIVE_PRODUCTION_UNKNOWN, LSB_NATIVE_CACHE_LAYOUT_UNKNOWN, NULL, NULL) == EINVAL);
     assert(!LSBResolveNativeRuntimePolicy(LSB_NATIVE_DEVELOPMENT, LSB_NATIVE_CACHE_LAYOUT_UNKNOWN, NULL, &policy));
     const char *environment[3] = {"KEEP=unchanged", NULL, "guard"};
@@ -87,10 +87,35 @@ static void testInvalidInputsAndCapacity(void) {
     assert(LSBAppendNativeRuntimePolicy(environment, &count, 3, policy) == EINVAL);
 }
 
+static void testSlidablePolicy(void) {
+    for (uint32_t status = LSB_NATIVE_PRODUCTION_UNKNOWN; status <= LSB_NATIVE_DEVELOPMENT; ++status) {
+        LSBNativeRuntimePolicy policy;
+        const char *retainOff[] = {LSB_RETAIN_HOST_CACHE_ENV "=0", NULL};
+        const char *hardwareOff[] = {LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV "=0", NULL};
+        const char *bothOn[] = {LSB_RETAIN_HOST_CACHE_ENV "=1", LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV "=1", NULL};
+        assert(!LSBResolveNativeRuntimePolicy(status, LSB_NATIVE_CACHE_LAYOUT_SLIDABLE, NULL, &policy));
+        assert(policy.retainHostCache && policy.hardwareWorkqueue);
+        assert(!LSBResolveNativeRuntimePolicy(status, LSB_NATIVE_CACHE_LAYOUT_SLIDABLE, bothOn, &policy));
+        assert(policy.retainHostCache && policy.hardwareWorkqueue);
+        assert(LSBResolveNativeRuntimePolicy(status, LSB_NATIVE_CACHE_LAYOUT_SLIDABLE, retainOff, &policy) == EPERM);
+        assert(policy.retainHostCache && policy.hardwareWorkqueue);
+        assert(LSBResolveNativeRuntimePolicy(status, LSB_NATIVE_CACHE_LAYOUT_SLIDABLE, hardwareOff, &policy) == EPERM);
+        assert(policy.retainHostCache && policy.hardwareWorkqueue);
+    }
+    assert(LSBValidSimulatorCacheBase(0));
+    assert(LSBValidSimulatorCacheBase(LSB_SLIDABLE_CACHE_PREFERRED_BASE));
+    assert(LSBValidSimulatorCacheBase(UINT64_C(0x7000000000)));
+    assert(!LSBValidSimulatorCacheBase(LSB_SLIDABLE_CACHE_PREFERRED_BASE - 0x4000));
+    assert(!LSBValidSimulatorCacheBase(UINT64_C(0x7000000001)));
+    assert(!LSBValidSimulatorCacheBase(UINT64_C(0x0080000000000000)));
+    assert(!LSBValidSimulatorCacheBase(UINT64_MAX));
+}
+
 int main(void) {
     testDefaultInjection();
     testExplicitFirstMatch();
     testInvalidInputsAndCapacity();
+    testSlidablePolicy();
     puts("Native runtime policy tests passed");
     return 0;
 }

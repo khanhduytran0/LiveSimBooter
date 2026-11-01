@@ -30,6 +30,7 @@
 #include "LocalPOSIX.h"
 #include "LazySignatureClient.h"
 #include "LocalMach.h"
+#include "../ProcessSupport/SlidableCache.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -70,6 +71,8 @@ void debuggerLog(const char *format, ...) {
     lsb::vlog(format, arguments);
     va_end(arguments);
 }
+#include "SlidableCacheImplementation.h"
+
 void publishDebuggerSnapshot(uint64_t state = 0) {
     int error = lsb::publishCompactImageInfo(sActiveProcessInfo, state);
     if (error) {
@@ -105,7 +108,7 @@ const SimSyscallHelpers sHelpers = {
     &lsb::close,
     &lsb::pread,
     &lsb::write,
-    &lsb::mmap,
+    &slidableCacheMmap,
     &lsb::munmap,
     &lsb::madvise,
     &LSBLazySignatureDyldStat,
@@ -193,4 +196,12 @@ bool LSBInitializeSimProcessInfo(const mach_header *dyldHeader, const char *dyld
     sProcessInfo.platform = PLATFORM_IOSSIMULATOR;
     sProcessInfoInitialized = true;
     return true;
+}
+
+int LSBPrepareSlidableCacheData(const char *runtimeRoot, uint64_t actualBase, const uint8_t cacheUUID[16], bool trace) {
+    return prepareSlidableData(runtimeRoot, actualBase, cacheUUID, trace);
+}
+
+const LSBSlidableDataHeader *LSBPreparedSlidableCacheData() {
+    return sSlidableCache.enabled ? &sSlidableCache.backing : nullptr;
 }

@@ -96,17 +96,18 @@ def original_inputs(root, inventory):
                 input_bytes=total, builder=str(builder), builder_sha256=inventory['builder_sha256'], host_libraries=hosts)
 
 
-def patch_builder(data, inventory):
+def patch_builder(data, inventory, *, patches=PATCHES, expected_sha256=None):
     require(hashlib.sha256(data).hexdigest() == inventory['builder_sha256'], 'Builder hash mismatch')
     patched = bytearray(data)
-    for offset, before, after, _ in PATCHES:
+    for offset, before, after, _ in patches:
         require(struct.unpack_from('<I', data, offset)[0] == before, f'Builder instruction mismatch at {offset:#x}')
         struct.pack_into('<I', patched, offset, after)
-    require(hashlib.sha256(patched).hexdigest() == inventory['patched_builder_sha256_before_signing'], 'Patched builder hash mismatch')
+    expected = expected_sha256 if expected_sha256 is not None else inventory['patched_builder_sha256_before_signing']
+    require(hashlib.sha256(patched).hexdigest() == expected, 'Patched builder hash mismatch')
     return patched
 
 
-def check_cache(path, inventory):
+def check_cache(path, inventory, *, expected_base=BASE, shared_region_limit=SHARED_REGION):
     with path.open('rb') as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
         def unpack(fmt, offset):
             require(0 <= offset <= len(data) - struct.calcsize(fmt), f'Cache field outside file at {offset:#x}')
@@ -120,7 +121,7 @@ def check_cache(path, inventory):
 
         require(data[:16] == b'dyld_v1   arm64\0', 'Expected arm64 cache')
         base, span = unpack('<QQ', 224)
-        require(base == BASE and 0 < span < (1 << 32), 'Unexpected cache base/span')
+        require(base == expected_base and 0 < span < (1 << 32), 'Unexpected cache base/span')
         require(unpack('<I', 216)[0] == 7 and unpack('<I', 396)[0] == 0, 'Expected a single-file iOS simulator cache')
         offset, count = unpack('<II', 16)
         require(0 < count <= 64, 'Invalid cache mapping count')
@@ -129,7 +130,8 @@ def check_cache(path, inventory):
             start, size, file_offset, maximum, initial = unpack('<QQQII', offset + index * 32)
             require(size and base <= start < start + size <= base + span, 'Mapping outside cache reservation')
             require(file_offset + size <= len(data) and initial & ~maximum == 0 and maximum & ~7 == 0, 'Invalid mapping extent/protection')
-            require(not (maximum & 6) or start + size <= SHARED_REGION, 'Executable/writable cache mapping crosses native shared region')
+            if shared_region_limit is not None:
+                require(not (maximum & 6) or start + size <= shared_region_limit, 'Executable/writable cache mapping crosses native shared region')
             require(all(start + size <= other['start'] or start >= other['end'] for other in mappings), 'Overlapping cache mappings')
             mappings.append(dict(start=start, end=start + size, size=size, file_offset=file_offset, maximum=maximum, initial=initial))
         require(any(region['initial'] & 4 for region in mappings), 'No executable mapping')
@@ -178,16 +180,17 @@ def check_cache(path, inventory):
         return dict(cache=str(path), runtime_build='23A343', base=hex(base), reservation_end=hex(base + span),
                     bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), images=count, local_symbols=local_symbols,
                     export_tries=exports, function_starts=function_starts, mappings=mappings,
-                    all_code_and_writable_mappings_below=hex(SHARED_REGION), signature_validation='not_performed',
+                    all_code_and_writable_mappings_below=hex(shared_region_limit) if shared_region_limit is not None else None,
+                    signature_validation='not_performed',
                     note='Offline layout validation only. Signature acceptance and execution require separate device validation.')
 
 
-def build(root, output, inventory, inputs):
+def build(root, output, inventory, inputs, *, base=BASE, patches=PATCHES, patched_builder_sha256=None, validator=check_cache):
     require(not os.path.lexists(output), 'Output already exists; choose a new output directory')
     require(not is_within(output, root), 'Output must not be inside the original RuntimeRoot')
     output.parent.mkdir(parents=True, exist_ok=True)
     require(shutil.disk_usage(output.parent).free >= inputs['input_bytes'] + 5 * 1024 ** 3, 'Insufficient space for isolated inputs and cache')
-    patched = patch_builder(Path(inputs['builder']).read_bytes(), inventory)
+    patched = patch_builder(Path(inputs['builder']).read_bytes(), inventory, patches=patches, expected_sha256=patched_builder_sha256)
     output.mkdir()
     stage = output / 'root'
     for record in inventory['images']:
@@ -205,10 +208,11 @@ def build(root, output, inventory, inputs):
     subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', builder], check=True)
     command = [str(builder), '-root', str(stage), '-cache_dir', str(output / 'unsigned'), '-iOS', '-arch', 'arm64',
                '-force', '-verbose', '-time-passes', '-stats']
-    manifest = dict(inputs, base=hex(BASE), expected_images=sorted(
+    manifest = dict(inputs, base=hex(base), expected_images=sorted(
         {item['install_name'] for item in inventory['images']} | set(inventory['automatically_supplied_host_libraries'])),
         inventory_sha256=sha(HERE / 'setup-ios26-cache-inputs.json'), command=command,
-        patches=[dict(offset=hex(o), before=hex(b), after=hex(a), instruction=s) for o, b, a, s in PATCHES],
+        patched_builder_sha256_before_signing=hashlib.sha256(patched).hexdigest(),
+        patches=[dict(offset=hex(o), before=hex(b), after=hex(a), instruction=s) for o, b, a, s in patches],
         cache_identity_signed=False, device_modified=False)
     (output / 'stage-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     started = time.monotonic()
@@ -218,7 +222,7 @@ def build(root, output, inventory, inputs):
     require(result.returncode == 0, f'Cache build failed; inspect {output / "build.log"}')
     for host in inputs['host_libraries']:
         require(sha(Path(host['path'])) == host['sha256'], f'Host library changed during build: {host["path"]}')
-    report = check_cache(output / 'unsigned/dyld_sim_shared_cache_arm64', inventory)
+    report = validator(output / 'unsigned/dyld_sim_shared_cache_arm64', inventory)
     (output / 'validation.json').write_text(json.dumps(report, indent=2) + '\n')
     return report
 

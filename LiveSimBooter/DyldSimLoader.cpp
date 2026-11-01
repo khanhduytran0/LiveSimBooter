@@ -36,6 +36,7 @@
 #include "HostPreparation.h"
 #include "SharedCacheHandoff.h"
 #include "SimSyscallHelpers.h"
+#include "SlidableDyldConfig.h"
 #include "LazySignatureClient.h"
 
 #include <algorithm>
@@ -61,6 +62,9 @@
 #endif
 
 namespace {
+
+uint64_t configuredCacheBase;
+bool imageMappingStarted;
 
 struct FileMapping {
     int fd = -1;
@@ -134,12 +138,14 @@ bool captureMainStack(uintptr_t &top, size_t &size, std::string &error) {
 struct CacheReservationHeader {
     char magic[16];
     uint32_t mappingOffset, mappingCount;
-    uint8_t metadataBeforeSharedRegion[200];
+    uint8_t metadataBeforeUUID[64];
+    uint8_t uuid[16];
+    uint8_t metadataBeforeSharedRegion[120];
     uint64_t sharedRegionStart, sharedRegionSize;
 };
 static_assert(offsetof(CacheReservationHeader, sharedRegionStart) == 224 && offsetof(CacheReservationHeader, sharedRegionSize) == 232);
 static_assert(sizeof(CacheReservationHeader) == 240);
-struct CacheReservation { uintptr_t address = 0; size_t size = 0; };
+struct CacheReservation { uintptr_t address = 0; size_t size = 0; uint8_t uuid[16] = {}; };
 
 bool rangesOverlap(uintptr_t first, size_t firstSize, uintptr_t second, size_t secondSize) {
     if (!firstSize || !secondSize) return false;
@@ -158,6 +164,7 @@ bool parseCacheReservation(const CacheReservationHeader &header, uint64_t fileSi
         header.sharedRegionSize > UINTPTR_MAX - header.sharedRegionStart)
         return fail(error, "Simulator cache reservation is empty, unaligned or overflows the address space");
     cache = {static_cast<uintptr_t>(header.sharedRegionStart), static_cast<size_t>(header.sharedRegionSize)};
+    memcpy(cache.uuid, header.uuid, sizeof(cache.uuid));
     return true;
 }
 
@@ -179,13 +186,65 @@ bool readCacheReservation(const char *path, CacheReservation &cache, std::string
         if (!amount) return fail(error, "Simulator cache header was truncated while reading");
         count += static_cast<size_t>(amount);
     }
-    return parseCacheReservation(header, info.st_size, cache, error);
+    if (!parseCacheReservation(header, info.st_size, cache, error)) return false;
+    if (header.sharedRegionStart == LSB_SLIDABLE_CACHE_PREFERRED_BASE) {
+        if (!configuredCacheBase || header.sharedRegionSize != LSB_SLIDABLE_CACHE_SPAN || !LSBSlidableCacheUUIDIsNonzero(header.uuid))
+            return fail(error, "Slidable cache requires a matching host-selected base and prepared data backing");
+        cache.address = configuredCacheBase;
+    } else if (configuredCacheBase) return fail(error, "Host-selected cache base does not match this runtime cache");
+    return true;
 }
 
 bool readRuntimeCacheReservation(const char *rootPath, CacheReservation &cache, std::string &error) {
     if (!rootPath || rootPath[0] != '/') return fail(error, "An absolute RuntimeRoot path is required");
     std::string path = std::string(rootPath) + "/System/Library/Caches/com.apple.dyld/dyld_sim_shared_cache_arm64";
-    return readCacheReservation(path.c_str(), cache, error);
+    if (!readCacheReservation(path.c_str(), cache, error)) return false;
+    return !configuredCacheBase || cache.size || fail(error, "Selected cache base requires an installed simulator cache");
+}
+
+bool configureSlidableDyld(const LSBMappedImage &image, const LSBSlidableDataHeader &backing, std::string &error) {
+    constexpr uint64_t location = LSB_DYLD_SLIDE_CONFIG_VM_OFFSET;
+    if (!image.header || image.mappedSize < sizeof(mach_header_64) || !contains(image.mappedSize, location, sizeof(LSBDyldSlideConfiguration)))
+        return fail(error, "Slidable dyld configuration is outside the mapped image");
+    const auto *header = reinterpret_cast<const mach_header_64 *>(image.header);
+    if (header->magic != MH_MAGIC_64 || header->cputype != CPU_TYPE_ARM64 || header->cpusubtype != CPU_SUBTYPE_ARM64_ALL ||
+        !contains(image.mappedSize, sizeof(*header), header->sizeofcmds)) return fail(error, "Unsupported slidable dyld header");
+    const auto *bytes = reinterpret_cast<const uint8_t *>(header);
+    size_t cursor = sizeof(*header), end = cursor + header->sizeofcmds;
+    bool found = false;
+    for (uint32_t index = 0; index < header->ncmds; ++index) {
+        if (!contains(end, cursor, sizeof(load_command))) return fail(error, "Truncated slidable dyld load command");
+        auto command = read<load_command>(bytes + cursor);
+        if (command.cmdsize < sizeof(command) || !contains(end, cursor, command.cmdsize)) return fail(error, "Invalid slidable dyld load command");
+        if (command.cmd == LC_SEGMENT_64) {
+            if (command.cmdsize < sizeof(segment_command_64)) return fail(error, "Truncated slidable dyld segment");
+            auto segment = read<segment_command_64>(bytes + cursor);
+            static constexpr char dataSegment[16] = "__DATA_DIRTY";
+            if (!memcmp(segment.segname, dataSegment, sizeof(dataSegment))) {
+                if (found || segment.vmaddr != 0x7c000 || segment.vmsize != 0x4000 || segment.fileoff != 0x5c000 || segment.filesize != 0x4000 ||
+                    segment.initprot != (VM_PROT_READ | VM_PROT_WRITE) || segment.maxprot != (VM_PROT_READ | VM_PROT_WRITE) ||
+                    !contains(command.cmdsize, sizeof(segment), uint64_t(segment.nsects) * sizeof(section_64)))
+                    return fail(error, "Slidable dyld requires the pinned writable DATA_DIRTY layout");
+                for (uint32_t sectionIndex = 0; sectionIndex < segment.nsects; ++sectionIndex) {
+                    auto section = read<section_64>(bytes + cursor + sizeof(segment) + sectionIndex * sizeof(section_64));
+                    if (rangesOverlap(section.addr, section.size, location, sizeof(LSBDyldSlideConfiguration)))
+                        return fail(error, "Slidable dyld configuration overlaps an original section");
+                }
+                found = true;
+            }
+        }
+        cursor += command.cmdsize;
+    }
+    if (!found || cursor != end) return fail(error, "Slidable dyld configuration segment is missing");
+    auto *configuration = reinterpret_cast<LSBDyldSlideConfiguration *>(const_cast<uint8_t *>(bytes) + location);
+    const LSBDyldSlideConfiguration initial = {LSB_DYLD_SLIDE_CONFIG_MAGIC, 1, sizeof(*configuration), LSB_DYLD_SLIDE_PREFERRED_BASE, 0, 0, {}};
+    if (memcmp(configuration, &initial, sizeof(initial))) return fail(error, "dyld_sim lacks the expected uninitialized slide configuration");
+    if (backing.preferredBase != initial.preferredBase || backing.actualBase != configuredCacheBase)
+        return fail(error, "dyld_sim slide configuration disagrees with prepared cache data");
+    configuration->actualBase = backing.actualBase;
+    configuration->cacheSpan = backing.cacheSpan;
+    memcpy(configuration->cacheUUID, backing.cacheUUID, sizeof(configuration->cacheUUID));
+    return true;
 }
 
 bool lowImageRange(const Layout &layout, const CacheReservation &cache, size_t pageSize,
@@ -777,6 +836,7 @@ bool mapFile(const char *path, LSBMappedImage *image, char *error, size_t errorS
         return false;
     }
     *image = {};
+    imageMappingStarted = true;
     std::string message;
     CacheReservation cache;
     bool success = (!rootPath || readRuntimeCacheReservation(rootPath, cache, message)) && mapImage(path, *image, message, expectedType, cache);
@@ -789,6 +849,14 @@ bool mapFile(const char *path, LSBMappedImage *image, char *error, size_t errorS
 }
 
 } // namespace
+
+int LSBConfigureRuntimeCacheBase(uint64_t actualBase) {
+    if (imageMappingStarted) return EBUSY;
+    if (actualBase && (actualBase < LSB_SLIDABLE_CACHE_PREFERRED_BASE || (actualBase & 0x3fff) ||
+        actualBase > UINT64_C(0x0080000000000000) - LSB_SLIDABLE_CACHE_SPAN)) return EINVAL;
+    configuredCacheBase = actualBase;
+    return 0;
+}
 
 bool LSBMapDyldSim(const char *path, LSBMappedImage *image, char *error, size_t errorSize) {
     return mapFile(path, image, error, errorSize, MH_DYLINKER);
@@ -833,6 +901,17 @@ int LSBEnterDyldSim(const LSBMappedImage *image, const mach_header *executable, 
     if (!readRuntimeCacheReservation(rootPath, cache, stackError)) {
         fprintf(stderr, "Cannot prepare simulator cache reservation: %s\n", stackError.c_str());
         return 1;
+    }
+    int backingError = LSBPrepareSlidableCacheData(rootPath, configuredCacheBase, cache.uuid, traceHandoff);
+    if (backingError) {
+        fprintf(stderr, "Cannot prepare simulator shared data backing: %s\n", strerror(backingError));
+        return 1;
+    }
+    if (const LSBSlidableDataHeader *backing = LSBPreparedSlidableCacheData()) {
+        if (!retainHostCacheRequested(envp) || !configureSlidableDyld(*image, *backing, stackError)) {
+            fprintf(stderr, "Cannot prepare slidable dyld_sim: %s\n", stackError.empty() ? "native cache retention is required" : stackError.c_str());
+            return 1;
+        }
     }
     if (cache.size) {
         bool safe = dladdr(reinterpret_cast<const void *>(&LSBEnterDyldSim), &resident) && resident.dli_fbase;

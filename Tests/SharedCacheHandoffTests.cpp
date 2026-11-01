@@ -19,7 +19,7 @@ static void check(bool condition, const char *message) {
     if (!condition) { fprintf(stderr, "FAIL: %s\n", message); exit(1); }
 }
 
-enum class Event { ReadTSD, Query, DebugBegin, Switch, Detach, Restore, DebugFinish, DebugCancel, Reserve, Diagnostic, Entry, Main, Exit };
+enum class Event { ReadTSD, Query, DebugBegin, Switch, Detach, Restore, DebugFinish, DebugCancel, Acquire, Release, Reserve, Diagnostic, Entry, Main, Exit };
 static std::vector<Event> events;
 static constexpr uintptr_t hostTSD = 0x100020e0, simulatorTSD = 0x140000e0;
 static uintptr_t currentTSD;
@@ -36,6 +36,11 @@ static size_t oldStackSize;
 static unsigned reservationCalls;
 static bool failReservation, wrongReservationAddress;
 static std::string reservationDiagnostic;
+static LSBSlidableDataHeader slidableBacking;
+static bool useSlidableBacking, failAcquisition;
+static unsigned acquiredRanges, releasedRanges;
+
+const LSBSlidableDataHeader *LSBPreparedSlidableCacheData() { return useSlidableBacking ? &slidableBacking : nullptr; }
 
 static void expectEvents(std::initializer_list<Event> sequence) {
     check(events.size() == sequence.size(), "expected operation count");
@@ -45,6 +50,20 @@ static void expectEvents(std::initializer_list<Event> sequence) {
 
 namespace lsb {
 int *errnoAddress() { static int error = EACCES; return &error; }
+mach_port_t task_self_trap() { return 0x123; }
+kern_return_t vm_allocate(vm_map_t task, vm_address_t *address, vm_size_t size, int flags) {
+    events.push_back(Event::Acquire); ++acquiredRanges;
+    check(task == 0x123 && flags == VM_FLAGS_FIXED && address && *address == slidableBacking.actualBase && size == slidableBacking.cacheSpan,
+          "slidable reservation uses fixed allocation without overwrite");
+    check(currentTSD == hostTSD && !debugBeginCalls && !switchCalls, "non-overwriting reservation happens while native TLS is intact");
+    return failAcquisition ? KERN_NO_SPACE : KERN_SUCCESS;
+}
+kern_return_t vm_deallocate(vm_map_t task, vm_address_t address, vm_size_t size) {
+    events.push_back(Event::Release); ++releasedRanges;
+    check(task == 0x123 && address == slidableBacking.actualBase && size == slidableBacking.cacheSpan && currentTSD == hostTSD,
+          "pre-entry failure releases only the acquired range with native TLS restored");
+    return KERN_SUCCESS;
+}
 
 ssize_t write(int fd, const void *bytes, size_t size) {
     events.push_back(Event::Diagnostic);
@@ -251,6 +270,8 @@ static void reset(int query = 0, int detach = 0, bool hasMain = true) {
     reservationCalls = 0;
     failReservation = wrongReservationAddress = false;
     reservationDiagnostic.clear();
+    useSlidableBacking = failAcquisition = false;
+    acquiredRanges = releasedRanges = 0;
 }
 
 static void expectExit(const LSBDyldSimLaunch &launch, int status, int entries = 1, int mains = 1) {
@@ -313,6 +334,27 @@ int main() {
     reserved.cacheSize = 0x100000;
     LSBDyldSimLaunch retained = reserved;
     retained.retainHostCache = true;
+    LSBDyldSimLaunch slidable = retained;
+    slidable.cacheAddress = 0x7000000000; slidable.cacheSize = LSB_SLIDABLE_CACHE_SPAN;
+    slidableBacking.actualBase = slidable.cacheAddress; slidableBacking.cacheSpan = slidable.cacheSize;
+    reset(); useSlidableBacking = true;
+    expectExit(slidable, 0);
+    check(acquiredRanges == 1 && !releasedRanges && !detachCalls, "high cache owns its complete range while retaining the native cache");
+    expectEvents({Event::ReadTSD, Event::Query, Event::Acquire, Event::DebugBegin, Event::Switch, Event::DebugFinish,
+                  Event::Reserve, Event::Entry, Event::Main, Event::Exit});
+    reset(); useSlidableBacking = true; failAcquisition = true;
+    expectReturn(&slidable, EADDRINUSE);
+    check(!debugBeginCalls && !switchCalls && !reservationCalls && !releasedRanges, "occupied high range is rejected without replacing or releasing it");
+    reset(); useSlidableBacking = true; debugBeginError = EIO;
+    expectReturn(&slidable, EIO);
+    check(acquiredRanges == 1 && releasedRanges == 1 && !switchCalls, "debugger preparation failure releases the acquired high range");
+    reset(); useSlidableBacking = true; failSwitch = true;
+    expectReturn(&slidable, EIO);
+    check(acquiredRanges == 1 && releasedRanges == 1 && restoreCalls == 1, "TLS failure restores native state and releases the acquired high range");
+    reset(); useSlidableBacking = true;
+    slidable.retainHostCache = false;
+    expectReturn(&slidable, EPERM);
+    check(!acquiredRanges && !debugBeginCalls && !detachCalls, "slidable cache cannot request native-cache detachment");
     for (uint64_t nativeBase : {uint64_t(0x180000000), uint64_t(0x120100000)}) {
         reset();
         queryAddress = nativeBase;

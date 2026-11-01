@@ -34,6 +34,8 @@
 #include "DebuggerBridge.h"
 #include "LocalPOSIX.h"
 #include "LocalRuntime.h"
+#include "LocalMach.h"
+#include "SimSyscallHelpers.h"
 
 #include <errno.h>
 #include <sys/mman.h>
@@ -123,19 +125,35 @@ __attribute__((noinline, no_stack_protector)) int LSBDetachHostCacheAndEnter(con
     int error = sharedRegionCheck(&existingCacheAddress);
     if (error && error != EINVAL && error != ENOMEM) return error;
     bool hasCache = !error;
+    const LSBSlidableDataHeader *backing = LSBPreparedSlidableCacheData();
+    const bool slidable = backing && backing->actualBase == launch->cacheAddress && backing->cacheSpan == launch->cacheSize;
+    if (backing && !slidable) return EINVAL;
+    if (slidable && !launch->retainHostCache) return EPERM;
     if (launch->retainHostCache) {
         if (!hasCache || !existingCacheAddress) return ENOTSUP;
-        // The shared-region query gives its lowest cache header; retaining only reservations below it is conservative.
-        if (launch->cacheAddress + launch->cacheSize > existingCacheAddress) return EADDRINUSE;
+        if (slidable) {
+            // MAP_FIXED is safe only inside a range we acquired without replacing existing entries, before changing TLS.
+            vm_address_t address = launch->cacheAddress;
+            kern_return_t result = lsb::vm_allocate(lsb::task_self_trap(), &address, launch->cacheSize, VM_FLAGS_FIXED);
+            if (result != KERN_SUCCESS) return EADDRINUSE;
+            if (address != launch->cacheAddress) {
+                lsb::vm_deallocate(lsb::task_self_trap(), address, launch->cacheSize);
+                return EADDRINUSE;
+            }
+        } else if (launch->cacheAddress + launch->cacheSize > existingCacheAddress) return EADDRINUSE;
     }
 
     error = lsb::beginDebuggerHandoff();
-    if (error) return error;
+    if (error) {
+        if (slidable) lsb::vm_deallocate(lsb::task_self_trap(), launch->cacheAddress, launch->cacheSize);
+        return error;
+    }
 
     // From this switch onward, even a mapped host libSystem cannot safely use our fresh pthread state.
     if (!lsb::setTSDBase(launch->thread.simulatorTSD)) {
         if (!lsb::setTSDBase(launch->thread.hostTSD)) exitProcess(127);
         lsb::cancelDebuggerHandoff();
+        if (slidable) lsb::vm_deallocate(lsb::task_self_trap(), launch->cacheAddress, launch->cacheSize);
         return EIO;
     }
     bool detachCache = hasCache && !launch->retainHostCache;

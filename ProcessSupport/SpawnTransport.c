@@ -56,16 +56,20 @@ static bool signedValue(xpc_object_t dictionary, const char *key, int64_t *value
     return true;
 }
 
-static int decodeExecutionRole(xpc_object_t dictionary, uint32_t *role, uint32_t *productionStatus) {
+static int decodeExecutionRole(xpc_object_t dictionary, uint32_t *role, uint32_t *productionStatus, uint64_t *cacheBase) {
     *role = LSB_EXECUTION_SIMULATOR;
     *productionStatus = LSB_NATIVE_PRODUCTION_UNKNOWN;
-    // Version 4 supplies a separate simulator-to-host RPC endpoint. Legacy replies cannot authorize the current bootstrap policy.
-    uint64_t version, value, status;
+    *cacheBase = 0;
+    // Bootstrap 6 adds the native session cache base. Guest environment values cannot select it.
+    uint64_t version, value, status, base;
     if (!unsignedValue(dictionary, "bootstrap-version", &version) || version != LSB_BOOTSTRAP_VERSION ||
         !unsignedValue(dictionary, "execution-role", &value) || value > LSB_EXECUTION_NATIVE_SIGNER ||
-        !unsignedValue(dictionary, "native-production-status", &status) || status > LSB_NATIVE_DEVELOPMENT) return EPROTO;
+        !unsignedValue(dictionary, "native-production-status", &status) || status > LSB_NATIVE_DEVELOPMENT ||
+        !unsignedValue(dictionary, "simulator-cache-base", &base) || !LSBValidSimulatorCacheBase(base) ||
+        (value != LSB_EXECUTION_SIMULATOR && base)) return EPROTO;
     *role = (uint32_t)value;
     *productionStatus = (uint32_t)status;
+    *cacheBase = base;
     return 0;
 }
 
@@ -444,7 +448,7 @@ int LSBTransportCheckIn(LSBBootstrapReply *result, int fds[LSB_MAX_FDS]) {
         result->pid = pid;
         if (!error) error = remoteError;
         if (!error && (!result->requestID || pid <= 0)) error = EPROTO;
-        if (!error) error = decodeExecutionRole(reply, &result->executionRole, &result->nativeProductionStatus);
+        if (!error) error = decodeExecutionRole(reply, &result->executionRole, &result->nativeProductionStatus, &result->simulatorCacheBase);
         if (!error) error = decodeTaskCapture(reply, result->executionRole, &result->taskCapture);
         if (!error) {
             xpc_object_t endpoint = xpc_dictionary_get_value(reply, "guest-broker-port");
@@ -503,6 +507,7 @@ int LSBTransportCheckIn(LSBBootstrapReply *result, int fds[LSB_MAX_FDS]) {
     if (reply) xpc_release(reply);
     if (error) {
         result->nativeProductionStatus = LSB_NATIVE_PRODUCTION_UNKNOWN;
+        result->simulatorCacheBase = 0;
         closeFDs(fds);
         if (result->statusFD >= 0) close(result->statusFD);
         if (result->wakeFD >= 0) close(result->wakeFD);
@@ -979,7 +984,8 @@ void LSBTransportDisposeMessage(LSBReceivedMessage *message) {
 static int replyToMessage(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
                           const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], bool bootstrap, int statusFD, int wakeFD,
                           mach_port_t tankPort, const LSBSpawnPorts *ports, pid_t guestPID, pid_t parentPID, uint32_t executionRole,
-                          uint32_t productionStatus, const LSBTaskPortCaptureOffer *taskCapture, mach_port_t guestBrokerPort, mach_port_t lazySigningPort) {
+                          uint32_t productionStatus, uint64_t cacheBase, const LSBTaskPortCaptureOffer *taskCapture,
+                          mach_port_t guestBrokerPort, mach_port_t lazySigningPort) {
     if (!message || !message->object || error < 0 || pid < 0) return EINVAL;
     xpc_object_t reply = xpc_dictionary_create_reply((xpc_object_t)message->object);
     if (!reply) {
@@ -1000,7 +1006,8 @@ static int replyToMessage(LSBReceivedMessage *message, int error, pid_t pid, uin
         if (!encodingError && executionRole == LSB_EXECUTION_SIMULATOR && !sendRight(guestBrokerPort)) encodingError = EINVAL;
         if (!encodingError && lazySigningPort != MACH_PORT_NULL &&
             (executionRole != LSB_EXECUTION_SIMULATOR || !sendRight(lazySigningPort))) encodingError = EINVAL;
-        if (!encodingError && !LSBValidNativeProductionStatus(productionStatus)) encodingError = EINVAL;
+        if (!encodingError && (!LSBValidNativeProductionStatus(productionStatus) || !LSBValidSimulatorCacheBase(cacheBase) ||
+            (executionRole != LSB_EXECUTION_SIMULATOR && cacheBase))) encodingError = EINVAL;
         if (!encodingError) encodingError = validateTaskCapture(taskCapture, executionRole);
         if (!encodingError) {
             xpc_object_t status = xpc_fd_create(statusFD), wake = xpc_fd_create(wakeFD);
@@ -1020,6 +1027,7 @@ static int replyToMessage(LSBReceivedMessage *message, int error, pid_t pid, uin
             xpc_dictionary_set_uint64(reply, "bootstrap-version", LSB_BOOTSTRAP_VERSION);
             xpc_dictionary_set_uint64(reply, "execution-role", executionRole);
             xpc_dictionary_set_uint64(reply, "native-production-status", productionStatus);
+            xpc_dictionary_set_uint64(reply, "simulator-cache-base", cacheBase);
             if (executionRole == LSB_EXECUTION_SIMULATOR) xpc_dictionary_set_mach_send(reply, "guest-broker-port", guestBrokerPort);
             if (MACH_PORT_VALID(lazySigningPort)) xpc_dictionary_set_mach_send(reply, "lazy-signing-port", lazySigningPort);
             if (taskCapture && taskCapture->port != MACH_PORT_NULL) {
@@ -1040,7 +1048,7 @@ static int replyToMessage(LSBReceivedMessage *message, int error, pid_t pid, uin
 int LSBTransportReply(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
                       const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS]) {
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, false, -1, -1, MACH_PORT_NULL, NULL, 0, 0,
-                          LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, NULL, MACH_PORT_NULL, MACH_PORT_NULL);
+                          LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, 0, NULL, MACH_PORT_NULL, MACH_PORT_NULL);
 }
 
 int LSBTransportReplyEntitlements(LSBReceivedMessage *message, int error, const void *bytes, size_t size) {
@@ -1163,14 +1171,14 @@ int LSBTransportReplyProcessIdentity(LSBReceivedMessage *message, int error, con
 int LSBTransportReplyBootstrap(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
                                const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, mach_port_t guestBrokerPort) {
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, true, statusFD, wakeFD,
-                          MACH_PORT_NULL, NULL, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, NULL, guestBrokerPort, MACH_PORT_NULL);
+                          MACH_PORT_NULL, NULL, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, 0, NULL, guestBrokerPort, MACH_PORT_NULL);
 }
 
 int LSBTransportReplyBootstrapWithPorts(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
                                         const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], int statusFD, int wakeFD, const LSBSpawnPorts *ports,
                                         mach_port_t guestBrokerPort) {
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, true, statusFD, wakeFD,
-                          MACH_PORT_NULL, ports, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, NULL, guestBrokerPort, MACH_PORT_NULL);
+                          MACH_PORT_NULL, ports, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, 0, NULL, guestBrokerPort, MACH_PORT_NULL);
 }
 
 int LSBTransportReplyBootstrapWithMetadata(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
@@ -1179,7 +1187,7 @@ int LSBTransportReplyBootstrapWithMetadata(LSBReceivedMessage *message, int erro
     if (!metadata || (metadata->launchdTankPort != MACH_PORT_NULL && !sendRight(metadata->launchdTankPort))) return EINVAL;
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, true, statusFD, wakeFD,
                           metadata->launchdTankPort, metadata->ports, metadata->guestPID, metadata->parentPID, metadata->executionRole,
-                          metadata->nativeProductionStatus, &metadata->taskCapture, metadata->guestBrokerPort, metadata->lazySigningPort);
+                          metadata->nativeProductionStatus, metadata->simulatorCacheBase, &metadata->taskCapture, metadata->guestBrokerPort, metadata->lazySigningPort);
 }
 
 int LSBTransportReplyLaunchdBootstrap(LSBReceivedMessage *message, int error, pid_t pid, uint64_t requestID, const char *runtimeRoot,
@@ -1187,7 +1195,7 @@ int LSBTransportReplyLaunchdBootstrap(LSBReceivedMessage *message, int error, pi
                                       mach_port_t guestBrokerPort) {
     if (!MACH_PORT_VALID(tankPort)) return EINVAL;
     return replyToMessage(message, error, pid, requestID, runtimeRoot, plan, fds, true, statusFD, wakeFD,
-                          tankPort, NULL, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, NULL, guestBrokerPort, MACH_PORT_NULL);
+                          tankPort, NULL, pid, getpid(), LSB_EXECUTION_SIMULATOR, LSB_NATIVE_PRODUCTION_UNKNOWN, 0, NULL, guestBrokerPort, MACH_PORT_NULL);
 }
 
 static int decodeRequest(LSBReceivedMessage *message) {
@@ -1211,7 +1219,7 @@ static int decodeRequest(LSBReceivedMessage *message) {
         message->error = (int)childError;
         if (message->replyConnection && (kind == LSB_REQUEST_CHECKIN || kind == LSB_REQUEST_READY)) error = EPROTO;
         if (xpc_dictionary_get_value(request, "execution-role") || xpc_dictionary_get_value(request, "bootstrap-version") ||
-            xpc_dictionary_get_value(request, "native-production-status") || xpc_dictionary_get_value(request, "task-capture-port") ||
+            xpc_dictionary_get_value(request, "native-production-status") || xpc_dictionary_get_value(request, "simulator-cache-base") || xpc_dictionary_get_value(request, "task-capture-port") ||
             xpc_dictionary_get_value(request, "task-capture-nonce") || xpc_dictionary_get_value(request, "process-task") ||
             xpc_dictionary_get_value(request, "guest-broker-port") || xpc_dictionary_get_value(request, "lazy-signing-port")) error = EPROTO;
         // This control request must carry only its four-field envelope, including no capabilities under unknown keys.

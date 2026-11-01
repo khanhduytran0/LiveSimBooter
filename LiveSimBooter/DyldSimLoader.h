@@ -17,6 +17,10 @@ typedef struct {
     uintptr_t entry;
 } LSBMappedImage;
 
+// Trusted native bootstrap metadata, configured before mapping either image. Zero selects the ordinary low-cache path.
+// The selected nonzero address must agree with the immutable cache data backing; guest environment variables cannot select it.
+int LSBConfigureRuntimeCacheBase(uint64_t actualBase);
+
 // Read the planned guest environment during native preparation, before changing TLS or entering the simulator.
 static inline bool LSBTraceHandoffRequested(const char *const environment[]) {
     const char prefix[] = "LSB_TRACE_HANDOFF=";
@@ -38,7 +42,7 @@ bool LSBMapSimExecutableForRuntime(const char *path, const char *rootPath, LSBMa
 void LSBUnloadImage(LSBMappedImage *image);
 
 // The image, executable, helpers and argument storage must survive the simulator runtime.
-// Detaches the host cache, calls dyld_sim's prepare entry, then invokes its LC_MAIN wrapper with the argument vectors.
+// Retains or detaches the host cache according to native policy, calls dyld_sim's prepare entry, then invokes its LC_MAIN wrapper.
 // Returns only on a pre-entry failure. If the wrapper returns, exits via a raw syscall without host cleanup.
 int LSBEnterDyldSim(const LSBMappedImage *image, const struct mach_header *executable, const char *executablePath,
                    const char *dyldPath, const char *rootPath,

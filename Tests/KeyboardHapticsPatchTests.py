@@ -148,6 +148,25 @@ class KeyboardHapticsPatchTests(unittest.TestCase):
             expected[offset:offset + len(replacement)] = replacement
         return expected
 
+    def test_slidable_pointer_reader_preserves_encoded_cache_bytes(self):
+        slots = [0x85000 + relative for relative in (0x28, 0x510, 0x698, 0x6A8)]
+        decoded = {offset: struct.unpack_from('<Q', self.data, offset)[0] for offset in slots}
+        for offset in slots:
+            struct.pack_into('<Q', self.data, offset, decoded[offset] | (8 << 38))
+        before, inspected = bytes(self.data), []
+
+        def read(offset):
+            inspected.append(offset)
+            return decoded[offset]
+
+        report = PATCH.inspect_cache(bytes(self.data), self.profile, pointer_reader=read)
+        self.assertEqual(inspected, slots)
+        self.assertEqual(bytes(self.data), before)
+        self.assertEqual(len(report['sites']), 7)
+        decoded[slots[0]] = self.base + 0xA0100  # Different valid selector text must still be rejected.
+        with self.assertRaisesRegex(ValueError, 'selector target'):
+            PATCH.inspect_cache(bytes(self.data), self.profile, pointer_reader=read)
+
     def test_exact_patch_preserves_source_other_bytes_and_exception_table(self):
         before = bytes(self.data)
         report = self.patch()

@@ -748,6 +748,7 @@ static void testServiceJobs(LSBReceivedMessage *message, NSString *root, NSStrin
     job = readPlist([directory stringByAppendingPathComponent:@"com.apple.runningboardd.plist"]);
     assert([job[@"Program"] isEqual:running[@"Program"]] && !job[@"ProgramArguments"]);
     assert([job[@"PublishesEvents"] isEqual:running[@"PublishesEvents"]]);
+    assert(!job[@"EnvironmentVariables"]); // Per-app HOME comes from LS/ChildDefaults, without a RunningBoard feature override.
     assert([NSFileManager.defaultManager contentsOfDirectoryAtPath:directory error:NULL].count == 6);
     dispose(message);
     NSData *priorJob = [NSData dataWithContentsOfFile:jobPath];
@@ -926,7 +927,8 @@ int main(void) {
         NSString *capabilitiesPath = [root stringByAppendingPathComponent:@"Library/Developer/CoreSimulator/DeviceType/capabilities.plist"];
         assert([NSFileManager.defaultManager createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:NULL]);
         assert(![NSFileManager.defaultManager fileExistsAtPath:capabilitiesPath]);
-        const char *inherited[] = {"LSB_DEBUG_STOP_BEFORE_HANDOFF=1", "KEEP=value=with=equals", "HOME=/wrong", "PATH=/wrong",
+        const char *inherited[] = {"LSB_DEBUG_STOP_BEFORE_HANDOFF=1", "KEEP=value=with=equals", "HOME=/wrong", "CFFIXED_USER_HOME=/wrong", "TMPDIR=/wrong", "PATH=/wrong",
+            "DYLD_FALLBACK_LIBRARY_PATH=/wrong", "DYLD_FALLBACK_FRAMEWORK_PATH=/wrong",
             "XPC_SIMULATOR_LAUNCHD_NAME=wrong", "XPC_SIMULATOR_HOLDING_TANK_HACK=999", "XPC_SIMULATOR_HOLDING_TANK_FD_HACK=7",
             "XPC_USERSPACE_REBOOT_TO_BOOT_MODE=wrong", "XPC_FLAGS=0x2", "TERM=xterm", "LSB_FAKE_PTY_STATE=/wrong", "LSB_SIMULATOR_LAUNCHD=0",
             "SIMULATOR_BOOT_TIME=stale", "SIMULATOR_BOOT_TIME=0", "SIMULATOR_BOOT_TIME_EXTRA=preserved",
@@ -978,7 +980,18 @@ int main(void) {
         assert([config[@"Bootstrap"][@"BinaryOrderPreference"] isEqualToString:@"arm64"]);
         assert([config[@"Bootstrap"][@"SimulatorRuntimeRoot"] isEqualToString:root]);
         assert([config[@"Bootstrap"][@"Self"][@"HOME"] isEqualToString:dataPath]);
-        assert([config[@"Bootstrap"][@"Child"][@"HOME"] isEqualToString:dataPath]);
+        NSDictionary *childDefaults = config[@"Bootstrap"][@"ChildDefaults"];
+        NSDictionary *expectedDefaults = @{
+            @"HOME": dataPath, @"CFFIXED_USER_HOME": dataPath, @"TMPDIR": [dataPath stringByAppendingString:@"/tmp/"],
+            @"DYLD_FALLBACK_FRAMEWORK_PATH": [root stringByAppendingPathComponent:@"System/Library/Frameworks"],
+            @"DYLD_FALLBACK_LIBRARY_PATH": [root stringByAppendingPathComponent:@"usr/lib"]
+        };
+        assert([childDefaults isEqual:expectedDefaults]);
+        for (NSString *key in expectedDefaults) {
+            assert(!config[@"Bootstrap"][@"Child"][key]); // These names must not become reserved global environment keys.
+            assert([config[@"Bootstrap"][@"Self"][key] isEqual:expectedDefaults[key]]);
+            assert(!strcmp(environmentValue(plan, key.UTF8String), [expectedDefaults[key] UTF8String]));
+        }
         assert([config[@"Bootstrap"][@"Child"][@"SIMULATOR_HID_SYSTEM_MANAGER"]
             isEqualToString:[root stringByAppendingPathComponent:@"Library/Frameworks/SimulatorHID.framework"]]);
         for (NSString *scope in @[@"Self", @"Child"]) {

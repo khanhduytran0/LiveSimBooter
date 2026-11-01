@@ -1,10 +1,10 @@
 #ifndef LSB_METAL_COMPILER_REGISTRATION_H
 #define LSB_METAL_COMPILER_REGISTRATION_H
 
-#include <stdbool.h>
+#include <xpc/xpc.h>
 
-// Register the fixed compiler bundle for enabled canonical graphics roles or declared main executables of contained stock app bundles.
-// Returns errno on validation failure; requested means the void XPC call returned, not that the compiler was launched.
-int LSBRegisterMetalCompilerForExecutable(const char *enabled, const char *runtimeRoot, const char *executablePath, bool *requested);
+// Register the fixed guest compiler bundle once, immediately before its first PID-domain connection request.
+// Other services and calls before guest initialization forward unchanged, including connection ownership and errno.
+xpc_connection_t LSBMetalCompilerConnectionCreate(const char *name, dispatch_queue_t targetQueue);
 
 #endif

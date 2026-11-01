@@ -246,6 +246,18 @@ int main(void) {
     assert(LSBInspectionPIDPath(999, path, sizeof(path), &pathResult) && !pathResult && errno == ESRCH);
     assert(LSBInspectionPIDPath(22, (void *)1, sizeof(path), &pathResult) && !pathResult && errno == EFAULT);
     assert(LSBInspectionPIDPath(22, NULL, sizeof(path), &pathResult) && !pathResult && errno == EFAULT);
+    char installed[PATH_MAX];
+    int parentLength = (int)(strrchr(canonical, '/') - canonical);
+    assert(snprintf(installed, sizeof(installed), "%.*s/data/Containers/Bundle/Application/id/Example.app/Example", parentLength, canonical) > 0);
+    strcpy(processSnapshot->records[1].executablePath, installed);
+    errno = EDOM;
+    assert(LSBInspectionPIDPath(22, path, sizeof(path), &pathResult) && pathResult == (int)strlen(installed) && !strcmp(path, installed) && errno == EDOM);
+    assert(!strcmp(processSnapshot->records[1].executablePath, installed));
+    assert(LSBInspectionPIDPath(22, path, (uint32_t)strlen(installed), &pathResult) && !pathResult && errno == ENOSPC);
+    assert(snprintf(installed, sizeof(installed), "%.*s/data/staging/Example.app/Example", parentLength, canonical) > 0);
+    strcpy(processSnapshot->records[1].executablePath, installed);
+    assert(LSBInspectionPIDPath(22, path, sizeof(path), &pathResult) && !pathResult && errno == EACCES);
+    strcpy(processSnapshot->records[1].executablePath, "/bin/df");
     inspectionRootError = configureInspectionRoot(NULL);
     assert(LSBInspectionPIDPath(22, path, sizeof(path), &pathResult) && !pathResult && errno == ENOENT);
     inspectionRootError = 0;

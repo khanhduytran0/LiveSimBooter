@@ -2806,7 +2806,8 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
         @"com.apple.trustd", @"com.apple.sleepd", @"com.apple.systemstatusd", @"com.apple.SpringBoard",
         @"com.apple.iconservices.iconservicesagent", @"com.apple.TextInput.kbd",
         @"com.apple.assistantd", @"com.apple.PosterBoard", @"com.apple.DragUI.druid", @"com.apple.pluginkit.pkd", @"com.apple.chronod",
-        @"com.apple.navd", @"com.apple.geod"];
+        @"com.apple.navd", @"com.apple.geod", @"com.apple.mobile.installd", @"com.apple.installcoordinationd",
+        @"com.kdt.LiveSimBooter.launchctl-control"];
     // iOS 26.0 23A343 trustd uses the stock certificate store and one guest Mach service; no native trust service is exposed.
     NSDictionary *trustEnvironment = @{@"DEBUGSCOPE":
         @"-policy-node,policy-set,policy,alloc,trust,bind,profile,trace,dbconn,OTR,serverxpc,sqlite3,error_thee_well, ringSigning",
@@ -2840,6 +2841,14 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
         NSString *jobDirectory = daemons;
         NSString *program = [label isEqual:@"com.apple.SpringBoard"] ? @"/System/Library/CoreServices/SpringBoard.app/SpringBoard" : @"/bin/df";
         NSDictionary *job = @{@"Label": label, @"ProgramArguments": @[program]};
+        if ([label isEqual:@"com.apple.mobile.installd"]) job = @{@"Label": label, @"ProgramArguments": @[@"/usr/libexec/installd"],
+            @"MachServices": @{@"com.apple.mobile.installd": @YES}, @"EnableTransactions": @YES, @"EnablePressuredExit": @YES};
+        if ([label isEqual:@"com.apple.installcoordinationd"]) job = @{@"Label": label,
+            @"ProgramArguments": @[@"/System/Library/PrivateFrameworks/InstallCoordination.framework/Support/installcoordinationd"],
+            @"MachServices": @{@"com.apple.installcoordinationd": @YES, @"com.apple.installcoordinationd.CacheDelete": @YES,
+                @"com.apple.InstallProgress.xpc": @YES}, @"EnableTransactions": @YES, @"EnablePressuredExit": @YES};
+        if ([label isEqual:@"com.kdt.LiveSimBooter.launchctl-control"])
+            job = @{@"Label": label, @"ProgramArguments": @[@"/usr/libexec/launchctl-control"], @"RunAtLoad": @YES};
         if ([label isEqual:@"com.apple.pluginkit.pkd"]) job = @{@"Label": label, @"Program": @"/usr/libexec/pkd",
             @"ProgramArguments": @[@"/usr/libexec/pkd"], @"MachServices": @{@"com.apple.pluginkit.pkd": @YES},
             @"POSIXSpawnType": @"Adaptive", @"EnableTransactions": @YES, @"EnablePressuredExit": @YES};
@@ -2916,6 +2925,14 @@ static void testIconLaunchUsesGraphicalLaunchd(void) {
         [expected addObjectsFromArray:@[@"com.apple.backboardd.plist", @"com.apple.cfprefsd.xpc.daemon.plist",
             @"com.kdt.LiveSimBooter.terminal-fish.plist", @"com.kdt.LiveSimBooter.display-settings.plist"]];
         assert([[NSSet setWithArray:[manager contentsOfDirectoryAtPath:jobDirectory error:NULL]] isEqual:expected]);
+        for (NSString *label in @[@"com.apple.mobile.installd", @"com.apple.installcoordinationd"]) {
+            NSDictionary *installer = [NSDictionary dictionaryWithContentsOfFile:
+                [jobDirectory stringByAppendingPathComponent:[label stringByAppendingString:@".plist"]]];
+            assert(CFGetTypeID((__bridge CFTypeRef)installer[@"MachServices"][label]) == CFBooleanGetTypeID());
+            assert([installer[@"MachServices"][label] boolValue]);
+            assert(CFGetTypeID((__bridge CFTypeRef)installer[@"RunAtLoad"]) == CFBooleanGetTypeID());
+            assert([installer[@"RunAtLoad"] boolValue]);
+        }
         assert(!bootstrap[@"Self"][@"LSB_FAKE_PTY_STATE"] && !bootstrap[@"Child"][@"LSB_FAKE_PTY_STATE"]);
         NSDictionary *terminal = [NSDictionary dictionaryWithContentsOfFile:
             [jobDirectory stringByAppendingPathComponent:@"com.kdt.LiveSimBooter.terminal-fish.plist"]];
@@ -4391,6 +4408,43 @@ static void testPeerExecutablePathContainment(void) {
     assert(copyGuestExecutablePath(&request->plan, output) == ENOTSUP && !output[0]);
     setRequestProgram(request, "/usr/libexec/missing");
     assert(copyGuestExecutablePath(&request->plan, output) == ENOENT && !output[0]);
+
+    NSString *data = [directory stringByAppendingPathComponent:@"data"];
+    NSString *app = [data stringByAppendingPathComponent:@"Containers/Bundle/Application/11111111-1111-1111-1111-111111111111/Example.app"];
+    for (NSString *suffix in @[@"Example", @"Frameworks/Example.framework/Example", @"PlugIns/Widget.appex/Widget", @"XPCServices/Worker.xpc/Worker"]) {
+        NSString *path = [app stringByAppendingPathComponent:suffix];
+        assert([manager createDirectoryAtPath:path.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:NULL]);
+        assert([[@"fixture" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:path atomically:YES]);
+        setRequestProgram(request, path.fileSystemRepresentation);
+        assert(!copyGuestExecutablePath(&request->plan, output) && !strcmp(output, path.fileSystemRepresentation));
+        int opened = -1;
+        assert(!openGuestExecutable(&request->plan, &opened, output) && opened >= 0);
+        struct stat descriptor, current;
+        assert(!fstat(opened, &descriptor) && !stat(path.fileSystemRepresentation, &current));
+        assert(descriptor.st_dev == current.st_dev && descriptor.st_ino == current.st_ino && !close(opened));
+    }
+    NSString *appAlias = [directory stringByAppendingPathComponent:@"AppAlias"];
+    assert(!symlink(app.fileSystemRepresentation, appAlias.fileSystemRepresentation));
+    setRequestProgram(request, [appAlias stringByAppendingPathComponent:@"Example"].fileSystemRepresentation);
+    assert(!copyGuestExecutablePath(&request->plan, output) && !strcmp(output, [app stringByAppendingPathComponent:@"Example"].fileSystemRepresentation));
+    NSString *escape = [app stringByAppendingPathComponent:@"escape"];
+    assert(!symlink(outside.fileSystemRepresentation, escape.fileSystemRepresentation));
+    setRequestProgram(request, escape.fileSystemRepresentation);
+    assert(copyGuestExecutablePath(&request->plan, output) == EACCES && !output[0]);
+    for (NSString *suffix in @[@"Containers/Data/Application/id/Bad.app/Bad", @"Containers/Bundle/Application-other/id/Bad.app/Bad",
+                               @"Containers/Bundle/Application/id/Bad.app-other/Bad", @"staging/Bad.app/Bad"]) {
+        NSString *path = [data stringByAppendingPathComponent:suffix];
+        assert([manager createDirectoryAtPath:path.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:NULL]);
+        assert([[@"fixture" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:path atomically:YES]);
+        setRequestProgram(request, path.fileSystemRepresentation);
+        assert(copyGuestExecutablePath(&request->plan, output) == EACCES && !output[0]);
+    }
+    setRequestProgram(request, [app stringByAppendingString:@"/../Example.app/Example"].fileSystemRepresentation);
+    assert(copyGuestExecutablePath(&request->plan, output) == EINVAL && !output[0]);
+    setRequestProgram(request, [app stringByAppendingPathComponent:@"missing"].fileSystemRepresentation);
+    assert(copyGuestExecutablePath(&request->plan, output) == ENOENT && !output[0]);
+    setRequestProgram(request, [app stringByAppendingPathComponent:@"Frameworks"].fileSystemRepresentation);
+    assert(copyGuestExecutablePath(&request->plan, output) == EINVAL && !output[0]);
     disposeMessage(request);
     resetBroker();
     assert([manager removeItemAtPath:directory error:NULL]);

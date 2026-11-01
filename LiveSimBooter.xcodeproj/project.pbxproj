@@ -82,6 +82,7 @@
 				DeviceType.m = "-fobjc-arc";
 				ExtensionLauncher.m = "-fobjc-arc";
 				FramebufferServer.m = "-fobjc-arc";
+				GuestApplicationInstaller.m = "-fobjc-arc";
 				GuestDeviceSettings.m = "-fobjc-arc";
 				GuestDisplaySettings.m = "-fobjc-arc";
 				GuestEntitlementsConversion.m = "-fobjc-arc";

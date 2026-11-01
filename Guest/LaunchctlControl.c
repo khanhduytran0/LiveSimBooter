@@ -36,7 +36,14 @@ static int parseRequest(char *bytes, size_t count, char **identifier, char *argu
         offset += length + 1;
     }
     arguments[argumentCount] = NULL;
-    return argumentCount > 1 ? 0 : EINVAL;
+    if (argumentCount < 2) return EINVAL;
+    if (!strcmp(arguments[1], "--lsb-install-ipa")) {
+        if (argumentCount != 3 || arguments[2][0] != '/') return EINVAL;
+        arguments[0] = "/usr/local/bin/lsb-app-install";
+        arguments[1] = arguments[2];
+        arguments[2] = NULL;
+    }
+    return 0;
 }
 
 static bool elapsedAtLeast(const struct timespec *start, const struct timespec *now, time_t seconds) {
@@ -44,7 +51,7 @@ static bool elapsedAtLeast(const struct timespec *start, const struct timespec *
     return elapsed > seconds || (elapsed == seconds && now->tv_nsec >= start->tv_nsec);
 }
 
-static int waitForCommand(pid_t child, int *status, bool *timedOut) {
+static int waitForCommand(pid_t child, int *status, bool *timedOut, time_t deadline) {
     struct timespec start, now;
     if (clock_gettime(CLOCK_MONOTONIC, &start)) return errno;
     for (;;) {
@@ -52,7 +59,7 @@ static int waitForCommand(pid_t child, int *status, bool *timedOut) {
         if (result == child) return 0;
         if (result < 0 && errno != EINTR) return errno;
         if (clock_gettime(CLOCK_MONOTONIC, &now)) return errno;
-        if (elapsedAtLeast(&start, &now, *timedOut ? 65 : 60)) {
+        if (elapsedAtLeast(&start, &now, deadline + (*timedOut ? 5 : 0))) {
             if (*timedOut) return ETIMEDOUT;
             *timedOut = true;
             if (kill(child, SIGKILL) && errno != ESRCH) return errno;
@@ -121,7 +128,8 @@ static int runRequest(int directory) {
     if (output >= 0) close(output);
     int status = 0, waitError = 0;
     bool timedOut = false;
-    if (!error) waitError = waitForCommand(child, &status, &timedOut);
+    bool installing = !strcmp(arguments[0], "/usr/local/bin/lsb-app-install");
+    if (!error) waitError = waitForCommand(child, &status, &timedOut, installing ? 180 : 60);
     int result = openat(directory, temporaryName, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0644);
     int publicationError = result < 0 ? errno : 0;
     if (result >= 0) {
@@ -137,6 +145,8 @@ static int runRequest(int directory) {
             identifier, child, error, waitError, status, timedOut);
     fflush(stderr);
     if (waitError || publicationError) return waitError ?: publicationError;
+    // Killing the client does not cancel an accepted installd operation. Preserve evidence and never replay it on restart.
+    if (installing && timedOut) return ETIMEDOUT;
     return unlinkat(directory, "active", 0) ? errno : 0;
 }
 

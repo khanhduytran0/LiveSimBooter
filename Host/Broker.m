@@ -1,4 +1,5 @@
 #include "../ProcessSupport/RuntimeLayout.h"
+#include "../ProcessSupport/GuestExecutablePath.h"
 #import <Foundation/Foundation.h>
 #include "Broker.h"
 #include "ExtensionLauncher.h"
@@ -394,40 +395,33 @@ static int openGuestExecutable(const LSBSpawnPlan *plan, int *descriptor, char g
     if (path[0] != '/') return ENOTSUP;
     char root[PATH_MAX], candidate[PATH_MAX], canonical[PATH_MAX], descriptorPath[PATH_MAX], descriptorCanonical[PATH_MAX];
     int rootError = realpath(runtimeRoot.fileSystemRepresentation, root) ? 0 : errno;
-    const char *rootSeparator = !rootError && containedPath(path, root) ? path + strlen(root) : NULL;
-    if (!rootError && !rootSeparator && !strncmp(root, "/private/var/", 13) && containedPath(path, root + 8))
-        rootSeparator = path + strlen(root + 8);
-    // Reject lexical traversal without Foundation's platform-dependent /private path standardization.
-    for (const char *part = path + 1; *part;) {
-        const char *end = strchr(part, '/');
-        size_t length = end ? (size_t)(end - part) : strlen(part);
-        // Simulator launchd joins its root plus "/" with the absolute xpcproxy path. Permit exactly that duplicate boundary,
-        // then still resolve and validate the opened descriptor below; empty components elsewhere remain invalid.
-        if (!length && rootSeparator && part == rootSeparator + 1 && part[1] && part[1] != '/') { ++part; continue; }
-        if (!length || (length == 1 && part[0] == '.') || (length == 2 && part[0] == '.' && part[1] == '.')) return EINVAL;
-        if (end && !end[1]) return EINVAL;
-        part += length + (end != NULL);
-    }
+    error = LSBGuestExecutableInputError(rootError ? runtimeRoot.fileSystemRepresentation : root, path);
+    if (error) return error;
     if (rootError) return rootError;
-    BOOL physical = realpath(path, canonical) && containedPath(canonical, root);
+    BOOL resolved = realpath(path, canonical) != NULL;
+    int resolveError = errno;
+    BOOL physical = resolved && LSBGuestExecutableIsContained(root, canonical);
     if (!physical) {
         // An explicit physical path cannot escape through a symlink and be reinterpreted as a guest path.
-        if (containedPath(path, root)) return realpath(path, canonical) ? EACCES : errno;
+        if (LSBGuestPathUsesPhysicalStorage(root, path)) return resolved ? EACCES : resolveError;
         int length = snprintf(candidate, sizeof(candidate), "%s%s", root, path);
         if (length < 0 || (size_t)length >= sizeof(candidate)) return ENAMETOOLONG;
         if (!realpath(candidate, canonical)) return errno;
-        if (!containedPath(canonical, root)) return EACCES;
+        if (!LSBGuestExecutableIsContained(root, canonical)) return EACCES;
     }
     int fd = open(canonical, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return errno;
-    struct stat info;
+    struct stat info, current;
     if (fstat(fd, &info)) error = errno;
     else if (!S_ISREG(info.st_mode)) error = EINVAL;
     else if (fcntl(fd, F_GETPATH, descriptorPath) || !realpath(descriptorPath, descriptorCanonical)) error = errno;
-    else if (!containedPath(descriptorCanonical, root)) error = EACCES;
+    else if (!LSBGuestExecutableIsContained(root, descriptorCanonical)) error = EACCES;
     else if (strcmp(canonical, descriptorCanonical)) error = EAGAIN;
+    else if (stat(descriptorCanonical, &current)) error = errno;
+    else if (info.st_dev != current.st_dev || info.st_ino != current.st_ino) error = EAGAIN;
     if (!error && guestPath) {
-        const char *guest = descriptorCanonical + strlen(root);
+        // System-role comparisons retain their virtual paths. User apps keep their canonical installed-container path.
+        const char *guest = containedPath(descriptorCanonical, root) ? descriptorCanonical + strlen(root) : descriptorCanonical;
         size_t size = strlen(guest) + 1;
         if (size > LSB_PATH_BYTES) error = ENAMETOOLONG;
         else memcpy(guestPath, guest, size);
@@ -2316,7 +2310,8 @@ static int initialPlan(LSBReceivedMessage *message, int argc, const char *argv[]
                                   "com.apple.configd_sim", "com.apple.trustd", "com.apple.sleepd", "com.apple.systemstatusd", "com.apple.SpringBoard",
                                   "com.apple.iconservices.iconservicesagent", "com.apple.TextInput.kbd", "com.apple.assistantd",
                                   "com.apple.PosterBoard", "com.apple.DragUI.druid", "com.apple.pluginkit.pkd", "com.apple.chronod",
-                                  "com.apple.navd", "com.apple.geod", NULL};
+                                  "com.apple.navd", "com.apple.geod", "com.apple.mobile.installd", "com.apple.installcoordinationd",
+                                  "com.kdt.LiveSimBooter.launchctl-control", NULL};
         enableIndigo = YES;
         const char *const *labels = argc > 2 ? argv + 2 : defaults;
         int error = LSBPrepareLaunchdServicesPlan(message, runtimeRoot.fileSystemRepresentation, envp, labels);

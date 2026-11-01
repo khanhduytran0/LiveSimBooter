@@ -4,6 +4,7 @@
 #import "GuestDisplaySettings.h"
 #import "GuestDeviceSettings.h"
 #import "SigningIdentity.h"
+#import "GuestApplicationInstaller.h"
 #import "Broker.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <string.h>
@@ -11,6 +12,7 @@
 static NSString *const DeviceGroup = @"device-group", *const SigningGroup = @"signing-group", *const DisplayGroup = @"display-group";
 static NSString *const AudioGroup = @"audio-group", *const HapticsGroup = @"haptics-group", *const BackgroundGroup = @"background-group";
 static NSString *const SessionGroup = @"session-group";
+static NSString *const ApplicationsGroup = @"applications-group", *const InstallIPA = @"simulator-install-ipa";
 static NSString *const Device = @"simulator-device-picker", *const FullWidth = @"simulator-full-width", *const LazySign = @"simulator-lazy-sign";
 static NSString *const SigningIdentity = @"signing-identity-import", *const HUD = @"simulator-performance-hud", *const Touches = @"simulator-visualize-touches";
 static NSString *const AudioOutput = @"simulator-audio-output", *const Haptics = @"simulator-haptic-passthrough";
@@ -54,8 +56,10 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
     LSBBackgroundAudio *_audio;
     LSBGuestDisplaySettings *_display;
     LSBGuestDeviceSettings *_device;
+    LSBGuestApplicationInstaller *_installer;
+    __weak UIDocumentPickerViewController *_ipaPicker;
     PSSpecifier *_fullWidthSpecifier;
-    id _audioObserver, _displayObserver, _deviceObserver, _signingObserver;
+    id _audioObserver, _displayObserver, _deviceObserver, _signingObserver, _installerObserver;
     NSString *_signingSummary, *_signingError;
     BOOL _importingIdentity;
 }
@@ -64,6 +68,7 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
     _audio = LSBBackgroundAudio.sharedController;
     _display = LSBGuestDisplaySettings.sharedController;
     _device = LSBGuestDeviceSettings.sharedController;
+    _installer = LSBGuestApplicationInstaller.sharedController;
     _signingSummary = LSBSigningIdentitySummary();
     self.title = NSLocalizedString(@"Settings", @"Title of the native Settings tab.");
     return self;
@@ -74,6 +79,7 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
     if (_displayObserver) [NSNotificationCenter.defaultCenter removeObserver:_displayObserver];
     if (_deviceObserver) [NSNotificationCenter.defaultCenter removeObserver:_deviceObserver];
     if (_signingObserver) [NSNotificationCenter.defaultCenter removeObserver:_signingObserver];
+    if (_installerObserver) [NSNotificationCenter.defaultCenter removeObserver:_installerObserver];
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -92,6 +98,8 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
         queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; [weakSelf updateSettings]; }];
     _signingObserver = [NSNotificationCenter.defaultCenter addObserverForName:LSBSigningIdentityDidChangeNotification object:nil
         queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; [weakSelf refreshSigningIdentity]; }];
+    _installerObserver = [NSNotificationCenter.defaultCenter addObserverForName:LSBGuestApplicationInstallerDidChangeNotification object:_installer
+        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; [weakSelf updateSettings]; }];
     [self updateSettings];
 }
 - (void)viewWillAppear:(BOOL)animated {
@@ -101,6 +109,7 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
 - (void)refreshDisplay {
     [_device refresh];
     if (_device.canControlSimulator) [_display refresh];
+    [_installer refresh];
     [self refreshSigningIdentity];
 }
 - (void)refreshSigningIdentity {
@@ -133,6 +142,8 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
         [self setting:LazySign title:NSLocalizedString(@"Lazy sign", @"Switch to sign runtime binaries on signature-registration failure.")
             cell:PSSwitchCell detail:Nil],
         [self setting:SigningIdentity title:NSLocalizedString(@"Import P12…", @"Choose a PKCS12 signing identity document.") cell:PSButtonCell detail:Nil],
+        [self group:ApplicationsGroup title:NSLocalizedString(@"Applications", @"Settings section heading for simulator app installation.")],
+        [self setting:InstallIPA title:NSLocalizedString(@"Install IPA…", @"Choose an IPA document to install in the simulator.") cell:PSButtonCell detail:Nil],
         [self group:DisplayGroup title:NSLocalizedString(@"Simulator display", @"Settings section heading for live display controls.")],
         [self setting:HUD title:NSLocalizedString(@"Performance HUD", @"Title of the performance heads-up display setting.")
             cell:PSLinkCell detail:LSBHUDSettingsViewController.class],
@@ -175,6 +186,7 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
 }
 - (BOOL)settingEnabled:(PSSpecifier *)specifier {
     NSString *identifier = specifier.identifier;
+    if ([identifier isEqual:InstallIPA]) return _device.canControlSimulator && !_installer.pending && !_installer.outcomeUnknown;
     if ([identifier isEqual:LazySign]) return _device.canApply && !_importingIdentity && (LSBLazySigningEnabled() || _signingSummary.length);
     if ([identifier isEqual:SigningIdentity]) return _device.canApply && !_importingIdentity;
     if ([identifier isEqual:HUD] || [identifier isEqual:Touches]) return _device.canControlSimulator && !_display.pending &&
@@ -185,6 +197,11 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
     return YES;
 }
 - (NSString *)footerForGroup:(NSString *)identifier {
+    if ([identifier isEqual:ApplicationsGroup]) {
+        if (!_device.canControlSimulator && !_installer.pending && !_installer.outcomeUnknown)
+            return NSLocalizedString(@"Start the simulator to install an IPA.", @"Applications settings footer while no controllable simulator is running.");
+        return _installer.statusText;
+    }
     if ([identifier isEqual:SigningGroup]) {
         NSString *description = NSLocalizedString(@"Off by default. Sign a runtime binary only when its signature registration fails. "
             @"The P12 and password stay in this app's device-only keychain. Changes apply on the next simulator start or restart.",
@@ -270,7 +287,8 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
 }
 - (void)performSettingAction:(PSSpecifier *)specifier {
     if (![self settingEnabled:specifier]) return;
-    if ([specifier.identifier isEqual:SigningIdentity]) [self chooseSigningIdentity];
+    if ([specifier.identifier isEqual:InstallIPA]) [self chooseIPA];
+    else if ([specifier.identifier isEqual:SigningIdentity]) [self chooseSigningIdentity];
     else if ([specifier.identifier isEqual:PowerOff]) [_device powerOffSimulator];
     else if ([specifier.identifier isEqual:Restart]) [_device restartSimulator];
 }
@@ -300,6 +318,14 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
         cell.accessoryView.accessibilityHint = hint;
     }
     if ([identifier isEqual:PowerOff]) cell.textLabel.textColor = [self settingEnabled:specifier] ? UIColor.systemRedColor : UIColor.secondaryLabelColor;
+    if ([identifier isEqual:InstallIPA]) {
+        cell.accessoryView = nil;
+        if (_installer.pending) {
+            UIActivityIndicatorView *progress = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+            [progress startAnimating];
+            cell.accessoryView = progress;
+        }
+    }
     if ([identifier isEqual:SigningIdentity]) {
         cell.textLabel.numberOfLines = 1;
         cell.textLabel.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -317,6 +343,15 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
         }
     }
 }
+- (void)chooseIPA {
+    if (self.presentedViewController || !_device.canControlSimulator || _installer.pending || _installer.outcomeUnknown) return;
+    UTType *type = [UTType typeWithFilenameExtension:@"ipa"] ?: UTTypeData;
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[type] asCopy:NO];
+    picker.delegate = self;
+    picker.allowsMultipleSelection = NO;
+    _ipaPicker = picker;
+    [self presentViewController:picker animated:YES completion:nil];
+}
 - (void)chooseSigningIdentity {
     if (self.presentedViewController || _importingIdentity || !_device.canApply) return;
     NSMutableArray<UTType *> *types = [NSMutableArray array];
@@ -332,6 +367,12 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
     [self presentViewController:picker animated:YES completion:nil];
 }
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (controller == _ipaPicker) {
+        _ipaPicker = nil;
+        [_device refresh];
+        if (urls.count == 1 && _device.canControlSimulator) [_installer installIPAFromURL:urls.firstObject];
+        return;
+    }
     (void)controller;
     if (urls.count != 1 || _importingIdentity) return;
     NSURL *url = urls.firstObject;

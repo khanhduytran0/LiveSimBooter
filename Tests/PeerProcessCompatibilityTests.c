@@ -415,6 +415,14 @@ static void testPaths(void) {
     longPath[0] = '/'; longPath[sizeof(longPath) - 1] = '\0';
     replyPath = longPath;
     assert(!peerPIDPath(0x1000, 202, output, sizeof(output)) && errno == ENAMETOOLONG && sendReferences() == 1);
+    const char installed[] = "/private/Group/data/Containers/Bundle/Application/11111111-1111-1111-1111-111111111111/Example.app/Example";
+    replyPath = installed;
+    assert(peerPIDPath(0x1000, 202, output, sizeof(output)) == (int)strlen(installed) && !strcmp(output, installed));
+    assert(errno == EPERM && sendReferences() == 1);
+    memset(output, 0xcc, sizeof(output));
+    assert(!peerPIDPath(0x1000, 202, output, strlen(installed)) && errno == ENOSPC && (unsigned char)output[0] == 0xcc);
+    replyPath = "/private/Group/data/Containers/Data/Application/id/Example.app/Example";
+    assert(!peerPIDPath(0x1000, 202, output, sizeof(output)) && errno == EACCES && (unsigned char)output[0] == 0xcc);
     replyPath = guestPath; pathResult = 9;
 }
 

@@ -23,7 +23,11 @@ static int nameSysctl(int *mib, u_int count, void *old, size_t *oldLength, void 
 #undef sysctl
 
 static void labelsAndBounds(void) {
-    const char *labels[] = {"Metal.backboardd", "Metal.SpringBoard", "Metal.public", "/sbin/launchd", "/Applications/Contacts.app/Contacts"};
+    const struct { const char *path; pid_t pid; const char *expected; } labels[] = {
+        {"Metal.backboardd", 0, "LSBHelper: Metal.backboardd"}, {"Metal.SpringBoard", 0, "LSBHelper: Metal.SpringBoard"},
+        {"Metal.public", 0, "LSBHelper: Metal.public"}, {"Signer", 0, "LSBHelper: Signer"}, {"Metal.probe", 0, "LSBHelper: Metal.probe"},
+        {"/sbin/launchd", 1, "LSB:1 launchd"}, {"/Applications/Contacts.app/Contacts", 1234, "LSB:1234 Contacts"}
+    };
     for (unsigned i = 0; i < sizeof(labels) / sizeof(labels[0]); ++i) {
         struct { char before[8], argv0[128], after[32]; } storage;
         memset(&storage, 0xa5, sizeof(storage));
@@ -32,24 +36,17 @@ static void labelsAndBounds(void) {
         char original[sizeof(storage)];
         memcpy(original, &storage, sizeof(storage));
         errno = EDOM;
-        pid_t guestPID = i < 3 ? 0 : i == 3 ? 1 : 1234;
-        assert(!LSBSetProcessDisplayName(labels[i], guestPID, storage.argv0, capacity) && errno == EDOM);
-        const char *expected = strrchr(labels[i], '/');
-        expected = expected ? expected + 1 : labels[i];
-        if (i == 3) expected = "LSB:1 launchd";
-        else if (i == 4) expected = "LSB:1234 Contacts";
+        assert(!LSBSetProcessDisplayName(labels[i].path, labels[i].pid, storage.argv0, capacity) && errno == EDOM);
+        const char *expected = labels[i].expected;
         assert(!strcmp(storage.argv0, expected) && !strcmp(observedName, expected));
         for (size_t n = strlen(expected); n < capacity; ++n) assert(!storage.argv0[n]);
         assert(!memcmp(&storage, original, sizeof(storage.before)));
         size_t untouched = sizeof(storage.before) + capacity;
         assert(!memcmp((char *)&storage + untouched, original + untouched, sizeof(storage) - untouched));
     }
-    char small[] = {'L', 'P', 0, 'X'};
-    assert(!LSBSetProcessDisplayName("Metal.public", 0, small, 3));
-    assert(!strcmp(small, "Me") && small[3] == 'X' && !strcmp(observedName, "Metal.public"));
-    char empty[] = {'L', 'X'};
-    assert(!LSBSetProcessDisplayName("Metal.public", 0, empty, 1));
-    assert(!empty[0] && empty[1] == 'X' && !strcmp(observedName, "Metal.public"));
+    char small[14]; memset(small, 'X', sizeof(small));
+    assert(!LSBSetProcessDisplayName("Metal.public", 0, small, sizeof(small) - 1));
+    assert(!strcmp(small, "LSBHelper: M") && small[13] == 'X' && !strcmp(observedName, "LSBHelper: Metal.public"));
 }
 
 static void prefixesAndIndependentLimits(void) {
@@ -62,8 +59,8 @@ static void prefixesAndIndependentLimits(void) {
     assert(!strcmp(storage, "LSB:2147483647 ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"));
     assert(!strcmp(observedName, "LSB:2147483647 ABCDEFGHIJKLMNOPQ"));
     assert(!LSBSetProcessDisplayName(longName, 0, storage, sizeof(storage)));
-    assert(!strcmp(storage, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"));
-    assert(!strcmp(observedName, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"));
+    assert(!strcmp(storage, "LSBHelper: ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"));
+    assert(!strcmp(observedName, "LSBHelper: ABCDEFGHIJKLMNOPQRSTU"));
     char small[9];
     memset(small, 'X', sizeof(small));
     assert(!LSBSetProcessDisplayName("Contacts", 7, small, sizeof(small) - 1));
@@ -71,6 +68,8 @@ static void prefixesAndIndependentLimits(void) {
     assert(!strcmp(observedName, "LSB:7 Contacts"));
     assert(!LSBSetProcessDisplayName("Contacts", INT_MAX, NULL, 0));
     assert(!strcmp(observedName, "LSB:2147483647 Contacts"));
+    assert(!LSBSetProcessDisplayName("Signer", 0, NULL, 0));
+    assert(!strcmp(observedName, "LSBHelper: Signer"));
 }
 
 static void aliases(void) {
@@ -82,13 +81,17 @@ static void aliases(void) {
     assert(!strcmp(alias, "LSB:2147483647 ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"));
     assert(!strcmp(observedName, "LSB:2147483647 ABCDEFGHIJKLMNOPQ"));
     strcpy(alias, "/Applications/Contacts.app/Contacts");
-    assert(!LSBSetProcessDisplayName(alias, 0, alias, strlen(alias) + 1) && !strcmp(alias, "Contacts"));
+    assert(!LSBSetProcessDisplayName(alias, 0, alias, strlen(alias) + 1) && !strcmp(alias, "LSBHelper: Contacts"));
+    assert(!strcmp(observedName, "LSBHelper: Contacts"));
 }
 
 static void shortAlias(void) {
     char alias[] = "Contacts";
     assert(!LSBSetProcessDisplayName(alias, 7, alias, sizeof(alias)));
     assert(!strcmp(alias, "LSB:7 Co") && !strcmp(observedName, "LSB:7 Contacts"));
+    char helperAlias[] = "Metal.public";
+    assert(!LSBSetProcessDisplayName(helperAlias, 0, helperAlias, sizeof(helperAlias)));
+    assert(!strcmp(helperAlias, "LSBHelper: M") && !strcmp(observedName, "LSBHelper: Metal.public"));
 }
 
 static void errorsDoNotChangeArguments(void) {
@@ -104,6 +107,8 @@ static void errorsDoNotChangeArguments(void) {
     assert(LSBSetProcessDisplayName("Contacts", 1234, storage, 10) == ENOSPC && errno == ERANGE);
     assert(LSBSetProcessDisplayName("Contacts", 7, storage, 7) == ENOSPC && errno == ERANGE);
     assert(LSBSetProcessDisplayName("Contacts", 7, storage, 1) == ENOSPC && errno == ERANGE);
+    assert(LSBSetProcessDisplayName("Metal.public", 0, storage, sizeof(storage)) == ENOSPC && errno == ERANGE);
+    assert(LSBSetProcessDisplayName("Signer", 0, storage, 1) == ENOSPC && errno == ERANGE);
     assert(calls == before && !strcmp(storage, "native argv"));
 }
 
@@ -113,11 +118,11 @@ int main(void) {
     aliases();
     shortAlias();
     errorsDoNotChangeArguments();
-    char storage[] = "native argv";
+    char storage[16] = "native argv";
     failure = EPERM;
     errno = ERANGE;
     assert(LSBSetProcessDisplayName("Metal.public", 0, storage, sizeof(storage)) == EPERM && errno == ERANGE);
-    assert(!strcmp(storage, "Metal.publi"));
+    assert(!strcmp(storage, "LSBHelper: Meta") && !strcmp(observedName, "LSBHelper: Metal.public"));
     char guestStorage[32];
     assert(LSBSetProcessDisplayName("Contacts", 42, guestStorage, sizeof(guestStorage)) == EPERM && errno == ERANGE);
     assert(!strcmp(guestStorage, "LSB:42 Contacts"));

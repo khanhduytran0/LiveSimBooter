@@ -90,10 +90,26 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/LaunchctlControlTests.c -o "$test_directory/LaunchctlControl"
 "$test_directory/LaunchctlControl"
+xcrun --sdk macosx clang -arch arm64 -fobjc-arc -fblocks -Wall -Wextra -Werror \
+    Tests/ApplicationInstallerTests.m -framework Foundation -o "$test_directory/ApplicationInstaller"
+"$test_directory/ApplicationInstaller"
+xcrun --sdk macosx clang -arch arm64 -fobjc-arc -fblocks -Wall -Wextra -Werror \
+    Tests/InstallationCompatibilityTests.m -framework Foundation -o "$test_directory/InstallationCompatibility"
+"$test_directory/InstallationCompatibility"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -O1 \
+    Tests/LaunchServicesNotificationsTests.c -o "$test_directory/LaunchServicesNotifications"
+"$test_directory/LaunchServicesNotifications"
+xcrun --sdk macosx clang -arch arm64 -fobjc-arc -fblocks -Wall -Wextra -Werror \
+    Tests/GuestApplicationInstallerTests.m Host/RuntimeStorage.m ProcessSupport/StoreAppGroups.c \
+    -framework Foundation -o "$test_directory/GuestApplicationInstaller"
+"$test_directory/GuestApplicationInstaller"
 python3 Tests/GuestLaunchctlTests.py
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ExecutablePathTests.c LiveProcess/ExecutablePath.c -o "$test_directory/ExecutablePath"
 "$test_directory/ExecutablePath"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/ApplicationEnvironmentTests.c -o "$test_directory/ApplicationEnvironment"
+"$test_directory/ApplicationEnvironment"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ProcessDisplayNameTests.c -o "$test_directory/ProcessDisplayName"
 "$test_directory/ProcessDisplayName"

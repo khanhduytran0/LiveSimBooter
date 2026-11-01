@@ -1,20 +1,65 @@
 #include <assert.h>
 #include <spawn.h>
+#include <signal.h>
+#include <time.h>
+#include <sys/wait.h>
 
 static int testSpawn(pid_t *, const char *, const posix_spawn_file_actions_t *, const posix_spawnattr_t *, char *const[], char *const[]);
+static int testClock(clockid_t, struct timespec *);
+static pid_t testWait(pid_t, int *, int);
+static int testKill(pid_t, int);
+static int testSleep(const struct timespec *, struct timespec *);
 #define posix_spawn testSpawn
+#define clock_gettime testClock
+#define waitpid testWait
+#define kill testKill
+#define nanosleep testSleep
 #define main controlMain
 #include "../Guest/LaunchctlControl.c"
 #undef main
 #undef posix_spawn
+#undef clock_gettime
+#undef waitpid
+#undef kill
+#undef nanosleep
 
 unsigned dyld_get_active_platform(void) { return 7; }
 static int spawnError;
+static bool installing, simulatedWait, simulatedReap, killed;
+static time_t clockSeconds, killedAt;
+
+static int testClock(clockid_t clock, struct timespec *value) {
+    if (!simulatedWait) return clock_gettime(clock, value);
+    assert(clock == CLOCK_MONOTONIC);
+    *value = (struct timespec){ .tv_sec = clockSeconds++ };
+    return 0;
+}
+
+static pid_t testWait(pid_t child, int *status, int options) {
+    if (!simulatedWait) return waitpid(child, status, options);
+    assert(child == 12345 && options == WNOHANG);
+    if (!killed || !simulatedReap) return 0;
+    *status = SIGKILL;
+    return child;
+}
+
+static int testKill(pid_t child, int signalNumber) {
+    assert(simulatedWait && child == 12345 && signalNumber == SIGKILL && !killed);
+    killed = true;
+    killedAt = clockSeconds - 1;
+    return 0;
+}
+
+static int testSleep(const struct timespec *duration, struct timespec *remaining) {
+    return simulatedWait ? 0 : nanosleep(duration, remaining);
+}
 
 static int testSpawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *actions, const posix_spawnattr_t *attributes,
                      char *const arguments[], char *const environment[]) {
-    assert(!strcmp(path, "/bin/launchctl") && !strcmp(arguments[0], path) && !strcmp(arguments[1], "list") && !arguments[2]);
+    assert(!strcmp(path, installing ? "/usr/local/bin/lsb-app-install" : "/bin/launchctl"));
+    assert(!strcmp(arguments[0], path) && !strcmp(arguments[1], installing ? "/data/payload.ipa" : "list") && !arguments[2]);
     if (spawnError) return spawnError;
+    if (simulatedWait) { *pid = 12345; return 0; }
     char *childArguments[] = { "/usr/bin/false", NULL };
     return posix_spawn(pid, childArguments[0], actions, attributes, childArguments, environment);
 }
@@ -35,6 +80,34 @@ static void parseTests(void) {
     assert(!parseRequest(many, sizeof(many) - 2, &identifier, arguments));
     assert(!arguments[64]);
     assert(parseRequest(many, sizeof(many), &identifier, arguments) == EINVAL);
+    char install[] = "0123456789abcdef0123456789abcdef\0--lsb-install-ipa\0/data/payload.ipa\0";
+    assert(!parseRequest(install, sizeof(install) - 1, &identifier, arguments));
+    assert(!strcmp(arguments[0], "/usr/local/bin/lsb-app-install") && !strcmp(arguments[1], "/data/payload.ipa") && !arguments[2]);
+    char relative[] = "0123456789abcdef0123456789abcdef\0--lsb-install-ipa\0payload.ipa\0";
+    assert(parseRequest(relative, sizeof(relative) - 1, &identifier, arguments) == EINVAL);
+    char extra[] = "0123456789abcdef0123456789abcdef\0--lsb-install-ipa\0/data/payload.ipa\0extra\0";
+    assert(parseRequest(extra, sizeof(extra) - 1, &identifier, arguments) == EINVAL);
+    char missing[] = "0123456789abcdef0123456789abcdef\0--lsb-install-ipa\0";
+    assert(parseRequest(missing, sizeof(missing) - 1, &identifier, arguments) == EINVAL);
+}
+
+static void timeoutTests(void) {
+    simulatedWait = true;
+    for (unsigned install = 0; install < 2; ++install) {
+        for (unsigned reaped = 0; reaped < 2; ++reaped) {
+            clockSeconds = 100;
+            killed = false;
+            simulatedReap = reaped;
+            int status = 0;
+            bool timedOut = false;
+            time_t deadline = install ? 180 : 60;
+            assert(waitForCommand(12345, &status, &timedOut, deadline) == (reaped ? 0 : ETIMEDOUT));
+            assert(timedOut && killed && killedAt == 100 + deadline);
+            if (reaped) assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+            else assert(clockSeconds == 100 + deadline + 6);
+        }
+    }
+    simulatedWait = false;
 }
 
 static void deadlineTests(void) {
@@ -81,6 +154,31 @@ static void requestTests(void) {
         snprintf(name, sizeof(name), "%s.log", identifier);
         assert(!unlinkat(directory, name, 0));
     }
+    // Even a reaped installer client may have left an accepted operation running in installd. Do not replay it.
+    installing = true;
+    simulatedWait = true;
+    simulatedReap = true;
+    spawnError = 0;
+    killed = false;
+    clockSeconds = 100;
+    int installRequest = openat(directory, "active", O_WRONLY | O_CREAT | O_EXCL, 0600);
+    const char installArguments[] = "--lsb-install-ipa\0/data/payload.ipa\0";
+    assert(installRequest >= 0 && write(installRequest, identifier, 33) == 33);
+    assert(write(installRequest, installArguments, sizeof(installArguments) - 1) == sizeof(installArguments) - 1 && !close(installRequest));
+    assert(runRequest(directory) == ETIMEDOUT && absent(directory, "active") == EEXIST && killedAt == 280);
+    assert(!unlinkat(directory, "active", 0));
+    char resultName[80], resultBytes[1024];
+    snprintf(resultName, sizeof(resultName), "%s.json", identifier);
+    int timeoutResult = openat(directory, resultName, O_RDONLY);
+    assert(timeoutResult >= 0);
+    ssize_t resultLength = read(timeoutResult, resultBytes, sizeof(resultBytes) - 1);
+    assert(resultLength > 0 && !close(timeoutResult));
+    resultBytes[resultLength] = 0;
+    assert(strstr(resultBytes, "\"timed_out\":true") && strstr(resultBytes, "\"signal\":9"));
+    assert(!unlinkat(directory, resultName, 0));
+    snprintf(resultName, sizeof(resultName), "%s.log", identifier);
+    assert(!unlinkat(directory, resultName, 0));
+    installing = simulatedWait = false;
     // Malformed requests must remain available for inspection and must not invoke launchctl.
     int request = openat(directory, "active", O_WRONLY | O_CREAT | O_EXCL, 0600);
     assert(request >= 0 && write(request, "invalid", 7) == 7 && !close(request));
@@ -121,6 +219,7 @@ static void directoryTests(void) {
 int main(void) {
     parseTests();
     deadlineTests();
+    timeoutTests();
     requestTests();
     directoryTests();
     puts("LaunchctlControl tests passed");

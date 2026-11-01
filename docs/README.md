@@ -26,6 +26,7 @@ Historical sections below describe earlier cache layouts and failures; use the s
 - [Device types](device-types.md): original device profiles, phone/iPad choices, display dimensions, and applying a session restart.
 - [Source licensing](licensing.md): MIT original code, Apple-derived APSL files, retained notices, and source availability.
 - [Lazy sign](lazy-signing.md): optional isolated Security signer, P12 import, registration retries and preserved originals.
+- [Guest app installation](app-installation.md): native IPA import through guest InstallCoordination/installd, data containers, and live icon notifications.
 - [Runtime handoff](runtime-handoff.md): startup, local callbacks, thread storage, cache detachment, and debugger metadata.
 - [Multiprocess](multiprocess.md): App Group migration, native extension launches, synchronous XPC, FD replay, and current validation limits.
 - [Process inspection](process-inspection.md): authenticated guest process lists, original entitlement metadata, CocoaTop staging, and device-tested limits.

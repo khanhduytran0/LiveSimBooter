@@ -4,6 +4,7 @@
 #include "ProcessDebugger.h"
 #endif
 #include "../ProcessSupport/SpawnTransport.h"
+#include "../ProcessSupport/GuestExecutablePath.h"
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
@@ -230,12 +231,13 @@ bool LSBInspectionPIDPath(int pid, void *buffer, uint32_t size, int *result) {
     *result = 0;
     pthread_mutex_lock(&snapshotLock);
     for (uint32_t i = 0; i < processSnapshot->count; ++i) if (processSnapshot->records[i].guestPID == pid) {
-        // Keep broker identity virtual. Like macOS Simulator, proc_pidpath exposes the physical executable for bundle/resource lookup.
+        // Like macOS Simulator, proc_pidpath exposes physical runtime and installed-app executables for bundle/resource lookup.
         char path[PATH_MAX];
-        int length = snprintf(path, sizeof(path), "%s%s", inspectionRuntimeRoot, processSnapshot->records[i].executablePath);
+        int pathError = inspectionRootError ? inspectionRootError :
+            LSBGuestExecutablePhysicalPath(inspectionRuntimeRoot, processSnapshot->records[i].executablePath, path, sizeof(path));
+        size_t length = pathError ? 0 : strlen(path);
         if (!buffer) error = EFAULT;
-        else if (inspectionRootError) error = inspectionRootError;
-        else if (length < 0 || (size_t)length >= sizeof(path)) error = ENAMETOOLONG;
+        else if (pathError) error = pathError;
         else if ((uint32_t)length >= size) error = ENOSPC;
         else if (!writeBytes(buffer, path, (size_t)length + 1)) error = EFAULT;
         else { *result = length; error = 0; }

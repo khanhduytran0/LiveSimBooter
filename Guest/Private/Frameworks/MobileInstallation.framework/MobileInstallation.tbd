@@ -1,0 +1,10 @@
+--- !tapi-tbd
+tbd-version: 4
+targets: [ arm64-ios-simulator ]
+install-name: '/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation'
+current-version: 1
+compatibility-version: 1
+exports:
+  - targets: [ arm64-ios-simulator ]
+    objc-classes: [ MIInstallOptions ]
+...

@@ -498,30 +498,58 @@ why merely deploying resources under RuntimeRoot is insufficient; a device trace
 has not been captured. No environment variable selecting an additional compiler bundle was found in this libxpc build.
 `IPHONE_SIMULATOR_ROOT` is used there for SystemVersion.plist, not this registration path.
 
-The narrow C compatibility hook in `Guest/MetalCompilerRegistration.c` runs from the inserted guest shim's constructor,
-after its libSystem dependency has initialized and after the native-cache handoff. The generated backboardd job and the
-selected job with exact label `com.apple.SpringBoard` and effective program
-`/System/Library/CoreServices/SpringBoard.app/SpringBoard` receive `LSB_REGISTER_METAL_COMPILER=1`. The hook also requires
-the actual canonical `_NSGetExecutablePath` to equal canonical `DYLD_ROOT_PATH` plus `/usr/libexec/backboardd` or that exact
-SpringBoard path. An inherited variable cannot register a domain from launchd, xpcproxy, the compiler, or another
-executable. It resolves the one fixed compiler bundle inside that runtime root, rejects a bundle
-symlink escaping the root, and requires nonempty regular readable `Info.plist` and `MTLCompilerService` files without following
-their final symlinks. Missing or invalid files produce an errno log and skip registration. There is no general plugin scan.
+The C compatibility hook in [MetalCompilerRegistration.c](../Guest/MetalCompilerRegistration.c) now registers on demand,
+without a process whitelist. Its constructor only snapshots canonical guest identity after libSystem initialization:
+exact `LSB_REGISTER_METAL_COMPILER=1`, simulator platform 7, matching `DYLD_ROOT_PATH` and `SIMULATOR_ROOT`, and a regular
+executable contained in RuntimeRoot or this runtime's installed-app bundle tree. The constructor makes no XPC call.
+Native Metal helper roles bypass this guest shim and keep their existing native implementation.
 
-The hook uses the normally declared C API `xpc_add_bundle(path, 2)`. In this libxpc build, flag 2 becomes import value `0x1001`;
-the API uncorks the domain and sends routine 800 with `type=5`, the caller's PID as `handle`, and the physical bundle path.
-It registers the service for demand launch rather than starting it directly. The API returns void and can abort on certain
-domain errors; the log therefore says only that the call returned, with success unconfirmed. It has no added retry, timeout,
-queue, or listener. A new authorized guest process runs its own constructor; service/domain lifetime remains managed
-by simulator launchd. The constructor is deliberately not called from a dyld image callback.
+The demand point is the exact call `xpc_connection_create("com.apple.MTLCompilerService", queue)`. Pinned 23A343 Metal
+UUID `4C510B20-400D-397A-AE23-DAFB35D7FA0A` uses it at offsets `0x9e88` (current compiler connection) and `0x127008`
+(legacy compiler connection). Hooking only `MTLCreateSystemDefaultDevice` would miss `MTLCopyAllDevices`, which independently
+initializes the device array, and private device paths. Waiting for the actual compiler connection covers those paths and
+third-party apps, daemons and nested extensions without forcing a Metal dependency or compiler import into every guest.
+No caller-address restriction is needed: every guest may request this one fixed compiler service in its own PID domain.
 
-Focused tests cover exact opt-in, canonical role/path checks, sibling-root and symlink escapes, missing/special/empty files,
-and the number/path/flags of actual registration requests through a mocked XPC entry point. The full simulator shim links.
-This validates the integration mechanics. The explicit-registration probe and six-site launchd adapter now pass stock guest
-compiler launch and shader compilation on the phone. The later stock backboardd run also passes constructor registration
-and reaches its first presented frame. Relevant disassemblies are `tmp/backboardd/libxpc-sim-disassembly.txt` (`_xpc_add_bundle` at `0x243a4`,
-`__xpc_bootstrap_services` at `0x1aa84`, `__xpc_bundle_resolve_sync` at `0x29ac4`) and
-`tmp/backboardd/launchd-disassembly.txt` (cache fallback at `0x10000b3f4`–`0x10000b42c`).
+Before the first matching connection, the hook resolves the fixed compiler bundle inside its runtime snapshot, rejects a
+bundle symlink escaping that root, and requires nonempty regular readable `Info.plist` and `MTLCompilerService` files without
+following their final symlinks. It calls the normally declared C API `xpc_add_bundle(path, 2)`. In this libxpc build, flag 2
+becomes import value `0x1001`; the API uncorks the domain and sends routine 800 with `type=5`, the caller's PID as `handle`,
+and the physical bundle path. This registers demand launch rather than starting the compiler directly. The API returns void
+and can abort on certain domain errors; its return is not proof that a compiler launched or compiled a shader.
+
+`pthread_once` serializes concurrent first requests. A thread-local reentry guard forwards same-thread recursive calls
+instead of waiting on itself. Registration is attempted at most once per guest process, including validation failures;
+there is no replay of a possibly committed void import. Other services and pre-constructor calls forward immediately,
+without reading errno or TLS before the readiness guard. Registration preserves incoming errno; the original connection
+call retains its arguments, return value, ownership and resulting errno. No connection, worker queue or listener is owned
+by this adapter. It uses neither a dyld image callback nor an Objective-C hook.
+
+Focused tests cover unlisted daemons, installed apps and nested extensions, disabled/native-platform cases, runtime and
+symlink boundaries, missing/special/empty bundle files, exact service matching, original connection ownership, errno,
+same-thread reentry and eight concurrent first callers. The ordinary and ASan/UBSan runs and full guest shim build passed.
+The first shim constructor remains `enableBrokerConnection`; disassembly confirms the readiness branch precedes errno/TLS
+access. Local artifacts are under `tmp/metal-demand-20261101/`.
+
+On 2026-11-01, the demand hook passed a device shader test on iPhone 15 with no debugger attached. The guest executable
+`/usr/local/bin/metal-demand-probe` is outside the old process whitelist and was built without the probe's manual compiler
+registration option. Its launch job added no extra environment variables. Through ordinary Metal APIs it created a device,
+compiled source with `newLibraryWithSource`, built a render pipeline, rendered into an IOSurface and waited for GPU
+completion. Pixel checks found center BGRA **127,65,63,255** and black corner **0,0,0,255**; the probe reported **PASS** and
+wrote a 256×256 PNG. A subsequent `launchctl print` showed **one run**, **not running**, and **last exit code 0**. The probe's
+logical/native PID pair was not independently captured. This verifies registration through actual compiler demand rather
+than an explicit probe import. The native host was PID **15060**. The tested guest was **26.0 / 23A343**, cache base **0x110000000**, cache UUID
+`73ED978A-FD25-3166-A57A-34E21BB7E5B8`, with shim UUID `55C3CABB-8BA6-380A-9AB9-62FF25004B81`.
+The output and exit evidence are `tmp/metal-demand-20261101/probe-device15.log` and `job-device15.txt`; build/signing provenance
+is beside them. The final process-state capture found all **88** project processes untraced and resumed. The user also
+reported that the iOS 26 wallpaper works, and `device15-screen.png` shows the wallpaper and both installed probe icons.
+This confirms that wallpaper rendering result, without establishing every PosterBoard entry path or editor behavior.
+
+The earlier constructor implementation also passed compiler launch and shader compilation on the phone; the observations
+below are historical evidence for explicit PID-domain registration.
+Relevant libxpc disassembly is `tmp/backboardd/libxpc-sim-disassembly.txt` (`_xpc_add_bundle` at `0x243a4`,
+`__xpc_bootstrap_services` at `0x1aa84`, `__xpc_bundle_resolve_sync` at `0x29ac4`), and launchd's cache fallback is in
+`tmp/backboardd/launchd-disassembly.txt` at `0x10000b3f4`–`0x10000b42c`.
 
 ### SpringBoard compiler registration
 
@@ -679,8 +707,8 @@ A compiler registered for SpringBoard does not serve every app's PID domain. A n
 found its main thread waiting on RenderBox shader compilation. Launchd logged `ESRCH` for repeated per-PID compiler
 lookups and error147 for the virtual framework bundle path, which did not belong to the physical Contacts.app origin.
 
-The guest handoff now supplies `LSB_REGISTER_METAL_COMPILER=1` after removing conflicting input copies. The constructor
-retains the three existing daemon roles and additionally validates immediate app main executables under `Applications`,
+The guest handoff supplies `LSB_REGISTER_METAL_COMPILER=1` after removing conflicting input copies. The earlier constructor
+implementation retained the three existing daemon roles and additionally validates immediate app main executables under `Applications`,
 `System/Applications`, and `System/Library/CoreServices` inside canonical RuntimeRoot. Bounded regular Info.plist metadata
 must declare package type `APPL` and exactly match the executable name. Other nested helpers and XPC services do not qualify;
 the exact WebKit GPU extension has the separate role described below.
@@ -702,7 +730,7 @@ diagnostic captured native GPU PIDs **5713**, **5719**, and **5721**, without LL
 that `MTLCompilerService` lookup failed with error **3**, `No such process`. Pinned QuartzCore calls `abort_with_payload`
 at TEXT offset `0x165304` for this failure. This was compiler discovery, not a missing shader function or render-server failure.
 
-The compiler constructor now also accepts exactly
+The earlier compiler constructor was extended to accept exactly
 `System/Library/ExtensionKit/Extensions/GPUExtension.appex/com.apple.WebKit.GPU` inside canonical RuntimeRoot. The GPU has
 its own PID domain; its UI application's compiler import is insufficient. Registration uses the existing fixed compiler bundle
 and preserves the exact opt-in, canonical-path, regular-file and containment checks. It does not enable other extensions or

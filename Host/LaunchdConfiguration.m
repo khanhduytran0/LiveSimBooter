@@ -435,13 +435,22 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
         const char *stopChildren = getenv("LSB_DEBUG_STOP_CHILDREN");
         if (stopChildren && !strcmp(stopChildren, "1")) runtimeEnvironment[@"LSB_DEBUG_STOP_BEFORE_HANDOFF"] = @"1";
         NSMutableDictionary<NSString *, NSString *> *launchEnvironment = runtimeEnvironment.mutableCopy;
+        // Match CoreSimulator 1171.7 createLaunchdJobWithBinpref:...: these five values are overridable defaults.
+        // 23A343 launchd's environment-entry constructor (0x11f04) rejects job keys present in Bootstrap.Child;
+        // ChildDefaults are appended after the job environment instead, preserving RunningBoard's per-app HOME.
+        NSMutableDictionary<NSString *, NSString *> *childDefaults = [NSMutableDictionary dictionary];
+        for (NSString *key in @[@"HOME", @"CFFIXED_USER_HOME", @"TMPDIR", @"DYLD_FALLBACK_FRAMEWORK_PATH", @"DYLD_FALLBACK_LIBRARY_PATH"]) {
+            childDefaults[key] = runtimeEnvironment[key];
+            [runtimeEnvironment removeObjectForKey:key];
+        }
         // The stock launchd wait compares its return value to this selector; an empty child ledger returns -1/ECHILD.
         // This is a version-specific no-child compatibility sentinel, not an actual tank process PID.
         launchEnvironment[@"XPC_SIMULATOR_HOLDING_TANK_HACK"] = @"-1";
         launchEnvironment[@"XPC_FLAGS"] = @"0x0000000000000000";
         launchEnvironment[@"LSB_SIMULATOR_LAUNCHD"] = @"1";
         NSDictionary *configuration = @{
-            @"Bootstrap": @{@"Paths": includeJob ? @[jobDirectory] : @[], @"Self": launchEnvironment, @"Child": runtimeEnvironment, @"ChildDefaults": @{},
+            @"Bootstrap": @{@"Paths": includeJob ? @[jobDirectory] : @[], @"Self": launchEnvironment, @"Child": runtimeEnvironment,
+                             @"ChildDefaults": childDefaults,
                              @"BinaryOrderPreference": @"arm64", @"SimulatorRuntimeRoot": root},
             @"MultipleInstanceLimit": @64, @"LogToConsole": @YES, @"LogToFlatFile": @NO,
             @"LogServiceLifecycle": @YES, @"LogAllBootstrapErrors": @YES, @"RequireDomainBinding": @NO

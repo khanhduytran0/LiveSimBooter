@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fts.h>
 #include <limits.h>
 #include <mach-o/loader.h>
 #include <stdbool.h>
@@ -173,6 +174,41 @@ static void testAt(const char *root, const char *path) {
     assert(!chmod(path, 0755));
 }
 
+static void testInstalledApplications(const char *base, const struct mach_header_64 *header) {
+    char data[PATH_MAX], app[PATH_MAX], path[PATH_MAX], parent[PATH_MAX];
+    assert(snprintf(data, sizeof(data), "%s/data", base) > 0);
+    const char *locations[] = {"Containers/Bundle/Application/id/Example.app/Example",
+        "Containers/Bundle/Application/id/Example.app/PlugIns/Widget.appex/Widget", "Containers/Data/Application/id/Example.app/Example",
+        "Containers/Bundle/Application-other/id/Example.app/Example", "Containers/Bundle/Application/id/Example.app-other/Example", "staging/Example.app/Example"};
+    for (unsigned i = 0; i < sizeof(locations) / sizeof(*locations); ++i) {
+        assert(snprintf(path, sizeof(path), "%s/%s", data, locations[i]) > 0);
+        strcpy(parent, path); *strrchr(parent, '/') = 0;
+        for (char *part = parent + 1; *part; ++part) if (*part == '/') {
+            *part = 0; assert(!mkdir(parent, 0700) || errno == EEXIST); *part = '/';
+        }
+        assert(!mkdir(parent, 0700) || errno == EEXIST);
+        writeImage(path, header); reset();
+        if (i < 2) {
+            assert(!LSBAccess(path, X_OK) && errno == EDOM);
+            reset(); assert(!LSBFAccessAt(AT_FDCWD, path, X_OK, AT_EACCESS) && errno == EDOM);
+        } else { expectDenied(path); assert(!openCalls); }
+    }
+    assert(snprintf(app, sizeof(app), "%s/Containers/Bundle/Application/id/Example.app", data) > 0);
+    assert(snprintf(path, sizeof(path), "%s/Example", app) > 0);
+    testNativeBehavior(path); testModes(path);
+    assert(!unlink(path) && !symlink("/usr/bin/false", path)); reset(); expectDenied(path); assert(!openCalls);
+    assert(!unlink(path)); writeImage(path, header);
+    struct mach_header_64 invalid = *header; invalid.filetype = MH_DYLIB;
+    writeImage(path, &invalid); reset(); expectDenied(path);
+    char *paths[] = {data, NULL}; FTS *tree = fts_open(paths, FTS_PHYSICAL | FTS_NOCHDIR, NULL); assert(tree);
+    FTSENT *entry;
+    while ((entry = fts_read(tree))) {
+        if (entry->fts_info == FTS_D) continue;
+        assert(!(entry->fts_info == FTS_DP ? rmdir(entry->fts_accpath) : unlink(entry->fts_accpath)));
+    }
+    assert(!fts_close(tree));
+}
+
 int main(void) {
     char previousDirectory[PATH_MAX];
     assert(getcwd(previousDirectory, sizeof(previousDirectory)));
@@ -218,6 +254,7 @@ int main(void) {
     }
     assert(!truncate(path, 4)); reset(); expectDenied(path);
     assert(!chdir(previousDirectory));
+    testInstalledApplications(directory, &header);
     assert(!unlink(insideLink) && !unlink(rootLink) && !unlink(escape) && !unlink(outside) && !unlink(path));
     assert(!rmdir(bin) && !rmdir(root) && !rmdir(directory));
     puts("ExecutableAccess: native forwarding, EPERM confinement, readable Mach-O roles, identities/groups, faccessat modes, and errno passed");

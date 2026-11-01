@@ -3,7 +3,8 @@
 `Guest/LaunchctlControl.c` runs stock simulator `/bin/launchctl` inside the existing simulator launchd session. It inherits
 the guest bootstrap port, runtime environment, and spawn shim; each command uses the broker's ordinary spawn/wait path.
 `Tools/guest-launchctl.py` submits literal arguments over native SSH and retrieves stdout, stderr, and exit status. Commands
-do not use a shell, and the worker can execute only `/bin/launchctl`.
+do not use a shell. Ordinary requests execute only `/bin/launchctl`; the reserved IPA-install request described below
+executes the fixed guest `/usr/local/bin/lsb-app-install` helper.
 
 ## Setup
 
@@ -14,7 +15,8 @@ at `RuntimeRoot/usr/libexec/launchctl-control` and `RuntimeRoot/bin/launchctl`. 
 libSystem, libobjc, and CoreFoundation; the worker needs only libSystem.
 
 Install this plist as `RuntimeRoot/System/Library/LaunchDaemons/com.kdt.LiveSimBooter.launchctl-control.plist`, and add its
-label to the host's existing `--launchd-services` selection. Explicit labels replace the default additional service list,
+label when using an explicit `--launchd-services` selection. The graphical default now includes this worker, installd and
+installcoordinationd, filling its 24 selected-service slots. Explicit labels replace the default additional service list,
 so retain the other labels needed for the current boot.
 
 ```xml
@@ -75,6 +77,29 @@ Records are under `tmp/app-launch-fix/promoted-results`: `91db0a23abba4d2f9e5e03
 `64cf219bf2504093a219582337e0b883` (sshdog bootstrap), `4375fd94d09f42a5b4dcc2c8949b9a3c` (application-launch bootstrap),
 and `d9b31729d60b48249caa3e5553d99099` (probe bootout). Those completed requests have zero spawn/wait errors and no timeout.
 This validates job control; it does not imply that every bootstrapped program completed its intended work.
+
+## Reserved IPA installation request
+
+Native **Settings → Applications → Install IPA…** shares this queue. Its sole reserved command is
+`--lsb-install-ipa <absolute physical archive path>`, with exactly one path argument. The worker replaces that verb with
+`/usr/local/bin/lsb-app-install <path>`; it cannot launch an arbitrary program. Ordinary launchctl arguments retain their
+existing behavior. The helper validates the exact host-staged `data/Library/LiveSimBooter/Imports/<32hex>/payload.ipa`
+location, invokes guest InstallCoordination, and checks the installed LaunchServices record. See
+[guest application installation](app-installation.md) for building, staging, services, result schema and current validation limits.
+
+Install requests have a 180-second worker deadline plus five seconds to observe SIGKILL, rather than launchctl's 60 seconds.
+The native importer polls for up to 190 seconds. Killing the helper cannot cancel a daemon operation already in progress:
+a timeout preserves `active`, source and queue ownership for inspection, even if the helper was reaped. The worker stops
+instead of consuming another request. Native Refresh only reads the saved operation and never retries the installation.
+Do not submit the same IPA through a second client to work around an unknown outcome.
+
+The helper's `LSB_INSTALL_RESULT ` JSON line is separate from the worker's spawn/wait receipt. Successful spawn or exit
+alone is insufficient: native import requires both a confirmed receipt and the validated result. Completed receipt/log
+files remain available after the native importer removes its own staging copy and matching queue lock. The original
+selected document is never modified. The first IPA control request succeeded on iPhone 15 with helper exit 0 and verified
+installed LaunchServices paths; see [installation evidence](app-installation.md#installed-executables-and-remaining-validation).
+The installed app subsequently launched after restarting guest SpringBoard, without a full simulator reboot. Automatic
+live icon refresh and correct per-app home selection remain separate issues recorded there.
 
 ## Restart the simulator session
 
@@ -150,8 +175,9 @@ Logs remain on the phone; local downloads are capped at 16 MiB and explicitly re
 
 The client holds a queue ownership record until completion. Complete requests are published atomically; a second client
 cannot overwrite a pending request. Arguments are passed byte-for-byte as UTF-8, with 1–63 nonempty arguments and a 16 KiB
-request limit. The worker kills a command after 60 seconds and allows five more seconds to observe its termination. Client
-polling defaults to 90 seconds and can be changed with `--timeout`.
+request limit. The worker kills ordinary launchctl commands after 60 seconds and allows five more seconds to observe
+termination; reserved IPA installation uses 180 seconds plus the same grace period. SSH client polling defaults to 90
+seconds and can be changed with `--timeout`; native IPA import uses 190 seconds.
 
 If SSH disconnects or polling expires, the client never submits that command again. Retrieve the same operation using the
 same connection/output options plus `--request-id ID`, with no command arguments. An interrupted worker, unresolved wait,
@@ -160,5 +186,6 @@ the live child, and `client.lock/owner.json` before manually clearing the queue 
 these files just to retry an operation whose side effect may already have occurred. Completed logs/status can be removed
 after collection.
 
-This controls guest launchd jobs; it does not provide a general command shell, a guest SSH server, or new launchd policy.
+This controls guest launchd jobs and the fixed IPA helper; it does not provide a general command shell, a guest SSH server,
+or new launchd policy.
 Restarting the control job through its own queue can interrupt the reply, so use another management path for that job.

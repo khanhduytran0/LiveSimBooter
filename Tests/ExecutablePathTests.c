@@ -1,8 +1,10 @@
 #include "../LiveProcess/ExecutablePath.h"
+#include "../ProcessSupport/GuestExecutablePath.h"
 
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fts.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +30,60 @@ static void fails(const char *root, const char *path, int expected) {
     char result[PATH_MAX] = "unchanged";
     int error = LSBResolveGuestExecutable(root, path, result);
     assert((expected ? error == expected : error != 0) && !strcmp(result, "unchanged"));
+}
+
+static void makeDirectories(const char *path) {
+    char copy[PATH_MAX]; strcpy(copy, path);
+    for (char *part = copy + 1; *part; ++part) if (*part == '/') {
+        *part = 0; assert(!mkdir(copy, 0700) || errno == EEXIST); *part = '/';
+    }
+    assert(!mkdir(copy, 0700) || errno == EEXIST);
+}
+
+static void testInstalledApplications(const char *base, const char *root) {
+    char data[PATH_MAX], app[PATH_MAX], image[PATH_MAX], path[PATH_MAX], output[PATH_MAX];
+    join(data, base, "data");
+    join(app, data, "Containers/Bundle/Application/11111111-1111-1111-1111-111111111111/Example.app");
+    makeDirectories(app);
+    join(image, app, "Example"); makeFile(image);
+    resolves(root, image, image);
+    const char *nested[] = {"Frameworks/Example.framework/Example", "PlugIns/Widget.appex/Widget", "XPCServices/Worker.xpc/Worker"};
+    for (unsigned i = 0; i < sizeof(nested) / sizeof(*nested); ++i) {
+        join(path, app, nested[i]);
+        char parent[PATH_MAX]; strcpy(parent, path); *strrchr(parent, '/') = 0; makeDirectories(parent); makeFile(path);
+        resolves(root, path, path);
+    }
+    char alias[PATH_MAX]; join(alias, data, "alias"); assert(!symlink(app, alias));
+    join(path, alias, "Example"); resolves(root, path, image);
+    int cwd = open(".", O_RDONLY | O_DIRECTORY);
+    assert(cwd >= 0 && !chdir(app)); resolves(root, "Example", image); assert(!fchdir(cwd) && !close(cwd));
+    join(path, app, "../Example.app/Example"); fails(root, path, EINVAL);
+    join(path, app, "//Example"); fails(root, path, EINVAL);
+    join(path, app, "missing"); fails(root, path, ENOENT);
+    fails(root, app, EACCES);
+    join(path, app, "Frameworks"); fails(root, path, EINVAL);
+    const char *invalid[] = {"Containers/Data/Application/other/Bad.app/Bad", "Containers/Bundle/Application-other/id/Bad.app/Bad",
+        "Containers/Bundle/Application/id/Bad.app-other/Bad", "Containers/Bundle/Application/id/Bad", "staging/Bad.app/Bad"};
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
+        join(path, data, invalid[i]);
+        char parent[PATH_MAX]; strcpy(parent, path); *strrchr(parent, '/') = 0; makeDirectories(parent); makeFile(path);
+        fails(root, path, EACCES);
+    }
+    join(path, app, "escape"); assert(!symlink("/usr/bin/false", path)); fails(root, path, EACCES);
+    assert(LSBGuestInstalledApplicationPath(root, image) && !LSBGuestInstalledApplicationPath(root, "/x"));
+    assert(!LSBGuestExecutablePhysicalPath(root, image, output, sizeof(output)) && !strcmp(output, image));
+    assert(LSBGuestExecutablePhysicalPath(root, image, output, strlen(image)) == ENAMETOOLONG);
+    join(path, data, "staging/Bad.app/Bad");
+    assert(LSBGuestExecutablePhysicalPath(root, path, output, sizeof(output)) == EACCES);
+    join(path, root, "bin/df");
+    assert(!LSBGuestExecutablePhysicalPath(root, "/bin/df", output, sizeof(output)) && !strcmp(output, path));
+    char *paths[] = {data, NULL}; FTS *tree = fts_open(paths, FTS_PHYSICAL | FTS_NOCHDIR, NULL); assert(tree);
+    FTSENT *entry;
+    while ((entry = fts_read(tree))) {
+        if (entry->fts_info == FTS_D) continue;
+        assert(!(entry->fts_info == FTS_DP ? rmdir(entry->fts_accpath) : unlink(entry->fts_accpath)));
+    }
+    assert(!fts_close(tree));
 }
 
 int main(void) {
@@ -95,6 +151,8 @@ int main(void) {
     memset(oversized, 'x', sizeof(oversized));
     oversized[0] = '/'; oversized[PATH_MAX] = 0;
     fails(root, oversized, ENAMETOOLONG);
+
+    testInstalledApplications(base, root);
     oversized[PATH_MAX - 1] = 0;
     fails(root, oversized, ENAMETOOLONG);
 

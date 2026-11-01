@@ -1,6 +1,17 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "\nTemporary import cleanup failed (%d). Tap Refresh to retry cleanup without reinstalling.": {
+      "comment": "IPA install completed, but its staging or queue cleanup needs another readback.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\nTemporary import cleanup failed (%d). Tap Refresh to retry cleanup without reinstalling."
+          }
+        }
+      }
+    },
     "%@\n\n%@": {
       "comment": "Settings footer: explanatory paragraph, then current status.",
       "localizations": {
@@ -30,6 +41,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "%1$ld · %2$@"
+          }
+        }
+      }
+    },
+    "Applications": {
+      "comment": "Settings section heading for simulator app installation.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Applications"
           }
         }
       }
@@ -144,6 +166,17 @@
         }
       }
     },
+    "Checking the previous installation…": {
+      "comment": "Read back an IPA installation without submitting it again.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking the previous installation…"
+          }
+        }
+      }
+    },
     "Checking the previous request; it will not be repeated.": {
       "comment": "Checking a timed-out display setting without applying it twice.",
       "localizations": {
@@ -195,6 +228,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "Code signing"
+          }
+        }
+      }
+    },
+    "Copying IPA…": {
+      "comment": "IPA import is copying the selected document into simulator staging.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copying IPA…"
           }
         }
       }
@@ -261,6 +305,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "Could not start runtime: %s. Close and reopen the app to try again."
+          }
+        }
+      }
+    },
+    "Could not submit installation: %s (%d).": {
+      "comment": "IPA request failed before publication: system description and error number.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not submit installation: %s (%d)."
           }
         }
       }
@@ -525,6 +580,72 @@
           "stringUnit": {
             "state": "translated",
             "value": "Importing…"
+          }
+        }
+      }
+    },
+    "Install IPA…": {
+      "comment": "Choose an IPA document to install in the simulator.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Install IPA…"
+          }
+        }
+      }
+    },
+    "Install an IPA into the running simulator. The original file is preserved.": {
+      "comment": "Applications settings instructions.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Install an IPA into the running simulator. The original file is preserved."
+          }
+        }
+      }
+    },
+    "Installation failed: %@": {
+      "comment": "IPA installation failure with an error description.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Installation failed: %@"
+          }
+        }
+      }
+    },
+    "Installation outcome is unknown. The imported copy is kept. Tap Refresh to check; the request will not be repeated.": {
+      "comment": "IPA installation timed out or its result could not be verified.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Installation outcome is unknown. The imported copy is kept. Tap Refresh to check; the request will not be repeated."
+          }
+        }
+      }
+    },
+    "Installed %@.": {
+      "comment": "IPA installation succeeded; app bundle identifier follows.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Installed %@."
+          }
+        }
+      }
+    },
+    "Installing application…": {
+      "comment": "Guest IPA installation is running.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Installing application…"
           }
         }
       }
@@ -1112,6 +1233,17 @@
         }
       }
     },
+    "Start the simulator to install an IPA.": {
+      "comment": "Applications settings footer while no controllable simulator is running.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start the simulator to install an IPA."
+          }
+        }
+      }
+    },
     "Tab": {
       "comment": "Terminal shortcut sending the Tab key",
       "localizations": {
@@ -1200,6 +1332,17 @@
         }
       }
     },
+    "The guest installer rejected the application.": {
+      "comment": "Fallback guest IPA installation error.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The guest installer rejected the application."
+          }
+        }
+      }
+    },
     "The host launch environment controls this setting.": {
       "comment": "Settings error for a feature forced by the native host environment.",
       "localizations": {
@@ -1218,6 +1361,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "The original device capabilities profile is missing. Stage the device profiles during setup."
+          }
+        }
+      }
+    },
+    "The previous installation has no confirmed result. Tap Refresh to check it without repeating it.": {
+      "comment": "IPA installation outcome is unknown; Refresh only retrieves the existing request.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The previous installation has no confirmed result. Tap Refresh to check it without repeating it."
           }
         }
       }

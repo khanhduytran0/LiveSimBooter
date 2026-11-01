@@ -9,6 +9,7 @@
 #include "ProcessDisplayName.h"
 #include "NativeRuntimePolicy.h"
 #include "InsertedLibraries.h"
+#include "ApplicationEnvironment.h"
 #include "../NativeMetal/Backend.h"
 #include <errno.h>
 #include <dlfcn.h>
@@ -165,6 +166,7 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     const char *displayName = launch.plan.strings + (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_SERVICE ||
         launch.executionRole == LSB_EXECUTION_NATIVE_SIGNER ?
         launch.plan.argv[0] : launch.plan.path);
+    if (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_PROBE) displayName = "Metal.probe";
     pid_t displayPID = launch.executionRole == LSB_EXECUTION_SIMULATOR ? launch.guestPID : 0;
     int nameError = LSBSetProcessDisplayName(displayName, displayPID, nativeArgv0, nativeArgv0Capacity);
     if (nameError) fprintf(stderr, "[LiveProcess] Could not set native process name: %s\n", strerror(nameError));
@@ -198,7 +200,7 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     if (!error) error = resolveExecutable(executablePath);
     int length = snprintf(dyldPath, sizeof(dyldPath), "%s/usr/lib/dyld_sim", launch.runtimeRoot);
     if (!error && (length < 0 || (size_t)length >= sizeof(dyldPath))) error = ENAMETOOLONG;
-    if (!error) error = LSBBuildGuestInsertedLibraries(launch.runtimeRoot, policyEnvironment, insertLibrary, sizeof(insertLibrary));
+    if (!error) error = LSBBuildGuestInsertedLibraries(launch.runtimeRoot, executablePath, policyEnvironment, insertLibrary, sizeof(insertLibrary));
     length = snprintf(capabilitiesEnvironment, sizeof(capabilitiesEnvironment),
                       "SIMULATOR_CAPABILITIES=%s/Library/Developer/CoreSimulator/DeviceType/capabilities.plist", launch.runtimeRoot);
     if (!error && (length < 0 || (size_t)length >= sizeof(capabilitiesEnvironment))) error = ENAMETOOLONG;
@@ -224,6 +226,55 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     snprintf(wakeEnvironment, sizeof(wakeEnvironment), LSB_CHILD_WAKE_FD_ENV "=%d", launch.wakeFD);
     snprintf(guestPIDEnvironment, sizeof(guestPIDEnvironment), "LSB_GUEST_PID=%d", launch.guestPID);
     snprintf(parentPIDEnvironment, sizeof(parentPIDEnvironment), "LSB_GUEST_PPID=%d", launch.parentPID);
+    const char *arguments[LSB_MAX_VECTOR + 1], *environment[LSB_MAX_VECTOR + 17];
+    LSBApplicationEnvironment applicationEnvironment = {0};
+    unsigned count = 0;
+    int stopBeforeHandoff = 0;
+    if (!error) {
+        for (unsigned i = 0; i < launch.plan.argc; ++i) arguments[i] = launch.plan.strings + launch.plan.argv[i];
+        arguments[launch.plan.argc] = NULL;
+        for (unsigned i = 0; i < launch.plan.envc; ++i) {
+            const char *entry = launch.plan.strings + launch.plan.envp[i];
+            const size_t debugPrefixLength = sizeof("LSB_DEBUG_STOP_BEFORE_HANDOFF=") - 1;
+            if (!strncmp(entry, "LSB_DEBUG_STOP_BEFORE_HANDOFF=", debugPrefixLength)) {
+                stopBeforeHandoff = !strcmp(entry + debugPrefixLength, "1");
+                continue;
+            }
+            if (strncmp(entry, "DYLD_INSERT_LIBRARIES=", 22) && strncmp(entry, "LSB_BROKER_PORT=", 16) &&
+                strncmp(entry, "RB_USE_BINARY_ARCHIVE=", sizeof("RB_USE_BINARY_ARCHIVE=") - 1) &&
+                strncmp(entry, "LSB_SIMULATE_FRAMEWORK_BUNDLES=", sizeof("LSB_SIMULATE_FRAMEWORK_BUNDLES=") - 1) &&
+                strncmp(entry, "LSB_REGISTER_METAL_COMPILER=", sizeof("LSB_REGISTER_METAL_COMPILER=") - 1) &&
+                strncmp(entry, "SIMULATOR_CAPABILITIES=", sizeof("SIMULATOR_CAPABILITIES=") - 1) &&
+                strncmp(entry, "LSB_GUEST_PID=", sizeof("LSB_GUEST_PID=") - 1) &&
+                strncmp(entry, "LSB_GUEST_PPID=", sizeof("LSB_GUEST_PPID=") - 1) &&
+                strncmp(entry, "LSB_HOST_WORKQUEUE_START=", sizeof("LSB_HOST_WORKQUEUE_START=") - 1) &&
+                strncmp(entry, "LSB_HOST_WORKQUEUE_FEATURES=", sizeof("LSB_HOST_WORKQUEUE_FEATURES=") - 1) &&
+                strncmp(entry, LSB_CHILD_STATUS_ENV "=", sizeof(LSB_CHILD_STATUS_ENV)) &&
+                strncmp(entry, LSB_CHILD_WAKE_FD_ENV "=", sizeof(LSB_CHILD_WAKE_FD_ENV))) environment[count++] = entry;
+        }
+        // RenderBox binary archives require targetDeviceArchitecture, which stock MTLSimDevice does not implement.
+        // Apply to every guest, including spawned apps with a replacement environment; native Metal helpers return above.
+        environment[count++] = "RB_USE_BINARY_ARCHIVE=0";
+        // Cached install paths must resolve resources inside RuntimeRoot, including apps that supply a replacement environment.
+        environment[count++] = "LSB_SIMULATE_FRAMEWORK_BUNDLES=1";
+        // Apps need the physical compiler bundle imported into their own PID domain; the guest hook validates the executable role.
+        environment[count++] = "LSB_REGISTER_METAL_COMPILER=1";
+        // MobileGestalt reads this profile directly. A missing optional profile must not prevent command-line guests from starting.
+        environment[count++] = capabilitiesEnvironment;
+        environment[count++] = insertLibrary;
+        environment[count++] = brokerEnvironment;
+        environment[count++] = statusEnvironment;
+        environment[count++] = wakeEnvironment;
+        environment[count++] = workqueueStartEnvironment;
+        environment[count++] = workqueueFeaturesEnvironment;
+        environment[count++] = guestPIDEnvironment;
+        environment[count++] = parentPIDEnvironment;
+        environment[count] = NULL;
+        // Direct probes and children with a replacement environment also need the native policy before simulator initialization.
+        error = LSBAppendNativeRuntimePolicy(environment, &count, sizeof(environment) / sizeof(*environment), nativePolicy);
+        if (!error) error = LSBPrepareApplicationEnvironment(launch.runtimeRoot, executablePath, environment, &applicationEnvironment);
+        if (!error) error = LSBApplyApplicationEnvironment(&applicationEnvironment, environment, &count, sizeof(environment) / sizeof(*environment));
+    }
     // Complete fallible Mach state setup before READY can commit an exec. Readiness uses the retained broker right directly.
     kern_return_t portsError = KERN_SUCCESS;
     if (!error && launch.ports.registeredPresent)
@@ -253,55 +304,6 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     if ((error = LSBRequireSingleThread())) {
         closeStatus();
         fprintf(stderr, "[LiveProcess] Native worker appeared before handoff: %s\n", strerror(error)); return 1;
-    }
-    const char *arguments[LSB_MAX_VECTOR + 1], *environment[LSB_MAX_VECTOR + 15];
-    for (unsigned i = 0; i < launch.plan.argc; ++i) arguments[i] = launch.plan.strings + launch.plan.argv[i];
-    arguments[launch.plan.argc] = NULL;
-    unsigned count = 0;
-    int stopBeforeHandoff = 0;
-    for (unsigned i = 0; i < launch.plan.envc; ++i) {
-        const char *entry = launch.plan.strings + launch.plan.envp[i];
-        const size_t debugPrefixLength = sizeof("LSB_DEBUG_STOP_BEFORE_HANDOFF=") - 1;
-        if (!strncmp(entry, "LSB_DEBUG_STOP_BEFORE_HANDOFF=", debugPrefixLength)) {
-            stopBeforeHandoff = !strcmp(entry + debugPrefixLength, "1");
-            continue;
-        }
-        if (strncmp(entry, "DYLD_INSERT_LIBRARIES=", 22) && strncmp(entry, "LSB_BROKER_PORT=", 16) &&
-            strncmp(entry, "RB_USE_BINARY_ARCHIVE=", sizeof("RB_USE_BINARY_ARCHIVE=") - 1) &&
-            strncmp(entry, "LSB_SIMULATE_FRAMEWORK_BUNDLES=", sizeof("LSB_SIMULATE_FRAMEWORK_BUNDLES=") - 1) &&
-            strncmp(entry, "LSB_REGISTER_METAL_COMPILER=", sizeof("LSB_REGISTER_METAL_COMPILER=") - 1) &&
-            strncmp(entry, "SIMULATOR_CAPABILITIES=", sizeof("SIMULATOR_CAPABILITIES=") - 1) &&
-            strncmp(entry, "LSB_GUEST_PID=", sizeof("LSB_GUEST_PID=") - 1) &&
-            strncmp(entry, "LSB_GUEST_PPID=", sizeof("LSB_GUEST_PPID=") - 1) &&
-            strncmp(entry, "LSB_HOST_WORKQUEUE_START=", sizeof("LSB_HOST_WORKQUEUE_START=") - 1) &&
-            strncmp(entry, "LSB_HOST_WORKQUEUE_FEATURES=", sizeof("LSB_HOST_WORKQUEUE_FEATURES=") - 1) &&
-            strncmp(entry, LSB_CHILD_STATUS_ENV "=", sizeof(LSB_CHILD_STATUS_ENV)) &&
-            strncmp(entry, LSB_CHILD_WAKE_FD_ENV "=", sizeof(LSB_CHILD_WAKE_FD_ENV))) environment[count++] = entry;
-    }
-    // RenderBox binary archives require targetDeviceArchitecture, which stock MTLSimDevice does not implement.
-    // Apply to every guest, including spawned apps with a replacement environment; native Metal helpers return above.
-    environment[count++] = "RB_USE_BINARY_ARCHIVE=0";
-    // Cached install paths must resolve resources inside RuntimeRoot, including apps that supply a replacement environment.
-    environment[count++] = "LSB_SIMULATE_FRAMEWORK_BUNDLES=1";
-    // Apps need the physical compiler bundle imported into their own PID domain; the guest hook validates the executable role.
-    environment[count++] = "LSB_REGISTER_METAL_COMPILER=1";
-    // MobileGestalt reads this profile directly. A missing optional profile must not prevent command-line guests from starting.
-    environment[count++] = capabilitiesEnvironment;
-    environment[count++] = insertLibrary;
-    environment[count++] = brokerEnvironment;
-    environment[count++] = statusEnvironment;
-    environment[count++] = wakeEnvironment;
-    environment[count++] = workqueueStartEnvironment;
-    environment[count++] = workqueueFeaturesEnvironment;
-    environment[count++] = guestPIDEnvironment;
-    environment[count++] = parentPIDEnvironment;
-    environment[count] = NULL;
-    // Direct probes and children with a replacement environment also need the native policy before simulator initialization.
-    int policyError = LSBAppendNativeRuntimePolicy(environment, &count, sizeof(environment) / sizeof(*environment), nativePolicy);
-    if (policyError) {
-        closeStatus();
-        fprintf(stderr, "[LiveProcess] Could not apply native runtime defaults: %s\n", strerror(policyError));
-        return 1;
     }
     if (LSBTraceHandoffRequested(environment))
         fprintf(stderr, "[LiveProcess] pid=%d entering %s with %u arguments\n", getpid(), executablePath, launch.plan.argc);

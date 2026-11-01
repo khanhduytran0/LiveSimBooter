@@ -1,14 +1,20 @@
 # Native process names and argument storage
 
-Every extension still executes the signed `LiveProcess` image. After its authenticated broker check-in, it writes `LSB:<logical PID> <basename>`
+Every extension still executes the signed `LiveProcess` image. After authenticated broker check-in, a simulator guest writes `LSB:<logical PID> <basename>`
 into the original native `argv[0]` allocation, for example `LSB:1234 SpringBoard`. The portable 8 MiB-stack build can subsequently lose that
 argument window when the guest cache replaces it; the optional preservation build below keeps it on tested devices. Native `ps`'s PID column remains the genuine native PID,
 which can differ from the logical PID in the name. An exec replacement retains the logical PID and uses its replacement executable's basename. Guest argument
 and environment vectors, signed executable path, audit tokens and broker identity are separate and remain unchanged.
 
-Native Metal helpers use `Metal.backboardd`, `Metal.SpringBoard`, and `Metal.public` without a guest-PID prefix. Replacement SpringBoard helpers
-retain the same label. Both the native argv capacity and the independent 32-byte kernel long-name limit preserve the complete `LSB:<PID> ` prefix;
-only the basename is truncated when necessary. `kern.procname` takes bytes excluding the terminator and adds its own NUL.
+Native helpers use `LSBHelper: <helper name>` without a guest PID: `Metal.backboardd`, `Metal.SpringBoard`, `Metal.public`, `Metal.probe`,
+and `Signer`. Replacement SpringBoard helpers retain the same label. The native host itself is unchanged. Both the native argv capacity
+and the independent 32-byte kernel long-name limit preserve the complete `LSB:<PID> ` or `LSBHelper: ` prefix; only the basename is
+truncated when necessary. An argv buffer too short for the complete prefix, one name byte and its terminator returns `ENOSPC` without
+changing either name. `kern.procname` takes bytes excluding the terminator and adds its own NUL.
+
+`Tests/ProcessDisplayNameTests.c` checks all native helper labels, unchanged guest labels, independent argv/kernel limits, overlapping input,
+untouched surrounding arguments, zero argv capacity, and preserved errno when the kernel update fails. The helper-prefix change passed
+focused tests normally and under ASan/UBSan. The iPhone 15 verification below separately establishes the active helper names.
 
 `kern.procname` is best effort: failure is logged without preventing launch. Native `p_comm` remains `LiveProcess`, so `ps -o ucomm` still shows
 the native executable. With argument preservation enabled and validated, use `ps -ww -axo pid,pcpu,rss,command` for the name and both PID namespaces. This is diagnostic metadata, not a complete
@@ -52,6 +58,51 @@ Those bytes match the signed cache at VM addresses `0x16b6f3b08` and `0x16bd13b0
 The evidence is in `tmp/process-arguments/procargs-before.json`; it contains only a short prefix, not full process environments. Kernel source:
 [sysctl_procargsx](https://github.com/apple-oss-distributions/xnu/blob/xnu-12377.1.9/bsd/kern/kern_sysctl.c) and
 [create_unix_stack](https://github.com/apple-oss-distributions/xnu/blob/xnu-12377.1.9/bsd/kern/kern_exec.c#L6680).
+
+## Current limits: 2026-11-01
+
+The regression is confirmed with the portable 8 MiB build: bounded native reads show valid helper argv labels but cache
+bytes for simulator guests. The capture is `tmp/process-name-fix-20261101/native-names15.json`; only argv[0] prefixes were
+read, not process environments. The broker's logical/native PID records and guest executable identities remain intact.
+
+The inspected XNU exposes no supported runtime setter for the saved argument window. `KERN_PROCARGS2` is read-only;
+`proc_setcontrol` has no argv/stack flavor, and `task_set_info` provides no usable setter. Moving SP or changing userspace
+argv pointers cannot retarget `p->user_stack`. `kern.procname` changes the separate kernel `p_name`, while Apple's
+`ps command` and `ps comm` read KERN_PROCARGS2; `ps ucomm` reads `p_comm`. Thus even a successful kernel-name update does
+not repair those argument columns. The current capture still reports `LiveProcess` in p_name, and native device logs show
+`Sandbox: LiveProcess(...) deny(1) sysctl-read kern.procname`. The formatter already uses a numeric MIB with only a new value;
+the log's `sysctl-read` classification does not establish that it issued a read. Numeric and named sysctls both pass through
+the MAC policy check. `setprogname` uses the same setter; a host-side call would rename the host, not a selected child.
+See [XNU sysctl](https://github.com/apple-oss-distributions/xnu/blob/xnu-12377.1.9/bsd/kern/kern_sysctl.c),
+[process control](https://github.com/apple-oss-distributions/xnu/blob/xnu-12377.1.9/bsd/kern/proc_info.c),
+[task_set_info](https://github.com/apple-oss-distributions/xnu/blob/xnu-12377.1.9/osfmk/kern/task.c), and
+[Apple ps](https://github.com/apple-oss-distributions/adv_cmds/blob/main/ps/print.c).
+
+Replacing LC_MAIN with LC_UNIXTHREAD is not a validated alternative. On the arm64 Mac, an ad-hoc-signed disposable
+LC_MAIN control reached main and exited 0; its LC_UNIXTHREAD variant aborted before main with “main executable has no
+entry point.” Pinned dyld also restricts its older CRT startup support to macOS x86_64. This did not test iPhone acceptance
+or a custom stack placement. Evidence: `tmp/process-name-fix-20261101/unixthread-research.md`;
+[dyld build definitions](https://github.com/apple-oss-distributions/dyld/blob/fd8d0c4d52320ebf64db34f3cb280310d905c5ae/common/Defines.h)
+and [startup preparation](https://github.com/apple-oss-distributions/dyld/blob/fd8d0c4d52320ebf64db34f3cb280310d905c5ae/dyld/dyldMain.cpp).
+
+There is currently **no validated portable fix for unmodified native ps with this cache layout**. A future cache layout
+that leaves the native argument pages intact, or a supported initial-stack placement accepted on every target, would
+need separate mapping and startup validation. Neither is implemented. Broker-backed or guest process viewers can use
+the existing identity records without depending on those pages; that does not change unmodified native ps.
+
+### Native helper verification
+
+The helper-prefix build was installed on iPhone16,2, native iOS 26.1 build 23B50, with guest iOS Simulator 26.0 build 23A343.
+Both stack experiments remained disabled. Host UUID is `EB949FCB-FFD6-318C-BAE9-4EB0C3E8EE7D`; LiveProcess UUID is
+`8E277FCD-74E6-31F0-80CA-4C9447257222`. The guest shim and cache were not replaced; the cache header still reports base
+`0x110000000` and UUID `73ED978A-FD25-3166-A57A-34E21BB7E5B8`. No checksum pass or new mapping-protection measurement was performed.
+
+After foreground launch, native `ps -ww -o pid,state,command` and bounded KERN_PROCARGS2 reads showed `LSBHelper: Signer`,
+`LSBHelper: Metal.backboardd`, `LSBHelper: Metal.SpringBoard`, and `LSBHelper: Metal.public`. The `Metal.probe` label has local
+formatter coverage but that optional role was not launched in this device check. Kernel `p_name`/`p_comm` still read
+`LiveProcess`, and guest argv names remain affected by cache overlap. No debugger was used; all 76 sampled extensions were untraced.
+The signed native build, signature verification, focused formatter tests and `git diff --check` passed. Evidence is under
+ignored `tmp/process-name-fix-20261101/`, including `helper-names15.json`, `helper-ps15.txt`, and `procname-log15.txt`.
 
 ## Disabled experiment: preserve the kernel's initial stack
 

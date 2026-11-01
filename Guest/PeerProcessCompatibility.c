@@ -4,6 +4,7 @@
 #include "NotificationSharedMemory.h"
 #include "SpawnDiagnostics.h"
 #include "../ProcessSupport/SpawnTransport.h"
+#include "../ProcessSupport/GuestExecutablePath.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -248,15 +249,13 @@ static int peerPIDPath(uintptr_t caller, int pid, void *buffer, uint32_t size) {
     if ((!result && saved == EFAULT) || !buffer || !size || !peerQueryAllowed(caller, pid)) { errno = saved; return result; }
     LSBPeerProcessIdentity identity;
     if (!copyPeer(pid, false, &identity)) {
-        // The broker keeps a virtual path for role checks. RBS passes proc_pidpath's result straight to xpc_bundle_create,
-        // so this API must expose the physical executable, as it does on macOS Simulator, without changing broker identity.
+        // Runtime identities stay virtual for role checks; installed apps already carry their physical bundle path.
+        // RBS passes proc_pidpath's result straight to xpc_bundle_create, which needs the physical executable.
         char physicalPath[PATH_MAX];
-        size_t rootLength = strlen(peerRuntimeRoot), guestLength = strlen(identity.executablePath);
-        size_t length = rootLength + guestLength;
-        if (length >= sizeof(physicalPath)) { result = 0; saved = ENAMETOOLONG; }
+        int pathError = LSBGuestExecutablePhysicalPath(peerRuntimeRoot, identity.executablePath, physicalPath, sizeof(physicalPath));
+        size_t length = pathError ? 0 : strlen(physicalPath);
+        if (pathError) { result = 0; saved = pathError; }
         else if (length < size) {
-            memcpy(physicalPath, peerRuntimeRoot, rootLength);
-            memcpy(physicalPath + rootLength, identity.executablePath, guestLength + 1);
             if (writePeerBytes(buffer, physicalPath, (mach_msg_type_number_t)length + 1)) result = (int)length;
             else { result = 0; saved = EFAULT; }
         }

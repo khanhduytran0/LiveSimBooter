@@ -1,7 +1,7 @@
 # Set up LiveSimBooter with an agent
 
 This guide pins the guest to **iOS Simulator 26.0, build 23A343, arm64**. It uses tracked tools and original runtime inputs;
-it does not require another developer's ignored `tmp/` directory. There is no in-app installer and no single command that
+it does not require another developer's ignored `tmp/` directory. There is no in-app runtime installer and no single command that
 provisions a signing account, installs the runtime, packages the native backend, transfers files, and verifies the phone.
 The commands below separate those steps so an agent can record exactly which one succeeded.
 
@@ -216,6 +216,7 @@ sh Tools/build-haptic-shim.sh "$LSB_WORK/guest/libLiveSimHaptics.dylib"
 sh Tools/build-terminal-fish.sh "$LSB_WORK/guest"
 sh Tools/build-display-settings.sh "$LSB_WORK/guest"
 sh Tools/build-launchctl-control.sh "$LSB_WORK/guest"
+sh Tools/build-application-installer.sh "$LSB_WORK/guest"
 sh Tools/build-app-registration.sh "$LSB_WORK/guest"
 LSB_MI_HELPER_DIR='/System/Library/PrivateFrameworks/MobileInstallation.framework/XPCServices/com.apple.MobileInstallationHelperService.xpc'
 LSB_MI_HELPER="$LSB_MI_HELPER_DIR/com.apple.MobileInstallationHelperService"
@@ -242,11 +243,13 @@ Install diagnostic executables under `RuntimeRoot/usr/local/bin`, including `spa
 Keep production helpers in `usr/libexec` and runtime programs such as `df` and Fish at their existing paths. The generated simulator
 and terminal environments prepend the physical `RuntimeRoot/usr/local/bin` to `PATH`.
 
-The runtime staging command below signs all three helper dylibs with the app identity/identifier and no external entitlements.
+The runtime staging command below signs the helper dylibs with the app identity/identifier and no external entitlements.
 For an overlay of an existing runtime, sign fresh copies first with
 `codesign --force --sign "$LSB_SIGNING_IDENTITY" --identifier "$LSB_BUNDLE_ID" --timestamp=none <helper.dylib>`;
 stop all affected guests before atomically replacing the matching `RuntimeRoot/usr/lib` files, retain rollback copies, and install
-the matching native package. Disabling a feature omits its helper from insertion; merely staging the file does not enable it.
+the matching native package. Disabling audio or haptics omits that helper from insertion; merely staging the file does not enable it.
+The installation compatibility helper loads only in the pinned MobileInstallationHelperService and redirects its hardcoded
+installation staging directory into this runtime's writable data tree.
 For executables the staging tool uses [sign-sim-executable.py](../Tools/sign-sim-executable.py), which removes only
 `CS_EXECSEG_MAIN_BINARY` from the generated CodeDirectory and re-signs it. Guest signatures use the app's identifier and
 carry no application entitlements. Original simulator mock entitlement sections (`__TEXT,__ents_der` and related data)
@@ -335,10 +338,12 @@ python3 Tools/setup-ios26-runtime.py --runtime-root "$LSB_RUNTIME_SOURCE" \
   --add-binary "/usr/lib/libLiveSimSpawn.dylib=$LSB_WORK/guest/libLiveSimSpawn.dylib" \
   --add-binary "/usr/lib/libLiveSimAudio.dylib=$LSB_WORK/guest/libLiveSimAudio.dylib" \
   --add-binary "/usr/lib/libLiveSimHaptics.dylib=$LSB_WORK/guest/libLiveSimHaptics.dylib" \
+  --add-binary "/usr/lib/libLiveSimInstall.dylib=$LSB_WORK/guest/libLiveSimInstall.dylib" \
   --add-binary "/usr/local/bin/spawn-probe=$LSB_WORK/guest/spawn-probe" \
   --add-binary "/usr/libexec/terminal-fish=$LSB_WORK/guest/terminal-fish" \
   --add-binary "/usr/libexec/display-settings=$LSB_WORK/guest/display-settings" \
   --add-binary "/usr/libexec/launchctl-control=$LSB_WORK/guest/launchctl-control" \
+  --add-binary "/usr/local/bin/lsb-app-install=$LSB_WORK/guest/lsb-app-install" \
   --add-binary "/usr/libexec/app-registration=$LSB_WORK/guest/app-registration" \
   --add-binary "$LSB_MI_HELPER=$LSB_WORK/MobileInstallationHelperService" \
   --add-binary "/bin/fish=$LSB_FISH" \
@@ -391,8 +396,8 @@ published at the end. The tool does not resume a partially completed output dire
 The broad cache is the measured 1,353-image closure, not every framework Apple ships. Newly needed code outside it is signed as
 loose code. This avoids pretending that the initial closure proves every installed app or daemon works.
 
-For optional SSH-based guest control and app registration, add the following two plists before transfer. Only the control worker
-will be selected at initial boot; the registration job will be bootstrapped once afterward:
+Add the following two plists before transfer. The control worker is selected at initial boot and also handles native IPA-import
+requests; the stock-app registration job will be bootstrapped once afterward. SSH remains optional:
 
 ```sh
 python3 - "$LSB_WORK/runtime/RuntimeRoot" <<'PY'
@@ -554,14 +559,14 @@ Repeat the boot checks below on your destination device.
 For app icons, the staged registration manifest is `RuntimeRoot/usr/share/LiveSimBooter/applications.json`. Run the signed
 `/usr/libexec/app-registration --manifest /usr/share/LiveSimBooter/applications.json` as a job **inside the existing simulator
 launchd**, after lsd is running. It logs individual registration results; copying bundles alone does not prove registration.
-Use the [guest launchctl control setup](guest-control.md) to add its worker job and bootstrap the registration job. The worker
-label is opt-in and consumes one selected-job slot; current defaults plus the worker fit the 24-label limit. Bootstrap one-off
+Use the [guest launchctl control client](guest-control.md) to bootstrap the registration job. The worker is now selected by
+default together with the two installation daemons, using all 24 selected-job slots. Bootstrap one-off
 registration jobs afterward rather than adding every diagnostic job to the initial selection. In job plists, use Boolean
 `<true/>`/`<false/>` for launchd policies and guest paths for logs/working directories. The `launchctl bootstrap` plist argument
 and the SSH client's `--data-root` are physical paths. Do not mix these path domains.
 
-For the optional control setup, this is the current default selection plus its worker. Use it instead of the no-argument launch,
-and review `Host/Broker.m` if the defaults have changed since this guide:
+For an automatic diagnostic start, this is the current default selection including the installer daemons and control worker.
+Use it instead of the no-argument launch, and review `Host/Broker.m` if the defaults have changed since this guide:
 
 ```sh
 xcrun devicectl device process launch --device "$LSB_DEVICE" --terminate-existing --console -- "$LSB_BUNDLE_ID" \
@@ -569,7 +574,8 @@ xcrun devicectl device process launch --device "$LSB_DEVICE" --terminate-existin
   com.apple.fontservicesd com.apple.containermanagerd.system com.apple.distnoted.xpc.daemon com.apple.configd_sim \
   com.apple.trustd com.apple.sleepd com.apple.systemstatusd com.apple.SpringBoard com.apple.iconservices.iconservicesagent \
   com.apple.TextInput.kbd com.apple.assistantd com.apple.PosterBoard com.apple.DragUI.druid \
-  com.apple.pluginkit.pkd com.apple.chronod com.apple.navd com.apple.geod com.kdt.LiveSimBooter.launchctl-control
+  com.apple.pluginkit.pkd com.apple.chronod com.apple.navd com.apple.geod \
+  com.apple.mobile.installd com.apple.installcoordinationd com.kdt.LiveSimBooter.launchctl-control
 ```
 
 After the worker starts, configure your actual SSH endpoint and group path, then submit the one-off job:

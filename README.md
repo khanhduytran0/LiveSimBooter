@@ -26,6 +26,8 @@ Device, haptic and audio choices can be saved while the simulator is off. During
 to apply them. Settings also provides **Power Off** and **Restart**; Power Off returns IOSurface to Start without closing the host.
 The [device picker](docs/device-types.md) changes the simulated model and resolution on the next start or restart.
 Silent background audio is optional and disabled by default.
+With the simulator running, **Settings → Applications → Install IPA…** installs compatible apps into its data containers.
+See [guest app installation](docs/app-installation.md) for required helpers, signing requirements, and current limits.
 
 Explicit guest arguments, such as `--launchd-services` or `/bin/df`, retain automatic startup for development tests.
 Guest `launchctl` can manage individual jobs and request a simulator userspace reboot; see [guest control](docs/guest-control.md).

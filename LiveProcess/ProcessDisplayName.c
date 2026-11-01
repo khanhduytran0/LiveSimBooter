@@ -12,8 +12,9 @@ int LSBSetProcessDisplayName(const char *path, pid_t guestPID, char *nativeArgv0
     leaf = leaf ? leaf + 1 : path;
     if (!*leaf) return EINVAL;
     char name[33], prefix[32] = {0};
-    size_t prefixLength = guestPID ? (size_t)snprintf(prefix, sizeof(prefix), "LSB:%d ", guestPID) : 0;
-    if (argv0Capacity && prefixLength && argv0Capacity < prefixLength + 2) { errno = savedErrno; return ENOSPC; }
+    size_t prefixLength = guestPID ? (size_t)snprintf(prefix, sizeof(prefix), "LSB:%d ", guestPID) :
+        (size_t)snprintf(prefix, sizeof(prefix), "LSBHelper: ");
+    if (argv0Capacity && argv0Capacity < prefixLength + 2) { errno = savedErrno; return ENOSPC; }
     size_t leafLength = strlen(leaf), nameLength = sizeof(name) - prefixLength - 1;
     if (nameLength > leafLength) nameLength = leafLength;
     // Build the independent kernel name first: path can point into the native argv buffer rewritten below.

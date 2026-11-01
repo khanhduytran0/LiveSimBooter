@@ -1,4 +1,5 @@
 #include "ExecutableAccess.h"
+#include "../ProcessSupport/GuestExecutablePath.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -9,11 +10,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-static bool insideRoot(const char *path, const char *root) {
-    size_t length = strlen(root);
-    return length > 1 && !strncmp(path, root, length) && path[length] == '/' && path[length + 1];
-}
 
 static bool executableMode(const struct stat *metadata, bool effective) {
     uid_t user = effective ? geteuid() : getuid();
@@ -34,7 +30,8 @@ static bool resolveRuntimePath(const char *path, char canonical[PATH_MAX]) {
     const char *configuredRoot = getenv("DYLD_ROOT_PATH");
     char root[PATH_MAX];
     struct stat rootMetadata;
-    if (!configuredRoot || !*configuredRoot || !realpath(configuredRoot, root) || !realpath(path, canonical) || !insideRoot(canonical, root))
+    if (!configuredRoot || !*configuredRoot || !realpath(configuredRoot, root) || !realpath(path, canonical) ||
+        !LSBGuestExecutableIsContained(root, canonical))
         return false;
     return !stat(root, &rootMetadata) && S_ISDIR(rootMetadata.st_mode);
 }

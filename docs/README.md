@@ -15,7 +15,7 @@ a confirmed native-header collision; unavailable layout information keeps retent
 detachment. Developer Mode alone does not select it. See [handoff policy](runtime-handoff.md).
 
 The user verified **Home Screen → Edit → Edit Wallpaper** and color/gradient wallpaper rendering. The ordinary lock screen also
-renders now; the lock-screen long-press picker and Customize editor work with the scoped scene-presentation helper on iPhone 15.
+renders now; the lock-screen long-press picker and Customize editor work with the scoped scene-presentation helper on iPhone 15 and iPhone 17.
 Direct PosterBoard activation still has a malformed layout, and the older Home Screen editor's clipped Done button remains deferred;
 see [current wallpaper status](springboard-services.md#current-wallpaper-status).
 This remains an experimental partial simulator: generic fork/exec and complete job control are unsupported, and the observed

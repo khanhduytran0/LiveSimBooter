@@ -1604,8 +1604,12 @@ background refreshes. Local integrated tests, focused transition/role tests, sep
 verification passed. Post-copy checksums were skipped as requested.
 
 A subsequent cleanup replaced runtime method/ivar encoding comparisons with the declared private interfaces, retaining the
-UIKit image/code and scene-scope checks. Its focused tests and simulator helper build passed; this cleanup has not been
-redeployed to the phone yet.
+UIKit image/code and scene-scope checks. Its focused tests and simulator helper build passed. Commit `8ea3ce0` was then
+deployed to iPhone 17 Pro Max, native iOS 27.0/24A435, with the same 23A343 cache mapped at `0x7000000000`.
+Real touch input verified lock-screen long-press → picker → Customize → editor → Cancel → selected card → Home using the
+existing Home-button device profile. SpringBoard native PID 24402 / logical PID 24372 and PosterBoard native PID 24422 /
+logical PID 24421 stayed running throughout. No debugger was used or left attached; post-copy checksums were skipped.
+Deployment receipts and screenshots are local under `tmp/deploy-poster-iphone17-20261101/`.
 
 Direct generic PosterBoard activation is **not fully fixed**: its output now paints wallpaper rather than solid black, but
 shows a vertically stretched clock instead of the normal picker. Home navigation and subsequent Contacts launch worked.

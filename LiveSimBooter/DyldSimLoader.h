@@ -20,6 +20,7 @@ typedef struct {
 // Trusted native bootstrap metadata, configured before mapping either image. Zero selects the ordinary low-cache path.
 // The selected nonzero address must agree with the immutable cache data backing; guest environment variables cannot select it.
 int LSBConfigureRuntimeCacheBase(uint64_t actualBase);
+int LSBConfigureRuntimeNativeSupport(unsigned enabled);
 
 // Read the planned guest environment during native preparation, before changing TLS or entering the simulator.
 static inline bool LSBTraceHandoffRequested(const char *const environment[]) {

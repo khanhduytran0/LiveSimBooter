@@ -61,6 +61,8 @@
 				LocalPOSIX.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LocalRuntime.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				MainThreadBootstrap.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
+				NativeSupportBindings.cpp = "-fno-builtin -fno-stack-protector";
+				NativeSupportState.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				SharedCacheHandoff.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				SimSyscallHelpers.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 			};
@@ -119,6 +121,8 @@
 				LocalPOSIX.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LocalRuntime.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				MainThreadBootstrap.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
+				NativeSupportBindings.cpp = "-fno-builtin -fno-stack-protector";
+				NativeSupportState.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				SharedCacheHandoff.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				SimSyscallHelpers.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 			};

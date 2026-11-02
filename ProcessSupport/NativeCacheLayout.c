@@ -28,7 +28,8 @@ static LSBNativeCacheLayout compareCache(const NativeCacheReservationHeader *hea
         header->sharedRegionSize > UINT64_MAX - header->sharedRegionStart || !nativeHeader || (nativeHeader & 4095))
         return LSB_NATIVE_CACHE_LAYOUT_UNKNOWN;
     // This preflight only prevents automatic detachment. The host and loader reject unsupported slide tables or cache payloads.
-    if (header->sharedRegionStart == LSB_SLIDABLE_CACHE_PREFERRED_BASE && header->sharedRegionSize == LSB_SLIDABLE_CACHE_SPAN &&
+    if (header->sharedRegionStart == LSB_SLIDABLE_CACHE_PREFERRED_BASE &&
+        (header->sharedRegionSize == LSB_SLIDABLE_CACHE_SPAN || header->sharedRegionSize == LSB_NATIVE_SUPPORT_CACHE_SPAN) &&
         header->mappingCount == 6) return LSB_NATIVE_CACHE_LAYOUT_SLIDABLE;
     uint64_t guestEnd = header->sharedRegionStart + header->sharedRegionSize;
     // Match SharedCacheHandoff.cpp's conservative retention bound: the entire guest reservation must precede the native header.

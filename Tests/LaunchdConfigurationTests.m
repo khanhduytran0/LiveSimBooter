@@ -262,6 +262,37 @@ static void testProductionPolicy(LSBReceivedMessage *message, NSString *root, NS
     nativeProductionStatus = LSB_NATIVE_DEVELOPMENT;
 }
 
+static void testNativeSupportPolicy(LSBReceivedMessage *message, NSString *root, NSString *configPath) {
+    uint32_t previousStatus = nativeProductionStatus;
+    LSBNativeCacheLayout previousLayout = nativeCacheLayout;
+    nativeProductionStatus = LSB_NATIVE_PRODUCTION;
+    nativeCacheLayout = LSB_NATIVE_CACHE_LAYOUT_OVERLAP;
+    LSBLaunchdConfigurationSetNativeSupport(true);
+    const char *conflicting[] = {"LSB_NATIVE_SUPPORT=0", "LSB_NATIVE_SUPPORT=1", "LSB_RETAIN_HOST_CACHE=0",
+                                "LSB_WORKQUEUE_HARDWARE_BREAKPOINT=1", NULL};
+    assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, conflicting));
+    NSDictionary *bootstrap = readPlist(configPath)[@"Bootstrap"];
+    NSDictionary *expected = @{@"LSB_NATIVE_SUPPORT": @"1", @LSB_RETAIN_HOST_CACHE_ENV: @"1", @LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV: @"0"};
+    for (NSString *key in expected) {
+        assert(!strcmp(environmentValue(&message->plan, key.UTF8String), [expected[key] UTF8String]));
+        for (NSString *scope in @[@"Self", @"Child"]) assert([bootstrap[scope][key] isEqual:expected[key]]);
+    }
+    dispose(message);
+    // A prior native-support session and a plan-supplied flag cannot select it for the next original-cache session.
+    LSBLaunchdConfigurationSetNativeSupport(false);
+    const char *spoofed[] = {"LSB_NATIVE_SUPPORT=1", NULL};
+    assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, spoofed));
+    bootstrap = readPlist(configPath)[@"Bootstrap"];
+    assert(!strcmp(environmentValue(&message->plan, "LSB_NATIVE_SUPPORT"), "0"));
+    for (NSString *scope in @[@"Self", @"Child"]) {
+        assert([bootstrap[scope][@"LSB_NATIVE_SUPPORT"] isEqual:@"0"]);
+        assert([bootstrap[scope][@LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV] isEqual:@"1"]);
+    }
+    dispose(message);
+    nativeProductionStatus = previousStatus;
+    nativeCacheLayout = previousLayout;
+}
+
 static void testDFMode(LSBReceivedMessage *message, NSString *root, NSString *dataPath, NSString *configPath, const char *const inherited[]) {
     NSString *jobDirectory = [dataPath stringByAppendingPathComponent:@"Library/LiveSimBooter-LaunchDaemons"];
     NSString *jobPath = [jobDirectory stringByAppendingPathComponent:@"com.kdt.LiveSimBooter.df.plist"];
@@ -1035,6 +1066,7 @@ int main(void) {
         testRuntimeBooleanEnvironment(message, root, configPath, "LSB_TRACE_HANDOFF", NO);
         testLegacyDetachmentMode(message, root, configPath);
         testProductionPolicy(message, root, configPath);
+        testNativeSupportPolicy(message, root, configPath);
         testAdditionalJobs(message, root, dataPath, configPath);
 
         // Invalid/oversized plans never publish partial strings or descriptors and do not replace the existing configuration.

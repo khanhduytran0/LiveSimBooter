@@ -3,6 +3,7 @@
 
 import hashlib
 import importlib.util
+import mmap
 from pathlib import Path
 import re
 import struct
@@ -170,6 +171,47 @@ class SlidableCacheTests(unittest.TestCase):
             value = re.search(r'#define LSB_SLIDABLE_CACHE_' + name + r' UINT64_C\(([^)]+)\)', header)
             self.assertIsNotNone(value)
             self.assertEqual(int(value[1], 0), expected)
+
+    def test_native_support_profile_matches_explicit_c_layout(self):
+        header = (ROOT / 'ProcessSupport/SlidableCache.h').read_text()
+        table = header.split('LSBNativeSupportCacheProfile[6] = {', 1)[1].split('};', 1)[0]
+        rows = []
+        for line in re.findall(r'\{([^{}]+)\}', table):
+            fields = [int(value.strip(), 0) for value in line.split(',')]
+            fields[0] -= BUILD.BASE
+            rows.append(tuple(fields))
+        self.assertEqual(tuple(rows), PATCH.NATIVE_SUPPORT_MAPPINGS)
+        for name, expected in (('FIXUPS', PATCH.NATIVE_SUPPORT_FIXUPS), ('SPAN', PATCH.NATIVE_SUPPORT_SPAN)):
+            value = re.search(r'#define LSB_NATIVE_SUPPORT_CACHE_' + name + r' UINT64_C\(([^)]+)\)', header)
+            self.assertIsNotNone(value)
+            self.assertEqual(int(value[1], 0), expected)
+
+    def test_native_support_layout_is_rejected_without_opt_in(self):
+        # Sparse file: validates the real reviewed mapping geometry without runtime binaries or a 2 GiB allocation.
+        profile = PATCH.NATIVE_SUPPORT_MAPPINGS
+        signature = profile[-1][2] + profile[-1][1]
+        with tempfile.TemporaryFile() as stream:
+            stream.truncate(signature + 0x4000)
+            with mmap.mmap(stream.fileno(), 0) as data:
+                data[:16] = b'dyld_v1   arm64\0'
+                data[88:104] = uuid.UUID('12345678-1234-5678-1234-567812345678').bytes
+                struct.pack_into('<II', data, 16, 512, 6)
+                struct.pack_into('<QQ', data, 40, signature, 0x4000)
+                struct.pack_into('<II', data, 216, 7, 0x200)
+                struct.pack_into('<QQQ', data, 224, BUILD.BASE, PATCH.NATIVE_SUPPORT_SPAN, 0x20000000)
+                struct.pack_into('<II', data, 312, 704, 6)
+                for index, row in enumerate(profile):
+                    address, size, fileoff, slideoff, slidesize, flags, maximum, initial = row
+                    struct.pack_into('<QQQII', data, 512 + index * 32, BUILD.BASE + address, size, fileoff, maximum, initial)
+                    struct.pack_into('<6QII', data, 704 + index * 56, BUILD.BASE + address, size, fileoff, slideoff, slidesize, flags, maximum, initial)
+                    if slidesize:
+                        struct.pack_into('<6I2Q', data, slideoff, 2, 4096, 40, size // 4096, 0, 0, BUILD.DELTA_MASK, 0)
+                with self.assertRaisesRegex(ValueError, 'preferred cache base/span'):
+                    PATCH.inspect_layout(data)
+                self.assertEqual(PATCH.inspect_layout(data, True)['span'], PATCH.NATIVE_SUPPORT_SPAN)
+                struct.pack_into('<Q', data, 704 + 5 * 56 + 8, profile[-1][1] - 0x18000)
+                with self.assertRaisesRegex(ValueError, 'Unreviewed mapping'):
+                    PATCH.inspect_layout(data, True)
 
     def test_failed_copy_removes_only_its_partial_output(self):
         with tempfile.TemporaryDirectory() as temporary:

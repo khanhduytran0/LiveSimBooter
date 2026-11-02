@@ -6,6 +6,8 @@
 @class LSBGuestDeviceType;
 // Main-thread host selection; nil restores the legacy default/explicit identity overrides used by standalone probes.
 void LSBLaunchdConfigurationSetDeviceType(LSBGuestDeviceType *type);
+// Native host cache-profile decision, set before generating each session's plans. Never inferred from guest environment.
+void LSBLaunchdConfigurationSetNativeSupport(bool enabled);
 #endif
 
 // Native host only. Requires a zeroed plan and message->fds initialized to -1; leaves them unchanged on failure.

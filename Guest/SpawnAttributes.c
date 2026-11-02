@@ -1,19 +1,20 @@
 #include "SpawnDiagnostics.h"
 #include "SpawnAttributes.h"
+#include "SpawnAttributeLayout.h"
 
 #include <errno.h>
 #include <mach/machine.h>
+#include <malloc/malloc.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <string.h>
 #ifdef LSB_TRANSPORT_TRACE
-#include <stdatomic.h>
 #include <stdio.h>
 #endif
 
-// Audited against the iOS 26 23A343 host support libsystem_kernel.dylib, including its init/destroy and setter routines.
-enum { NativeAttributeSize = 0x100, NativePortActionsOffset = 0xc8,
-       NativeImportanceWatchPortAction = 3, NativeRegisteredPortAction = 4, NativeMaxImportanceWatchPorts = 128 };
+// Original Mac support and inspected native 23B50/23H128/24A435 keep this action shape; their owning attribute offsets differ.
+enum { NativeImportanceWatchPortAction = 3, NativeRegisteredPortAction = 4, NativeMaxImportanceWatchPorts = 128 };
 enum { NativeOptionsOffset = 0x80, NativeDatalessPolicyOffset = 0x98, NativeOptionDatalessPolicy = 4,
        NativeDatalessOffOriginal = 5, NativeDatalessOnOriginal = 6 };
 typedef struct {
@@ -34,11 +35,43 @@ static _Atomic(unsigned) attributeTraceErrors;
 #define ATTRIBUTE_TRACE(...) ((void)0)
 #endif
 
-static int readArchitecture(const unsigned char native[NativeAttributeSize]) {
+// Private setter in libsystem_kernel; this only updates the supplied attribute object.
+extern int posix_spawnattr_set_crash_count_np(const posix_spawnattr_t *, uint32_t count, uint32_t timeout);
+
+static int attributeLayout(LSBSpawnAttributeLayout *result) {
+    static _Atomic(int) selected;
+    *result = atomic_load_explicit(&selected, memory_order_acquire);
+    if (*result) return 0;
+    posix_spawnattr_t probe;
+    int error = posix_spawnattr_init(&probe);
+    if (error) return error;
+    size_t allocationSize = malloc_size(probe);
+    unsigned char before[LSBSpawnAttributeProbeSize];
+    if (allocationSize < sizeof(before)) {
+        error = ENOTSUP;
+    } else {
+        memcpy(before, probe, sizeof(before));
+        error = posix_spawnattr_set_crash_count_np(&probe, LSBSpawnAttributeProbeCount, LSBSpawnAttributeProbeTimeout);
+        if (!error) error = posix_spawnattr_set_csm_np(&probe, POSIX_SPAWN_NP_CSM_TECS);
+        if (!error) error = posix_spawnattr_setspecialport_np(&probe, MACH_PORT_NULL, TASK_BOOTSTRAP_PORT);
+        if (!error) {
+            *result = LSBSpawnAttributeProbeLayout(before, (const unsigned char *)probe, allocationSize);
+            if (!*result) error = ENOTSUP;
+        }
+    }
+    posix_spawnattr_destroy(&probe);
+    // Cache only successful discovery, so a transient allocator failure does not permanently disable spawning.
+    if (!error) atomic_store_explicit(&selected, *result, memory_order_release);
+    return error;
+}
+
+static int readArchitecture(const posix_spawnattr_t *attributes) {
     cpu_type_t cpus[4];
     cpu_subtype_t subtypes[4];
-    memcpy(cpus, native + 0x10, sizeof(cpus));
-    memcpy(subtypes, native + 0x70, sizeof(subtypes));
+    size_t count;
+    int error = posix_spawnattr_getarchpref_np(attributes, 4, cpus, subtypes, &count);
+    if (error) return error;
+    if (count != 4) return ENOTSUP;
     for (size_t i = 0; i < 4; ++i) {
         if (!cpus[i] && subtypes[i] == CPU_SUBTYPE_MULTIPLE) continue;
         if (i == 0 && cpus[i] == CPU_TYPE_ARM64 &&
@@ -51,7 +84,7 @@ static int readArchitecture(const unsigned char native[NativeAttributeSize]) {
     return 0;
 }
 
-static int readLocalFilePolicy(const unsigned char native[NativeAttributeSize]) {
+static int readLocalFilePolicy(const unsigned char *native) {
     uint32_t options, policy;
     memcpy(&options, native + NativeOptionsOffset, sizeof(options));
     memcpy(&policy, native + NativeDatalessPolicyOffset, sizeof(policy));
@@ -65,9 +98,9 @@ static int readLocalFilePolicy(const unsigned char native[NativeAttributeSize]) 
     return ENOTSUP;
 }
 
-static int readPorts(const unsigned char native[NativeAttributeSize], LSBSpawnPorts *ports) {
+static int readPorts(const unsigned char *native, LSBSpawnAttributeLayout layout, LSBSpawnPorts *ports) {
     const NativePortActions *actions;
-    memcpy(&actions, native + NativePortActionsOffset, sizeof(actions));
+    memcpy(&actions, native + LSBSpawnAttributePortActionsOffset(layout), sizeof(actions));
     if (!actions) return 0;
     if (actions->count < 0 || actions->allocated < actions->count) return EINVAL;
     if (actions->count > NativeMaxImportanceWatchPorts + LSB_MAX_REGISTERED_PORTS + 1) return E2BIG;
@@ -109,40 +142,34 @@ int LSBReadAdditionalSpawnAttributes(const posix_spawnattr_t *attributes, LSBAdd
     memset(result, 0, sizeof(*result));
     if (!attributes) return 0;
     if (!*attributes) return EINVAL;
+    LSBSpawnAttributeLayout layout;
+    int error = attributeLayout(&layout);
+    if (error) return error;
     const unsigned char *native = (const unsigned char *)*attributes;
-    int error = readArchitecture(native);
+    error = readArchitecture(attributes);
     if (error) return error;
     error = readLocalFilePolicy(native);
     if (error) return error;
 
-    // Compare only initialized fields, excluding decoded fields and the standard POSIX fields. Gaps are uninitialized ABI padding.
-    static const uint16_t unchanged[][2] = {
-        {32, 36}, {40, 64}, {64, 66}, {68, 88}, {92, 107}, {108, 112}, {132, 152}, {160, 169}, {172, 177}, {180, 200}, {208, 256}
-    };
     posix_spawnattr_t defaults;
     error = posix_spawnattr_init(&defaults);
     if (error) return error;
-    for (size_t i = 0; i < sizeof(unchanged) / sizeof(unchanged[0]); ++i) {
-        size_t start = unchanged[i][0], length = unchanged[i][1] - start;
-        if (memcmp(native + start, (const unsigned char *)defaults + start, length)) {
+    size_t changed = 0;
+    if (LSBSpawnAttributeFindDifference(layout, native, (const unsigned char *)defaults, &changed)) {
 #ifdef LSB_TRANSPORT_TRACE
-            size_t changed = start;
-            while (changed < start + length && native[changed] == ((const unsigned char *)defaults)[changed]) ++changed;
-            uint32_t processType, darwinRole;
-            memcpy(&processType, native + 0x24, sizeof(processType));
-            memcpy(&darwinRole, native + 0x58, sizeof(darwinRole));
-            ATTRIBUTE_TRACE("[spawn-trace] unsupported attribute offset=0x%zx value=0x%x default=0x%x type=0x%x role=0x%x\n",
-                            changed, native[changed], ((const unsigned char *)defaults)[changed], processType, darwinRole);
+        uint32_t processType, darwinRole;
+        memcpy(&processType, native + 0x24, sizeof(processType));
+        memcpy(&darwinRole, native + 0x58, sizeof(darwinRole));
+        ATTRIBUTE_TRACE("[spawn-trace] unsupported attribute offset=0x%zx value=0x%x default=0x%x type=0x%x role=0x%x\n",
+                        changed, native[changed], ((const unsigned char *)defaults)[changed], processType, darwinRole);
 #endif
-            error = ENOTSUP;
-            break;
-        }
+        error = ENOTSUP;
     }
     posix_spawnattr_destroy(&defaults);
     if (error) return error;
 
     LSBAdditionalSpawnAttributes decoded = {0};
-    error = readPorts(native, &decoded.ports);
+    error = readPorts(native, layout, &decoded.ports);
     if (error) return error;
     memcpy(&decoded.processType, native + 0x24, sizeof(decoded.processType));
     memcpy(&decoded.darwinRole, native + 0x58, sizeof(decoded.darwinRole));

@@ -36,7 +36,8 @@ xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/SessionControlQueueTests.c Host/SessionControlQueue.c -o "$test_directory/SessionControlQueue"
 "$test_directory/SessionControlQueue"
-for test_name in DyldSimLoader SharedCacheHandoff SlidableCacheMapping MainThreadBootstrap DebuggerBridge LocalMach LocalRuntime; do
+for test_name in DyldSimLoader SharedCacheHandoff SlidableCacheMapping MainThreadBootstrap DebuggerBridge LocalMach LocalRuntime \
+    NativeSupportState NativeSupportBindings; do
     xcrun --sdk macosx clang++ -std=c++17 -Wall -Wextra -Werror -arch arm64 -fno-builtin -fno-stack-protector \
         "Tests/${test_name}Tests.cpp" -o "$test_directory/$test_name"
     "$test_directory/$test_name"
@@ -73,11 +74,12 @@ done
 xcrun --sdk macosx clang++ -std=c++17 -Wall -Wextra -Werror -arch arm64 -fno-builtin -fno-stack-protector \
     Tests/SimSyscallHelpersTests.cpp LiveSimBooter/SimSyscallHelpers.cpp LiveSimBooter/LocalRuntime.cpp \
     LiveSimBooter/LocalPOSIX.cpp LiveSimBooter/LocalMach.cpp LiveSimBooter/LazySignatureClient.cpp \
-    LiveSimBooter/CompactImageInfo.cpp -o "$test_directory/SimSyscallHelpers"
+    LiveSimBooter/CompactImageInfo.cpp LiveSimBooter/NativeSupportBindings.cpp -o "$test_directory/SimSyscallHelpers"
 "$test_directory/SimSyscallHelpers"
 xcrun --sdk macosx clang++ -std=c++17 -Wall -Wextra -Werror -arch arm64 -fno-builtin -fno-stack-protector \
     -DLSB_DEBUGGER_NOTIFICATION_TESTING Tests/DebuggerNotificationTests.cpp LiveSimBooter/SimSyscallHelpers.cpp LiveSimBooter/LocalRuntime.cpp \
-    LiveSimBooter/LocalPOSIX.cpp LiveSimBooter/LocalMach.cpp LiveSimBooter/LazySignatureClient.cpp -o "$test_directory/DebuggerNotification"
+    LiveSimBooter/LocalPOSIX.cpp LiveSimBooter/LocalMach.cpp LiveSimBooter/LazySignatureClient.cpp LiveSimBooter/NativeSupportBindings.cpp \
+    -o "$test_directory/DebuggerNotification"
 "$test_directory/DebuggerNotification"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/SpawnPlanTests.c Guest/SpawnAttributes.c Guest/ProcessSession.c Guest/ProcessIdentity.c ProcessSupport/SpawnPlan.c ProcessSupport/ChildStatus.c \
@@ -234,6 +236,7 @@ DYLD_INSERT_LIBRARIES="$test_directory/libSharedCachePathCompatibility.dylib" \
 python3 -B Tests/PatchIOSPlatformTests.py
 python3 -B Tests/SetupIOS26CacheTests.py
 python3 -B Tests/SetupIOS26SlidableCacheTests.py
+python3 -B Tests/SetupIOS26PlaceholderCacheTests.py
 python3 -B Tests/CacheAliasTrieTests.py
 python3 -B Tests/SetupIOS26RuntimeTests.py
 python3 -B Tests/LaunchdIdentityPatchTests.py

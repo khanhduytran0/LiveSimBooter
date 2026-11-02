@@ -66,8 +66,9 @@ static int validateSlideInfo(const SlideInfoV2 *slide, const LSBSlidableCacheMap
     return 0;
 }
 
-int LSBInspectSlidableCache(int cacheFD, LSBSlidableCacheInfo *info) {
-    if (!info) { errno = EINVAL; return -1; }
+int LSBInspectSlidableCacheWithProfile(int cacheFD, LSBSlidableCacheInfo *info, LSBSlidableCacheProfileKind kind) {
+    const LSBSlidableCacheLayout *layout = LSBSlidableCacheLayoutForProfile(kind);
+    if (!info || !layout) { errno = EINVAL; return -1; }
     memset(info, 0, sizeof(*info));
     CacheHeader header;
     struct stat status;
@@ -87,7 +88,7 @@ int LSBInspectSlidableCache(int cacheFD, LSBSlidableCacheInfo *info) {
     int hasSlide = 0;
     for (unsigned i = 0; i < header.mappingWithSlideCount; ++i) hasSlide |= info->mappings[i].slideInfoSize != 0;
     if (!hasSlide) { memset(info, 0, sizeof(*info)); return 0; }
-    if (header.preferredBase != LSB_SLIDABLE_CACHE_PREFERRED_BASE || header.span != LSB_SLIDABLE_CACHE_SPAN ||
+    if (header.preferredBase != LSB_SLIDABLE_CACHE_PREFERRED_BASE || header.span != layout->span ||
         header.platform != 7 || !(header.formatFlags & 0x200) || header.subCacheArrayCount || header.maxSlide != 0x20000000 ||
         header.mappingCount != 6 || header.mappingWithSlideCount != 6 || header.imagesCount != 1353 || !LSBSlidableCacheUUIDIsNonzero(header.uuid)) {
         errno = ENOTSUP; return -1;
@@ -95,12 +96,12 @@ int LSBInspectSlidableCache(int cacheFD, LSBSlidableCacheInfo *info) {
     if (header.mappingOffset < sizeof(header) || !contains((uint64_t)status.st_size, header.mappingOffset, 6 * 32) ||
         header.imagesOffset < sizeof(header) || !contains((uint64_t)status.st_size, header.imagesOffset, (uint64_t)header.imagesCount * 32) ||
         !header.signatureSize || (header.signatureOffset & 0x3fff) ||
-        header.signatureOffset < LSBSlidableCacheProfile[5].fileOffset + LSBSlidableCacheProfile[5].size ||
+        header.signatureOffset < layout->mappings[5].fileOffset + layout->mappings[5].size ||
         !contains((uint64_t)status.st_size, header.signatureOffset, header.signatureSize) ||
         header.signatureOffset + header.signatureSize != (uint64_t)status.st_size) { errno = EINVAL; return -1; }
     for (unsigned i = 0; i < 6; ++i) {
         const LSBSlidableCacheMapping *mapping = &info->mappings[i];
-        if (!LSBSlidableCacheMappingMatchesProfile(mapping, i)) { errno = ENOTSUP; return -1; }
+        if (!LSBSlidableCacheMappingMatchesProfileKind(mapping, i, kind)) { errno = ENOTSUP; return -1; }
         if (!contains(header.signatureOffset, mapping->fileOffset, mapping->size)) { errno = EINVAL; return -1; }
         struct { uint64_t address, size, fileOffset; uint32_t maxProtection, initialProtection; } legacy;
         if ((error = readAt(cacheFD, &legacy, sizeof(legacy), header.mappingOffset + i * 32))) { errno = error; return -1; }
@@ -126,8 +127,9 @@ static int validBase(uint64_t actualBase, uint64_t span) {
     return actualBase >= LSB_SLIDABLE_CACHE_PREFERRED_BASE && !(actualBase & 0x3fff) && span &&
         span <= LSB_SLIDABLE_CACHE_RESERVATION_SIZE && actualBase <= UINT64_C(0x0080000000000000) - span;
 }
-int LSBSelectSlidableCacheBase(const LSBSlidableCacheInfo *info, uint64_t *actualBase) {
-    if (!info || !actualBase || info->preferredBase != LSB_SLIDABLE_CACHE_PREFERRED_BASE || info->span != LSB_SLIDABLE_CACHE_SPAN) return EINVAL;
+int LSBSelectSlidableCacheBaseWithProfile(const LSBSlidableCacheInfo *info, uint64_t *actualBase, LSBSlidableCacheProfileKind kind) {
+    const LSBSlidableCacheLayout *layout = LSBSlidableCacheLayoutForProfile(kind);
+    if (!layout || !info || !actualBase || info->preferredBase != LSB_SLIDABLE_CACHE_PREFERRED_BASE || info->span != layout->span) return EINVAL;
 #if defined(__APPLE__)
     mach_vm_address_t address = info->preferredBase;
     kern_return_t result = mach_vm_map(mach_task_self(), &address, LSB_SLIDABLE_CACHE_RESERVATION_SIZE, 0, VM_FLAGS_ANYWHERE,
@@ -171,7 +173,8 @@ static int rebasePage(uint8_t page[4096], uint16_t start, uint64_t preferredBase
     }
 }
 
-static void fillHeader(const LSBSlidableCacheInfo *info, uint64_t actualBase, LSBSlidableDataHeader *header) {
+static void fillHeader(const LSBSlidableCacheInfo *info, uint64_t actualBase, LSBSlidableDataHeader *header, LSBSlidableCacheProfileKind kind) {
+    const LSBSlidableCacheLayout *layout = LSBSlidableCacheLayoutForProfile(kind);
     memset(header, 0, sizeof(*header));
     memcpy(header->magic, "LSBSlideDataV1", 14);
     header->version = 1; header->headerSize = sizeof(*header); memcpy(header->cacheUUID, info->uuid, 16);
@@ -185,10 +188,10 @@ static void fillHeader(const LSBSlidableCacheInfo *info, uint64_t actualBase, LS
                                           mapping->maxProtection, mapping->initialProtection};
         header->fileSize += mapping->size;
     }
-    header->fixupCount = LSB_SLIDABLE_CACHE_FIXUPS; header->taggedCount = LSB_SLIDABLE_CACHE_TAGGED;
+    header->fixupCount = layout->fixups; header->taggedCount = layout->tagged;
 }
 static int reuseSidecar(int directoryFD, const char *fileName, const LSBSlidableCacheInfo *info, uint64_t actualBase,
-                        LSBSlidableDataHeader *header) {
+                        LSBSlidableDataHeader *header, LSBSlidableCacheProfileKind kind) {
     int fd = openat(directoryFD, fileName, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return errno;
     struct stat status;
@@ -196,7 +199,7 @@ static int reuseSidecar(int directoryFD, const char *fileName, const LSBSlidable
     if (fstat(fd, &status)) error = errno;
     else if (!S_ISREG(status.st_mode) || (status.st_mode & 0222) || status.st_size < (off_t)sizeof(*header)) error = EINVAL;
     else error = readAt(fd, header, sizeof(*header), 0);
-    if (!error && (!LSBValidateSlidableDataHeader(header, (uint64_t)status.st_size, info->uuid, info->preferredBase, info->span) ||
+    if (!error && (!LSBValidateSlidableDataHeaderWithProfile(header, (uint64_t)status.st_size, info->uuid, info->preferredBase, info->span, kind) ||
                    header->actualBase != actualBase)) error = EINVAL;
     close(fd);
     return error;
@@ -229,21 +232,22 @@ static int generateData(int cacheFD, int outputFD, const LSBSlidableCacheInfo *i
     return error;
 }
 
-int LSBPrepareSlidableCache(int cacheFD, int directoryFD, uint64_t actualBase, LSBSlidableCachePreparation *result) {
+int LSBPrepareSlidableCacheWithProfile(int cacheFD, int directoryFD, uint64_t actualBase, LSBSlidableCachePreparation *result,
+                                      LSBSlidableCacheProfileKind kind) {
     if (!result) return EINVAL;
     memset(result, 0, sizeof(*result));
     struct stat before, directory;
     if (fstat(cacheFD, &before) || fstat(directoryFD, &directory)) return errno;
     if (!S_ISDIR(directory.st_mode)) return ENOTDIR;
     LSBSlidableCacheInfo info;
-    int supported = LSBInspectSlidableCache(cacheFD, &info);
+    int supported = LSBInspectSlidableCacheWithProfile(cacheFD, &info, kind);
     if (supported <= 0) return supported < 0 ? errno : ENOTSUP;
     if (!validBase(actualBase, info.span)) return EINVAL;
     LSBSlidableDataFileName(info.uuid, actualBase, result->fileName);
-    int error = reuseSidecar(directoryFD, result->fileName, &info, actualBase, &result->header);
+    int error = reuseSidecar(directoryFD, result->fileName, &info, actualBase, &result->header, kind);
     if (!error) { result->reused = 1; return 0; }
     if (error != ENOENT) return error;
-    fillHeader(&info, actualBase, &result->header);
+    fillHeader(&info, actualBase, &result->header, kind);
     char temporary[128];
     int outputFD = -1;
     for (unsigned attempt = 0; attempt < 16; ++attempt) {
@@ -274,11 +278,35 @@ int LSBPrepareSlidableCache(int cacheFD, int directoryFD, uint64_t actualBase, L
         else unlinkat(directoryFD, temporary, 0);
 #endif
         if (error == EEXIST) {
-            error = reuseSidecar(directoryFD, result->fileName, &info, actualBase, &result->header);
+            error = reuseSidecar(directoryFD, result->fileName, &info, actualBase, &result->header, kind);
             if (!error) result->reused = 1;
         }
     }
     // On error only our O_EXCL temporary is removed; an existing immutable sidecar is never overwritten or unlinked.
     unlinkat(directoryFD, temporary, 0);
     return error;
+}
+
+int LSBInspectSlidableCache(int cacheFD, LSBSlidableCacheInfo *info) {
+    return LSBInspectSlidableCacheWithProfile(cacheFD, info, LSBSlidableCacheOriginal);
+}
+int LSBInspectSlidableCacheProfile(int cacheFD, LSBSlidableCacheInfo *info, LSBSlidableCacheProfileKind *kind) {
+    if (kind) *kind = LSBSlidableCacheOriginal;
+    if (info) memset(info, 0, sizeof(*info));
+    if (!info || !kind) { errno = EINVAL; return -1; }
+    int supported = LSBInspectSlidableCacheWithProfile(cacheFD, info, LSBSlidableCacheOriginal);
+    if (supported < 0 && errno == ENOTSUP) {
+        // Retry only an unsupported profile, never a malformed/unreadable input. The second validator checks the entire native layout.
+        supported = LSBInspectSlidableCacheWithProfile(cacheFD, info, LSBSlidableCacheNativeSupport);
+        if (supported > 0) *kind = LSBSlidableCacheNativeSupport;
+        else if (!supported) { errno = ENOTSUP; supported = -1; } // A changing file must not fall back to the ordinary-cache path.
+    }
+    if (supported <= 0) memset(info, 0, sizeof(*info));
+    return supported;
+}
+int LSBSelectSlidableCacheBase(const LSBSlidableCacheInfo *info, uint64_t *actualBase) {
+    return LSBSelectSlidableCacheBaseWithProfile(info, actualBase, LSBSlidableCacheOriginal);
+}
+int LSBPrepareSlidableCache(int cacheFD, int directoryFD, uint64_t actualBase, LSBSlidableCachePreparation *result) {
+    return LSBPrepareSlidableCacheWithProfile(cacheFD, directoryFD, actualBase, result, LSBSlidableCacheOriginal);
 }

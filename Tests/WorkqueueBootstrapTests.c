@@ -6,6 +6,7 @@
 #include <mach/exc.h>
 #include <mach/mig_errors.h>
 #include <mach/ndr.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -36,6 +37,11 @@ static thread_state_flavor_t restoredFlavors[EXC_TYPES_COUNT + 1];
 static const char *const *testEnvironment;
 static bool overrideEnvironment;
 static unsigned environmentReads, allocationCalls;
+static bool initializeInspectionWorker;
+static unsigned workerCreateCalls, workerDetachCalls, portMoveCalls, portInsertCalls;
+static void *(*workerFunction)(void *);
+static mach_port_t movedPort;
+static const mach_port_t inspectionPort = 0x440b, inspectionPortSet = 0x550b;
 void LSBProcessDebuggerHandleMessage(mach_msg_header_t *message, size_t capacity) { (void)message; (void)capacity; abort(); }
 static const mach_port_t workerPort = 0x170b, handlerPort = 0x220b, replyPort = 0x330b;
 static mach_msg_return_t testMachMsg(mach_msg_header_t *, mach_msg_option_t, mach_msg_size_t, mach_msg_size_t,
@@ -140,10 +146,37 @@ static char *testGetenv(const char *name) {
     return NULL;
 }
 static kern_return_t testAllocate(ipc_space_t task, mach_port_right_t right, mach_port_name_t *port) {
-    assert(task == mach_task_self() && right == MACH_PORT_RIGHT_RECEIVE && port);
+    assert(task == mach_task_self() && port);
     ++allocationCalls;
+    if (initializeInspectionWorker) {
+        assert(right == MACH_PORT_RIGHT_RECEIVE || right == MACH_PORT_RIGHT_PORT_SET);
+        *port = right == MACH_PORT_RIGHT_RECEIVE ? inspectionPort : inspectionPortSet;
+        return KERN_SUCCESS;
+    }
+    assert(right == MACH_PORT_RIGHT_RECEIVE);
     return KERN_RESOURCE_SHORTAGE; // Stop initialization before any real exception-port or thread mutation.
 }
+static kern_return_t testMoveMember(ipc_space_t task, mach_port_name_t port, mach_port_name_t set) {
+    if (!initializeInspectionWorker) return mach_port_move_member(task, port, set);
+    assert(task == mach_task_self() && set == inspectionPortSet);
+    ++portMoveCalls;
+    movedPort = port;
+    return KERN_SUCCESS;
+}
+static kern_return_t testInsertRight(ipc_space_t task, mach_port_name_t port, mach_port_t right, mach_msg_type_name_t type) {
+    assert(initializeInspectionWorker && task == mach_task_self() && port == inspectionPort && right == port && type == MACH_MSG_TYPE_MAKE_SEND);
+    ++portInsertCalls;
+    return KERN_SUCCESS;
+}
+static int testCreateWorker(pthread_t *thread, const pthread_attr_t *attributes, void *(*function)(void *), void *context) {
+    assert(initializeInspectionWorker && thread && !attributes && function && !context);
+    ++workerCreateCalls;
+    workerFunction = function;
+    *thread = (pthread_t)(uintptr_t)0x3140;
+    return 0;
+}
+static mach_port_t testWorkerPort(pthread_t thread) { assert(thread == (pthread_t)(uintptr_t)0x3140); return workerPort; }
+static int testDetachWorker(pthread_t thread) { assert(thread == (pthread_t)(uintptr_t)0x3140); ++workerDetachCalls; return 0; }
 uintptr_t LSBThreadSignPC(uintptr_t start, uint32_t flags) {
     ++signCalls;
     signedStart = start;
@@ -170,6 +203,11 @@ uintptr_t LSBThreadSignPC(uintptr_t start, uint32_t flags) {
 #define __workq_open testOpen
 #define getenv testGetenv
 #define mach_port_allocate testAllocate
+#define mach_port_move_member testMoveMember
+#define mach_port_insert_right testInsertRight
+#define pthread_create testCreateWorker
+#define pthread_mach_thread_np testWorkerPort
+#define pthread_detach testDetachWorker
 #include "../Guest/WorkqueueBootstrap.c"
 #undef mach_msg
 #undef mach_msg_destroy
@@ -189,8 +227,19 @@ uintptr_t LSBThreadSignPC(uintptr_t start, uint32_t flags) {
 #undef __workq_open
 #undef getenv
 #undef mach_port_allocate
+#undef mach_port_move_member
+#undef mach_port_insert_right
+#undef pthread_create
+#undef pthread_mach_thread_np
+#undef pthread_detach
 
 static void reset(void) {
+    initializeInspectionWorker = false;
+    workerCreateCalls = workerDetachCalls = portMoveCalls = portInsertCalls = 0;
+    workerFunction = NULL;
+    movedPort = exceptionPort = exceptionPortSet = MACH_PORT_NULL;
+    atomic_store(&exceptionServerReady, false);
+    bridgeOnce = (pthread_once_t)PTHREAD_ONCE_INIT;
     destroyCalls = getCalls = setCalls = legacyCalls = rpcCalls = signCalls = originalCalls = modRefCalls = 0;
     malformedReply = 0;
     forwardResult = getResult = setResult = KERN_SUCCESS;
@@ -510,9 +559,47 @@ static void initializationPolicyTests(void) {
         initializeBridge();
         assert(hardwareMode == cases[i].enabled);
         assert(bridgeMask == (EXC_MASK_BAD_ACCESS | (cases[i].enabled ? EXC_MASK_BREAKPOINT : 0)));
-        assert(environmentReads == 5 && allocationCalls == 1 && bridgeError == ENOTSUP && !trampolineMode);
+        assert(environmentReads == 6 && allocationCalls == 1 && bridgeError == ENOTSUP && !trampolineMode);
         assert(!taskGetCalls && !taskSetCalls); // Default selection precedes allocation but does not arm through a failed setup.
     }
+    overrideEnvironment = false;
+    testEnvironment = NULL;
+    LSBWorkqueueRegister(0);
+}
+
+static void nativeSupportInspectionTests(void) {
+    static const char *invalidModes[] = {NULL, "LSB_NATIVE_SUPPORT=0", "LSB_NATIVE_SUPPORT=01", "LSB_NATIVE_SUPPORT=true"};
+    for (unsigned i = 0; i != sizeof(invalidModes) / sizeof(invalidModes[0]); ++i) {
+        reset();
+        const char *entries[] = {invalidModes[i], NULL};
+        overrideEnvironment = true;
+        testEnvironment = entries;
+        environmentReads = allocationCalls = 0;
+        LSBWorkqueueRegister(0);
+        assert(ensureExceptionServer() == ENOTSUP && environmentReads == 1 && !allocationCalls && !workerCreateCalls);
+    }
+
+    reset();
+    const char *entries[] = {"LSB_NATIVE_SUPPORT=1", LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV "=1", LSB_RETAIN_HOST_CACHE_ENV "=0", NULL};
+    overrideEnvironment = true;
+    testEnvironment = entries;
+    initializeInspectionWorker = true;
+    environmentReads = allocationCalls = 0;
+    LSBWorkqueueRegister(0); // No guest or host entry metadata is needed when the native pthread owner is retained.
+    assert(!ensureExceptionServer());
+    assert(!guestEntry && !hardwareMode && !trampolineMode && !bridgeMask && !bridgeError);
+    assert(allocationCalls == 2 && portInsertCalls == 1 && portMoveCalls == 1 && movedPort == inspectionPort);
+    assert(workerCreateCalls == 1 && workerDetachCalls == 1 && workerFunction == exceptionServer && atomic_load(&exceptionServerReady));
+    assert(!taskGetCalls && !taskSetCalls && !handlerSetCalls && !signCalls);
+    unsigned reads = environmentReads;
+    assert(!ensureExceptionServer() && environmentReads == reads && workerCreateCalls == 1);
+
+    mach_port_t controlPort;
+    assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &controlPort));
+    assert(!LSBWorkqueueAddProcessControlPort(controlPort) && portMoveCalls == 2 && movedPort == controlPort);
+    assert(!mach_port_mod_refs(mach_task_self(), controlPort, MACH_PORT_RIGHT_RECEIVE, -1));
+    assert(LSBWorkqueueOpen() == 23 && LSBWorkqueueSupported() == 0x37); // Keep native workqueue entry APIs intact.
+    reset();
     overrideEnvironment = false;
     testEnvironment = NULL;
     LSBWorkqueueRegister(0);
@@ -638,6 +725,7 @@ int main(void) {
     hardwareRedirectTests();
     handlerRollbackTests();
     initializationPolicyTests();
+    nativeSupportInspectionTests();
     forwardingTests();
     processControlPortSetTests();
     puts("WorkqueueBootstrap tests passed");

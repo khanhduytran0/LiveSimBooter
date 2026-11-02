@@ -7,6 +7,7 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 extern int __bsdthread_register(uintptr_t, uintptr_t, int, void *, size_t, uint64_t);
@@ -89,6 +90,10 @@ static void discardThread(mach_port_t port) {
 
 void *LSBThreadCreate(void *(*function)(void *), void *argument, void *stack, void *thread, unsigned flags) {
     unsigned mode = atomic_load_explicit(&registration, memory_order_acquire);
+    if (mode == RegistrationMissing) {
+        const char *nativeSupport = getenv("LSB_NATIVE_SUPPORT");
+        if (nativeSupport && !strcmp(nativeSupport, "1")) mode = RegistrationNative;
+    }
     if (mode == RegistrationNative) return __bsdthread_create(function, argument, stack, thread, flags);
     if (mode != RegistrationRedirect || !(flags & THREAD_START_CUSTOM) || !thread || !stack || (flags & THREAD_START_TSD_BASE_SET)) {
         errno = ENOTSUP;

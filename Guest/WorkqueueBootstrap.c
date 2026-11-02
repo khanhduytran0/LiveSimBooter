@@ -45,6 +45,12 @@ static int hardwareSlot = -1;
 static arm_debug_state64_t originalDebugState;
 static unsigned hardwareTrapCount, hardwareRejectedCount;
 
+static bool usesNativeSupport(void) {
+    // The C child strips plan-supplied copies and publishes its authenticated bootstrap mode.
+    const char *value = getenv("LSB_NATIVE_SUPPORT");
+    return value && !strcmp(value, "1");
+}
+
 // Cache the opt-in during guest initialization; exception handling must not query the environment or use stdio/dispatch.
 static char *traceNumber(char *output, uint64_t value) {
     static const char digits[] = "0123456789abcdef";
@@ -459,21 +465,23 @@ static void restoreHandlers(void) {
 }
 
 static void initializeBridge(void) {
+    const bool nativeSupport = usesNativeSupport();
     guestEntry = atomic_load_explicit(&simulatorEntry, memory_order_acquire);
     int features;
     bridgeError = ENOTSUP;
-    if (!guestEntry || !parseMetadata(&nativeEntry, &features) || nativeEntry == guestEntry) return;
+    if (!nativeSupport && (!guestEntry || !parseMetadata(&nativeEntry, &features) || nativeEntry == guestEntry)) return;
     const char *trace = getenv("LSB_TRACE_HANDOFF");
     traceHandoff = trace && !strcmp(trace, "1");
     const char *hardware = getenv(LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV);
-    hardwareMode = !hardware || !strcmp(hardware, "1");
+    hardwareMode = !nativeSupport && (!hardware || !strcmp(hardware, "1"));
     const char *retain = getenv(LSB_RETAIN_HOST_CACHE_ENV);
-    trampolineMode = !hardwareMode && retain && !strcmp(retain, "0");
+    trampolineMode = !nativeSupport && !hardwareMode && retain && !strcmp(retain, "0");
     if (trampolineMode) {
         bridgeError = LSBWorkqueueTrampolineInstall(nativeEntry, guestEntry);
         if (bridgeError) return; // Do not hide a failed executable mapping behind recurring bad-access exceptions.
     }
-    bridgeMask = trampolineMode ? 0 : EXC_MASK_BAD_ACCESS | (hardwareMode ? EXC_MASK_BREAKPOINT : 0);
+    // Native support owns its registered thread entries. Retain only the authenticated process-inspection port worker.
+    bridgeMask = nativeSupport || trampolineMode ? 0 : EXC_MASK_BAD_ACCESS | (hardwareMode ? EXC_MASK_BREAKPOINT : 0);
     hardwareTrace("initialize", KERN_SUCCESS, bridgeMask);
     bridgeError = ENOTSUP;
     bool ownsSend = false;
@@ -522,7 +530,7 @@ releasePort:
 
 static int ensureExceptionServer(void) {
     if (atomic_load_explicit(&exceptionServerReady, memory_order_acquire)) return 0;
-    if (!atomic_load_explicit(&simulatorEntry, memory_order_acquire)) return ENOTSUP;
+    if (!atomic_load_explicit(&simulatorEntry, memory_order_acquire) && !usesNativeSupport()) return ENOTSUP;
     pthread_once(&bridgeOnce, initializeBridge);
     return bridgeError;
 }

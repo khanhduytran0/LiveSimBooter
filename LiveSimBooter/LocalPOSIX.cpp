@@ -99,6 +99,7 @@ void *mmap(void *location, size_t size, int protection, int flags, int fd, off_t
 }
 
 int munmap(void *location, size_t size) { return static_cast<int>(result(syscall(SYS_munmap, address(location), size))); }
+int mprotect(void *location, size_t size, int protection) { return static_cast<int>(result(syscall(SYS_mprotect, address(location), size, protection))); }
 int madvise(void *location, size_t size, int advice) { return static_cast<int>(result(syscall(SYS_madvise, address(location), size, advice))); }
 int stat(const char *path, struct stat *value) { return static_cast<int>(result(syscall(SYS_stat64, address(path), address(value)))); }
 int fstat(int fd, struct stat *value) { return static_cast<int>(result(syscall(SYS_fstat64, fd, address(value)))); }

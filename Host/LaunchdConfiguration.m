@@ -22,8 +22,10 @@ enum { BaselineLaunchdChildren = 4, MaximumSelectedServices = 24 };
 _Static_assert(BaselineLaunchdChildren + MaximumSelectedServices < LSB_CHILD_STATUS_CAPACITY, "leave child-ledger slots for dynamic jobs");
 
 static LSBGuestDeviceType *configurationDeviceType;
+static bool configurationNativeSupport;
 static NSString *const memoryWarningName = @"LiveSimBooter-memory-warnings";
 void LSBLaunchdConfigurationSetDeviceType(LSBGuestDeviceType *type) { configurationDeviceType = type; }
+void LSBLaunchdConfigurationSetNativeSupport(bool enabled) { configurationNativeSupport = enabled; }
 
 static int readStockPlist(NSString *path, int readFailure, NSDictionary **output) {
     NSError *error = nil;
@@ -424,13 +426,20 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
             }
         }
         LSBNativeRuntimePolicy nativePolicy;
-        int policyError = LSBResolveNativeRuntimePolicy(LSBHostNativeProductionStatus(), LSBReadNativeCacheLayout(runtimeRoot), inheritedEnv, &nativePolicy);
+        BOOL nativeSupport = configurationNativeSupport;
+        int policyError = 0;
+        if (nativeSupport) nativePolicy = (LSBNativeRuntimePolicy){.retainHostCache = true, .hardwareWorkqueue = false};
+        else policyError = LSBResolveNativeRuntimePolicy(LSBHostNativeProductionStatus(), LSBReadNativeCacheLayout(runtimeRoot), inheritedEnv, &nativePolicy);
         if (policyError) return policyError;
+        // launchd replaces inherited state with Bootstrap.Self. Preserve the authenticated mode in both bootstrap scopes.
+        runtimeEnvironment[@"LSB_NATIVE_SUPPORT"] = nativeSupport ? @"1" : @"0";
         for (NSString *key in @[@LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV, @LSB_RETAIN_HOST_CACHE_ENV, @"LSB_TRACE_HANDOFF"]) {
             bool defaultValue = [key isEqualToString:@LSB_RETAIN_HOST_CACHE_ENV] ? nativePolicy.retainHostCache :
                 [key isEqualToString:@LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV] ? nativePolicy.hardwareWorkqueue : false;
             // launchd replaces inherited environment. Persist the native policy and first exact override in both bootstrap scopes.
-            runtimeEnvironment[key] = LSBRuntimeBooleanEnvironment(inheritedEnv, key.UTF8String, defaultValue) ? @"1" : @"0";
+            bool value = nativeSupport && ![key isEqualToString:@"LSB_TRACE_HANDOFF"] ? defaultValue :
+                LSBRuntimeBooleanEnvironment(inheritedEnv, key.UTF8String, defaultValue);
+            runtimeEnvironment[key] = value ? @"1" : @"0";
         }
         const char *stopChildren = getenv("LSB_DEBUG_STOP_CHILDREN");
         if (stopChildren && !strcmp(stopChildren, "1")) runtimeEnvironment[@"LSB_DEBUG_STOP_BEFORE_HANDOFF"] = @"1";

@@ -185,7 +185,7 @@ def check_cache(path, inventory, *, expected_base=BASE, shared_region_limit=SHAR
                     note='Offline layout validation only. Signature acceptance and execution require separate device validation.')
 
 
-def build(root, output, inventory, inputs, *, base=BASE, patches=PATCHES, patched_builder_sha256=None, validator=check_cache):
+def build(root, output, inventory, inputs, *, base=BASE, patches=PATCHES, patched_builder_sha256=None, validator=check_cache, prepare_stage=None):
     require(not os.path.lexists(output), 'Output already exists; choose a new output directory')
     require(not is_within(output, root), 'Output must not be inside the original RuntimeRoot')
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -202,6 +202,8 @@ def build(root, output, inventory, inputs, *, base=BASE, patches=PATCHES, patche
     loader.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(root / 'usr/lib/dyld_sim', loader)
     require(sha(loader) == inventory['dyld_sim_sha256'], 'Staged dyld_sim changed during copy')
+    if prepare_stage is not None:
+        inputs = dict(inputs, **prepare_stage(stage, output))
     builder = output / 'update_dyld_sim_shared_cache'
     builder.write_bytes(patched)
     builder.chmod(0o755)

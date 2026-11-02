@@ -41,6 +41,9 @@ int main(void) {
     slidable.sharedRegionSize = LSB_SLIDABLE_CACHE_SPAN;
     assert(compareCache(&slidable, 512, 0x190000000) == LSB_NATIVE_CACHE_LAYOUT_SLIDABLE);
     assert(compareCache(&slidable, 512, 0x280000000) == LSB_NATIVE_CACHE_LAYOUT_SLIDABLE);
+    slidable.sharedRegionSize = LSB_NATIVE_SUPPORT_CACHE_SPAN;
+    assert(compareCache(&slidable, 512, 0x190000000) == LSB_NATIVE_CACHE_LAYOUT_SLIDABLE);
+    slidable.sharedRegionSize = LSB_SLIDABLE_CACHE_SPAN;
     assert(compareCache(&slidable, 400, 0x190000000) == LSB_NATIVE_CACHE_LAYOUT_UNKNOWN);
     slidable.mappingCount = 5;
     assert(compareCache(&slidable, 512, 0x190000000) == LSB_NATIVE_CACHE_LAYOUT_OVERLAP);

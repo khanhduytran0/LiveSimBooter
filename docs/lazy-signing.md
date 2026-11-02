@@ -63,7 +63,7 @@ Signing, validation or registration failures retain the original loader error; t
 
 The native host/signer XPC protocol is **version 2**; version 1 output-FD replies are rejected. Rebuild and deploy both native
 components together. The guest-facing Mach repair messages remain version **1**, so no new guest transport change is required
-for signature-data replies. The host and extension use transport ABI **8**, bootstrap ABI **5**; the child ledger remains ABI **5**.
+for signature-data replies. The current host and extension use transport ABI **9**, bootstrap ABI **7**; the child ledger remains ABI **5**.
 Do not mix those with older guest shims. Xcode builds and signs the native backend through `Tools/build-native-signer.sh`.
 It belongs under `LiveProcess.appex/Frameworks/NativeSigner`, separately from the runtime and native Metal backend.
 

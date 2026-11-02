@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -24,6 +25,13 @@ static unsigned char pthreadStorage[16384] __attribute__((aligned(16384)));
 static arm_thread_state64_t initialState, updatedState;
 static const mach_port_t testPort = 0x170b;
 static uintptr_t observedWorkqueueRegistration;
+static const char *nativeSupportMode;
+static unsigned environmentReads;
+static char *testGetenv(const char *name) {
+    assert(!strcmp(name, "LSB_NATIVE_SUPPORT"));
+    ++environmentReads;
+    return (char *)nativeSupportMode;
+}
 void LSBWorkqueueRegister(uintptr_t start) { observedWorkqueueRegistration = start; }
 
 static int testRegister(uintptr_t start, uintptr_t workqueue, int size, void *data, size_t bytes, uint64_t dispatch) {
@@ -102,6 +110,7 @@ uintptr_t LSBTestSignThreadPC(uintptr_t start, uintptr_t modifier) {
 #define thread_terminate testTerminate
 #define mach_port_deallocate testDeallocate
 #define _exit testExit
+#define getenv testGetenv
 #include "../Guest/ThreadBootstrap.c"
 #undef __bsdthread_register
 #undef __bsdthread_create
@@ -111,8 +120,11 @@ uintptr_t LSBTestSignThreadPC(uintptr_t start, uintptr_t modifier) {
 #undef thread_terminate
 #undef mach_port_deallocate
 #undef _exit
+#undef getenv
 
 static void reset(void) {
+    nativeSupportMode = NULL;
+    environmentReads = 0;
     registerCalls = createCalls = getCalls = setCalls = resumeCalls = terminateCalls = deallocateCalls = signCalls = 0;
     observedFlags = corruptState = stateFlags = 0;
     registerResult = -1;
@@ -138,6 +150,34 @@ static void registerSimulator(void) {
 static void *start(void *argument) { return argument; }
 static void *create(unsigned extraFlags) {
     return LSBThreadCreate(start, (void *)0xfeed0010, pthreadStorage, pthreadStorage, 0x090008ff | extraFlags);
+}
+
+static void testNativeSupport(void) {
+    static const char *invalidModes[] = {NULL, "0", "01", "true", ""};
+    for (unsigned i = 0; i != sizeof(invalidModes) / sizeof(invalidModes[0]); ++i) {
+        reset();
+        nativeSupportMode = invalidModes[i];
+        assert(create(0) == (void *)-1 && errno == ENOTSUP && !createCalls && environmentReads == 1);
+    }
+    for (unsigned suspended = 0; suspended != 2; ++suspended) {
+        reset();
+        nativeSupportMode = "1";
+        unsigned flags = suspended ? THREAD_START_SUSPENDED : 0;
+        errno = EDOM;
+        assert(LSBThreadCreate(start, NULL, pthreadStorage, pthreadStorage, flags) == pthreadStorage && errno == EDOM);
+        assert(createCalls == 1 && observedFlags == flags && !registerCalls && !getCalls && !setCalls && !resumeCalls && !signCalls);
+        assert(atomic_load(&registration) == RegistrationMissing && !observedWorkqueueRegistration);
+    }
+    reset();
+    nativeSupportMode = "1";
+    createError = EAGAIN;
+    assert(create(0) == (void *)-1 && errno == EAGAIN && createCalls == 1 && !getCalls && !terminateCalls);
+
+    reset();
+    registerSimulator();
+    nativeSupportMode = "1";
+    assert(create(0) == pthreadStorage && getCalls == 1 && setCalls == 1 && resumeCalls == 1 && !environmentReads);
+    // The environment fallback cannot overwrite an already selected redirect registration.
 }
 
 static void testRegistration(void) {
@@ -239,6 +279,7 @@ static void testFailureCleanup(void) {
 
 int main(void) {
     testRegistration();
+    testNativeSupport();
     testCreateAndPreservation();
     testFailureCleanup();
     puts("Thread bootstrap tests passed");

@@ -21,7 +21,7 @@
 extern char **environ;
 extern int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *, mach_port_t *, uint32_t);
 static unsigned openDescriptorCount(void);
-enum { MalformedPortsCount = 10, MalformedIdentityCount = 12, MalformedRoleCount = 39, MalformedRoleRequestCount = 48,
+enum { MalformedPortsCount = 10, MalformedIdentityCount = 12, MalformedRoleCount = 50, MalformedRoleRequestCount = 12 * 8,
        MalformedBootstrapCount = 14 + MalformedPortsCount + MalformedIdentityCount + MalformedRoleCount,
        MalformedKillCount = 14, MalformedAuditCount = 16, MalformedEntitlementCount = 25, PortRoundTripCount = 7,
        MalformedRebootCount = 30, RebootReplyCount = 23 };
@@ -201,7 +201,14 @@ static void testRoleRequestInjection(const LSBSpawnPlan *plan, int fd, unsigned 
     else if (variant / 8 == 2) xpc_dictionary_set_uint64(request, "native-production-status", LSB_NATIVE_DEVELOPMENT);
     else if (variant / 8 == 3) xpc_dictionary_set_uint64(request, "execution-role", LSB_EXECUTION_NATIVE_SIGNER);
     else if (variant / 8 == 4) xpc_dictionary_set_mach_send(request, "lazy-signing-port", port);
-    else xpc_dictionary_set_uint64(request, "simulator-cache-base", UINT64_C(0x7000000000));
+    else if (variant / 8 == 5) xpc_dictionary_set_uint64(request, "simulator-cache-base", UINT64_C(0x7000000000));
+    // Even a correctly typed zero is forbidden: only the host may choose the support-library ownership mode.
+    else if (variant / 8 == 6) xpc_dictionary_set_uint64(request, "native-support", 0);
+    else if (variant / 8 == 7) xpc_dictionary_set_uint64(request, "native-support", 1);
+    else if (variant / 8 == 8) xpc_dictionary_set_int64(request, "native-support", 1);
+    else if (variant / 8 == 9) xpc_dictionary_set_bool(request, "native-support", true);
+    else if (variant / 8 == 10) xpc_dictionary_set_string(request, "native-support", "1");
+    else xpc_dictionary_set_uint64(request, "native-support", UINT64_MAX);
     xpc_object_t reply = NULL;
     assert(!xpc_pipe_routine(pipe, request, &reply));
     assert(reply && xpc_dictionary_get_int64(reply, "error") == EPROTO);
@@ -291,6 +298,7 @@ static void registeredPortsClient(const LSBSpawnPlan *plan, const int fds[LSB_MA
         assert(reply.guestPID == (variant % 2 ? variant == 5 ? INT_MAX : 1234 + (int)variant : 4242));
         assert(reply.parentPID == (variant == 6 || variant % 2 ? variant == 1 ? 0 : 4567 : getppid()));
         assert(reply.executionRole == (variant == 6 ? LSB_EXECUTION_NATIVE_METAL_PROBE : LSB_EXECUTION_SIMULATOR));
+        assert(!reply.nativeSupport && !reply.simulatorCacheBase);
         assert(reply.nativeProductionStatus == (variant == 1 ? LSB_NATIVE_DEVELOPMENT : variant == 3 ? LSB_NATIVE_PRODUCTION : LSB_NATIVE_PRODUCTION_UNKNOWN));
         assert(reply.launchdTankPort == (variant == 1 ? second : MACH_PORT_NULL));
         unsigned firstCopies = ports.bootstrapPort == first, secondCopies = ports.bootstrapPort == second;
@@ -921,6 +929,7 @@ static int client(void) {
     assert(!LSBTransportCheckIn(&reply, received));
     assert(reply.requestID == 77 && !reply.error && !strcmp(reply.runtimeRoot, "/tmp/RuntimeRoot"));
     assert(reply.guestPID == getpid() && reply.parentPID == getppid());
+    assert(!reply.nativeSupport && !reply.simulatorCacheBase);
     assert(MACH_PORT_VALID(reply.guestBrokerPort) && !mach_port_deallocate(mach_task_self(), reply.guestBrokerPort));
     assert(reply.launchdTankPort == MACH_PORT_NULL && !reply.ports.count && !reply.ports.registeredPresent && !reply.ports.bootstrapPresent);
     assert(!memcmp(&reply.plan, &plan, sizeof(plan)) && received[0] >= 0);
@@ -965,16 +974,18 @@ static int client(void) {
                               .msgh_remote_port = tankAnchor, .msgh_id = 885};
     assert(!mach_msg(&ping, MACH_SEND_MSG, sizeof(ping), 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     registeredPortsClient(&plan, fds);
-    for (unsigned variant = 0; variant < 4; ++variant) {
+    for (unsigned variant = 0; variant < 7; ++variant) {
         unsigned before = openDescriptorCount();
         if (variant >= 2) {
             assert(LSBTransportCheckIn(&reply, received) == EINVAL && !reply.lazySigningPort && !reply.guestBrokerPort);
+            assert(!reply.nativeSupport && !reply.simulatorCacheBase);
             assert(openDescriptorCount() == before);
             continue;
         }
         assert(!LSBTransportCheckIn(&reply, received) && reply.requestID == 700 + variant);
         assert(reply.executionRole == (variant ? LSB_EXECUTION_NATIVE_SIGNER : LSB_EXECUTION_SIMULATOR));
         assert(reply.simulatorCacheBase == (variant ? 0 : UINT64_C(0x7000000000)));
+        assert(reply.nativeSupport == !variant);
         assert(reply.brokerAudit.val[5] == (unsigned)getppid() && reply.brokerAudit.val[7]);
         assert(MACH_PORT_VALID(reply.lazySigningPort) == !variant && MACH_PORT_VALID(reply.guestBrokerPort) == !variant);
         assert(!reply.launchdTankPort && !reply.ports.count && !reply.taskCapture.port);
@@ -1009,7 +1020,8 @@ static int client(void) {
     for (unsigned variant = 0; variant < MalformedBootstrapCount; ++variant) {
         unsigned before = openDescriptorCount();
         assert(LSBTransportCheckIn(&reply, received) == EPROTO);
-        assert(reply.nativeProductionStatus == LSB_NATIVE_PRODUCTION_UNKNOWN && !reply.simulatorCacheBase && !reply.guestBrokerPort && !reply.lazySigningPort);
+        assert(reply.nativeProductionStatus == LSB_NATIVE_PRODUCTION_UNKNOWN && !reply.simulatorCacheBase && !reply.nativeSupport);
+        assert(!reply.guestBrokerPort && !reply.lazySigningPort);
         assert(reply.statusFD == -1 && reply.wakeFD == -1 && reply.launchdTankPort == MACH_PORT_NULL);
         assert(!reply.ports.count && !reply.ports.registeredPresent && !reply.ports.bootstrapPresent && !reply.ports.bootstrapPort);
         for (unsigned i = 0; i < LSB_MAX_REGISTERED_PORTS; ++i) assert(reply.ports.registered[i] == MACH_PORT_NULL);
@@ -1101,6 +1113,7 @@ static void replyMalformedBootstrap(LSBReceivedMessage *message, const LSBSpawnP
     xpc_dictionary_set_mach_send(reply, "guest-broker-port", guestEndpoint);
     xpc_dictionary_set_uint64(reply, "native-production-status", LSB_NATIVE_PRODUCTION);
     xpc_dictionary_set_uint64(reply, "simulator-cache-base", 0);
+    xpc_dictionary_set_uint64(reply, "native-support", 0);
     xpc_dictionary_set_uint64(reply, "request-id", 77);
     xpc_dictionary_set_int64(reply, "error", 0);
     xpc_dictionary_set_int64(reply, "pid", 4242);
@@ -1212,6 +1225,27 @@ static void replyMalformedBootstrap(LSBReceivedMessage *message, const LSBSpawnP
                 xpc_dictionary_set_value(reply, "bootstrap-port", NULL);
                 xpc_dictionary_set_value(reply, "launchd-tank-port", NULL);
                 xpc_dictionary_set_value(reply, "guest-broker-port", NULL);
+                break;
+            case 39: xpc_dictionary_set_value(reply, "native-support", NULL); break;
+            case 40: xpc_dictionary_set_int64(reply, "native-support", 1); break;
+            case 41: xpc_dictionary_set_bool(reply, "native-support", true); break;
+            case 42: xpc_dictionary_set_string(reply, "native-support", "1"); break;
+            case 43: xpc_dictionary_set_uint64(reply, "native-support", 2); break;
+            case 44: xpc_dictionary_set_uint64(reply, "native-support", UINT64_MAX); break;
+            case 45: xpc_dictionary_set_uint64(reply, "native-support", 1); break; // A cache base is required.
+            case 46: case 47: case 48:
+                xpc_dictionary_set_uint64(reply, "execution-role",
+                    LSB_EXECUTION_NATIVE_METAL_PROBE + variant - 14 - MalformedPortsCount - MalformedIdentityCount - 46);
+                xpc_dictionary_set_uint64(reply, "native-support", 1);
+                xpc_dictionary_set_value(reply, "registered-ports", NULL);
+                xpc_dictionary_set_value(reply, "bootstrap-port", NULL);
+                xpc_dictionary_set_value(reply, "launchd-tank-port", NULL);
+                xpc_dictionary_set_value(reply, "guest-broker-port", NULL);
+                break;
+            case 49:
+                xpc_dictionary_set_uint64(reply, "native-support", 1);
+                xpc_dictionary_set_uint64(reply, "simulator-cache-base", UINT64_C(0x7000000000));
+                xpc_dictionary_set_string(reply, "guest-broker-port", "fail after cache metadata decoding");
                 break;
             default: assert(false);
         }
@@ -1359,15 +1393,22 @@ static int host(const char *executable) {
     assert(!mach_msg(&ping.header, MACH_RCV_MSG, 0, sizeof(ping), tank, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     assert(ping.header.msgh_id == 885 && ping.header.msgh_size == sizeof(mach_msg_header_t));
     registeredPortsHost(port, &bootstrap);
-    for (unsigned variant = 0; variant < 4; ++variant) {
+    for (unsigned variant = 0; variant < 7; ++variant) {
         assert(!LSBTransportReceive(port, &message) && message.kind == LSB_REQUEST_CHECKIN);
         LSBBootstrapMetadata metadata = {.guestPID = child, .parentPID = getpid(),
             .executionRole = variant ? LSB_EXECUTION_NATIVE_SIGNER : LSB_EXECUTION_SIMULATOR,
             .guestBrokerPort = variant ? MACH_PORT_NULL : guestEndpoint, .lazySigningPort = variant ? MACH_PORT_NULL : guestEndpoint,
-            .simulatorCacheBase = variant ? 0 : UINT64_C(0x7000000000)};
+            .simulatorCacheBase = variant ? 0 : UINT64_C(0x7000000000), .nativeSupport = !variant};
         if (variant >= 2) {
             if (variant == 2) metadata.lazySigningPort = guestEndpoint;
-            else metadata.simulatorCacheBase = UINT64_C(0x7000000000);
+            else if (variant == 3) metadata.simulatorCacheBase = UINT64_C(0x7000000000);
+            else if (variant == 4) metadata.nativeSupport = 1;
+            else {
+                metadata.executionRole = LSB_EXECUTION_SIMULATOR;
+                metadata.guestBrokerPort = guestEndpoint;
+                metadata.nativeSupport = variant == 5 ? 1 : 2;
+                metadata.simulatorCacheBase = variant == 5 ? 0 : UINT64_C(0x7000000000);
+            }
             assert(LSBTransportReplyBootstrapWithMetadata(&message, 0, child, 700 + variant, "/tmp/RuntimeRoot", &pending.plan,
                 pending.fds, bootstrap.status, bootstrap.wake[0], &metadata) == EINVAL && !message.object);
             LSBTransportDisposeMessage(&message);
@@ -1489,7 +1530,7 @@ static int host(const char *executable) {
 }
 
 int main(int argc, char **argv) {
-    _Static_assert(LSB_TRANSPORT_VERSION == 9 && LSB_BOOTSTRAP_VERSION == 6, "native cache selection requires current transport/bootstrap versions");
+    _Static_assert(LSB_TRANSPORT_VERSION == 9 && LSB_BOOTSTRAP_VERSION == 7, "native cache selection requires current transport/bootstrap versions");
     // Bound a failed regression test without adding a signal handler to the production transport.
     alarm(20);
     return argc == 2 && !strcmp(argv[1], "--client") ? client() : host(argv[0]);

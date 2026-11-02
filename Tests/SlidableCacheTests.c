@@ -59,16 +59,19 @@ static void pageTests(void) {
     slide.startsCount = UINT32_MAX; assert(validateSlideInfo(&slide, &mapping) == EINVAL);
 }
 
-static LSBSlidableCacheInfo fixtureInfo(void) {
-    LSBSlidableCacheInfo info = {.preferredBase = LSB_SLIDABLE_CACHE_PREFERRED_BASE, .span = LSB_SLIDABLE_CACHE_SPAN, .mappingCount = 6};
-    memcpy(info.uuid, testUUID, 16); memcpy(info.mappings, LSBSlidableCacheProfile, sizeof(LSBSlidableCacheProfile));
+static LSBSlidableCacheInfo fixtureInfoForProfile(LSBSlidableCacheProfileKind kind) {
+    const LSBSlidableCacheLayout *layout = LSBSlidableCacheLayoutForProfile(kind);
+    assert(layout);
+    LSBSlidableCacheInfo info = {.preferredBase = LSB_SLIDABLE_CACHE_PREFERRED_BASE, .span = layout->span, .mappingCount = 6};
+    memcpy(info.uuid, testUUID, 16); memcpy(info.mappings, layout->mappings, 6 * sizeof(*layout->mappings));
     info.fileSize = info.mappings[5].fileOffset + info.mappings[5].size + 0x4000;
     return info;
 }
+static LSBSlidableCacheInfo fixtureInfo(void) { return fixtureInfoForProfile(LSBSlidableCacheOriginal); }
 static void headerTests(void) {
     LSBSlidableCacheInfo info = fixtureInfo();
     LSBSlidableDataHeader good, bad;
-    fillHeader(&info, testBase, &good);
+    fillHeader(&info, testBase, &good, LSBSlidableCacheOriginal);
     assert(LSBValidateSlidableDataHeader(&good, good.fileSize, testUUID, info.preferredBase, info.span));
     char name[LSB_SLIDABLE_DATA_NAME_CAPACITY];
     LSBSlidableDataFileName(testUUID, testBase, name);
@@ -114,8 +117,8 @@ static void selectionTests(void) {
     assert(LSBSelectSlidableCacheBase(NULL, &base) == EINVAL);
 }
 
-static void makeCache(int fd) {
-    LSBSlidableCacheInfo info = fixtureInfo();
+static void makeCacheForProfile(int fd, LSBSlidableCacheProfileKind kind) {
+    LSBSlidableCacheInfo info = fixtureInfoForProfile(kind);
     CacheHeader header = {.mappingOffset = 0x200, .mappingCount = 6, .signatureOffset = info.fileSize - 0x4000, .signatureSize = 0x4000,
         .platform = 7, .formatFlags = 0x200, .preferredBase = info.preferredBase, .span = info.span, .maxSlide = 0x20000000,
         .mappingWithSlideOffset = 0x400, .mappingWithSlideCount = 6, .imagesOffset = 0x1000, .imagesCount = 1353};
@@ -140,7 +143,7 @@ static void fileTests(void) {
     assert(mkdtemp(directory));
     int dir = open(directory, O_RDONLY | O_DIRECTORY); assert(dir >= 0);
     int fd = openat(dir, "cache", O_CREAT | O_EXCL | O_RDWR, 0600); assert(fd >= 0);
-    makeCache(fd);
+    makeCacheForProfile(fd, LSBSlidableCacheOriginal);
     LSBSlidableCacheInfo info;
     assert(LSBInspectSlidableCache(fd, &info) == 1);
     uint32_t platform = 1; assert(!writeAt(fd, &platform, 4, 216));
@@ -174,7 +177,7 @@ static void fileTests(void) {
     for (struct dirent *entry; (entry = readdir(scan));) if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) ++entries;
     assert(entries == 1); closedir(scan);
     // Existing immutable data may be reused without regenerating or rewriting its inode.
-    fillHeader(&info, testBase, &prepared.header); LSBSlidableDataFileName(info.uuid, testBase, prepared.fileName);
+    fillHeader(&info, testBase, &prepared.header, LSBSlidableCacheOriginal); LSBSlidableDataFileName(info.uuid, testBase, prepared.fileName);
     int data = openat(dir, prepared.fileName, O_CREAT | O_EXCL | O_RDWR, 0600); assert(data >= 0);
     assert(!ftruncate(data, (off_t)prepared.header.fileSize) && !writeAt(data, &prepared.header, sizeof(prepared.header), 0));
     assert(LSBPrepareSlidableCache(fd, dir, testBase, &prepared) == EINVAL); // A writable file is not immutable prepared data.
@@ -193,21 +196,117 @@ static void fileTests(void) {
     close(fd); assert(!unlinkat(dir, "cache", 0)); close(dir); assert(!rmdir(directory));
 }
 
-static void fullCacheTest(const char *cachePath, const char *directoryPath, const char *inventoryPath) {
+static void nativeSupportProfileTests(void) {
+    const LSBSlidableCacheProfileKind kind = LSBSlidableCacheNativeSupport;
+    LSBSlidableCacheInfo info = fixtureInfoForProfile(kind);
+    LSBSlidableDataHeader header;
+    fillHeader(&info, testBase, &header, kind);
+    assert(!LSBValidateSlidableDataHeader(&header, header.fileSize, testUUID, info.preferredBase, info.span));
+    assert(LSBValidateSlidableDataHeaderWithProfile(&header, header.fileSize, testUUID, info.preferredBase, info.span, kind));
+    assert(!LSBValidateSlidableDataHeaderWithProfile(&header, header.fileSize, testUUID, info.preferredBase, info.span, 42));
+    assert(!LSBSlidableCacheMappingMatchesProfile(&info.mappings[0], 0));
+    assert(LSBSlidableCacheMappingMatchesProfileKind(&info.mappings[0], 0, kind));
+    assert(!LSBSlidableCacheMappingMatchesProfileKind(&info.mappings[0], 0, 42));
+    uint64_t base = 0;
+    assert(LSBSelectSlidableCacheBase(&info, &base) == EINVAL);
+    assert(!LSBSelectSlidableCacheBaseWithProfile(&info, &base, kind));
+    header.fixupCount = LSB_SLIDABLE_CACHE_FIXUPS;
+    assert(!LSBValidateSlidableDataHeaderWithProfile(&header, header.fileSize, testUUID, info.preferredBase, info.span, kind));
+
+    char directory[] = "/tmp/LSB-native-support-test.XXXXXX";
+    assert(mkdtemp(directory));
+    int dir = open(directory, O_RDONLY | O_DIRECTORY); assert(dir >= 0);
+    int fd = openat(dir, "cache", O_CREAT | O_EXCL | O_RDWR, 0600); assert(fd >= 0);
+    makeCacheForProfile(fd, kind);
+    assert(LSBInspectSlidableCache(fd, &info) == -1 && errno == ENOTSUP);
+    assert(LSBInspectSlidableCacheWithProfile(fd, &info, kind) == 1);
+    assert(info.span == LSB_NATIVE_SUPPORT_CACHE_SPAN);
+    assert(LSBInspectSlidableCacheWithProfile(fd, &info, 42) == -1 && errno == EINVAL);
+    assert(LSBInspectSlidableCacheWithProfile(fd, &info, kind) == 1);
+    LSBSlidableCachePreparation prepared;
+    assert(LSBPrepareSlidableCache(fd, dir, testBase, &prepared) == ENOTSUP);
+    fillHeader(&info, testBase, &prepared.header, kind);
+    LSBSlidableDataFileName(info.uuid, testBase, prepared.fileName);
+    int data = openat(dir, prepared.fileName, O_CREAT | O_EXCL | O_RDWR, 0600); assert(data >= 0);
+    assert(!ftruncate(data, (off_t)prepared.header.fileSize) && !writeAt(data, &prepared.header, sizeof(prepared.header), 0));
+    assert(!fchmod(data, 0444)); close(data);
+    assert(!LSBPrepareSlidableCacheWithProfile(fd, dir, testBase, &prepared, kind) && prepared.reused);
+    assert(!unlinkat(dir, prepared.fileName, 0));
+    close(fd); assert(!unlinkat(dir, "cache", 0)); close(dir); assert(!rmdir(directory));
+}
+
+static void profileDiscoveryTests(void) {
+    char path[] = "/tmp/LSB-cache-profile-test.XXXXXX";
+    int fd = mkstemp(path); assert(fd >= 0);
+    assert(!unlink(path));
+    LSBSlidableCacheInfo info, empty = {0};
+    LSBSlidableCacheProfileKind selected = LSBSlidableCacheNativeSupport;
+    assert(LSBInspectSlidableCacheProfile(-1, &info, &selected) == -1 && errno == EBADF);
+    assert(selected == LSBSlidableCacheOriginal && !memcmp(&info, &empty, sizeof(info)));
+    assert(LSBInspectSlidableCacheProfile(fd, NULL, &selected) == -1 && errno == EINVAL);
+    assert(LSBInspectSlidableCacheProfile(fd, &info, NULL) == -1 && errno == EINVAL);
+    assert(LSBInspectSlidableCacheProfile(fd, &info, &selected) == -1 && errno == EINVAL); // Truncated header is not a profile mismatch.
+
+    for (unsigned profile = LSBSlidableCacheOriginal; profile <= LSBSlidableCacheNativeSupport; ++profile) {
+        LSBSlidableCacheProfileKind expected = (LSBSlidableCacheProfileKind)profile;
+        makeCacheForProfile(fd, expected);
+        selected = (LSBSlidableCacheProfileKind)42;
+        assert(LSBInspectSlidableCacheProfile(fd, &info, &selected) == 1 && selected == expected);
+        assert(info.span == LSBSlidableCacheLayoutForProfile(expected)->span && !memcmp(info.uuid, testUUID, sizeof(testUUID)));
+        const struct { uint64_t offset, value; unsigned size; int error; } invalid[] = {
+            {offsetof(CacheHeader, span), UINT64_C(0x7e150000), 8, ENOTSUP}, // Unknown, otherwise well-formed slide profile.
+            {offsetof(CacheHeader, mappingWithSlideOffset), UINT32_MAX, 4, EINVAL},
+            {offsetof(CacheHeader, signatureSize), 0, 8, EINVAL},
+            {0x200, UINT64_MAX, 8, EINVAL}, // Known profile with inconsistent legacy mappings.
+            {0x400 + offsetof(LSBSlidableCacheMapping, initialProtection), 1, 4, ENOTSUP},
+            {info.mappings[1].slideInfoOffset + offsetof(SlideInfoV2, startsCount), 1, 4, EINVAL},
+            {info.mappings[1].slideInfoOffset + offsetof(SlideInfoV2, version), 3, 4, ENOTSUP},
+        };
+        for (unsigned index = 0; index < sizeof(invalid) / sizeof(*invalid); ++index) {
+            uint64_t saved = 0;
+            assert(!readAt(fd, &saved, invalid[index].size, invalid[index].offset));
+            assert(!writeAt(fd, &invalid[index].value, invalid[index].size, invalid[index].offset));
+            selected = LSBSlidableCacheNativeSupport;
+            memset(&info, 0xa5, sizeof(info));
+            assert(LSBInspectSlidableCacheProfile(fd, &info, &selected) == -1 && errno == invalid[index].error);
+            assert(selected == LSBSlidableCacheOriginal && !memcmp(&info, &empty, sizeof(info)));
+            assert(!writeAt(fd, &saved, invalid[index].size, invalid[index].offset));
+        }
+        assert(LSBInspectSlidableCacheProfile(fd, &info, &selected) == 1 && selected == expected);
+        // The right span alone must never select native support over a different mapping profile.
+        uint64_t otherSpan = LSBSlidableCacheLayoutForProfile(expected == LSBSlidableCacheOriginal ?
+                                                            LSBSlidableCacheNativeSupport : LSBSlidableCacheOriginal)->span;
+        assert(!writeAt(fd, &otherSpan, sizeof(otherSpan), offsetof(CacheHeader, span)));
+        int mismatchError = expected == LSBSlidableCacheOriginal ? ENOTSUP : EINVAL; // Native signature extent is too short for Original.
+        assert(LSBInspectSlidableCacheProfile(fd, &info, &selected) == -1 && errno == mismatchError);
+    }
+    makeCacheForProfile(fd, LSBSlidableCacheOriginal);
+    uint32_t noSlides = 0;
+    assert(!writeAt(fd, &noSlides, sizeof(noSlides), offsetof(CacheHeader, mappingWithSlideCount)));
+    selected = LSBSlidableCacheNativeSupport;
+    assert(LSBInspectSlidableCacheProfile(fd, &info, &selected) == 0);
+    assert(selected == LSBSlidableCacheOriginal && !memcmp(&info, &empty, sizeof(info)));
+    assert(!close(fd));
+}
+
+static void fullCacheTest(const char *cachePath, const char *directoryPath, const char *inventoryPath, LSBSlidableCacheProfileKind kind) {
     int cache = open(cachePath, O_RDONLY), directory = open(directoryPath, O_RDONLY | O_DIRECTORY), inventory = open(inventoryPath, O_RDONLY);
     assert(cache >= 0 && directory >= 0 && inventory >= 0);
+    LSBSlidableCacheInfo info;
+    LSBSlidableCacheProfileKind detected;
+    assert(LSBInspectSlidableCacheProfile(cache, &info, &detected) == 1 && detected == kind);
     struct timespec begin, end; clock_gettime(CLOCK_MONOTONIC, &begin);
     LSBSlidableCachePreparation prepared;
-    int error = LSBPrepareSlidableCache(cache, directory, testBase, &prepared);
+    int error = LSBPrepareSlidableCacheWithProfile(cache, directory, testBase, &prepared, kind);
     if (error) fprintf(stderr, "Preparation failed: %d %s\n", error, strerror(error));
     assert(!error); clock_gettime(CLOCK_MONOTONIC, &end);
     double seconds = end.tv_sec - begin.tv_sec + (end.tv_nsec - begin.tv_nsec) / 1e9;
     int data = openat(directory, prepared.fileName, O_RDONLY); assert(data >= 0);
     uint8_t *mapped = mmap(NULL, (size_t)prepared.header.fileSize, PROT_READ, MAP_PRIVATE, data, 0); assert(mapped != MAP_FAILED);
-    struct stat input; assert(!fstat(inventory, &input) && input.st_size == (off_t)(LSB_SLIDABLE_CACHE_FIXUPS * 16));
+    struct stat input; assert(!fstat(inventory, &input) && input.st_size == (off_t)(prepared.header.fixupCount * 16));
     const uint64_t *fixups = mmap(NULL, (size_t)input.st_size, PROT_READ, MAP_PRIVATE, inventory, 0); assert(fixups != MAP_FAILED);
     unsigned mapping = 0; uint64_t tagged = 0;
-    for (uint64_t i = 0; i < LSB_SLIDABLE_CACHE_FIXUPS; ++i) {
+    for (uint64_t i = 0; i < prepared.header.fixupCount; ++i) {
         uint64_t offset = fixups[i * 2], original = fixups[i * 2 + 1];
         while (offset >= prepared.header.mappings[mapping].sourceFileOffset + prepared.header.mappings[mapping].size) ++mapping;
         assert(mapping < 3 && offset >= prepared.header.mappings[mapping].sourceFileOffset);
@@ -215,14 +314,18 @@ static void fullCacheTest(const char *cachePath, const char *directoryPath, cons
         assert(get64(mapped + destination) == original + testBase - prepared.header.preferredBase);
         tagged += (original >> 56) != 0;
     }
-    assert(tagged == LSB_SLIDABLE_CACHE_TAGGED);
+    assert(tagged == prepared.header.taggedCount);
     munmap((void *)fixups, (size_t)input.st_size); munmap(mapped, (size_t)prepared.header.fileSize);
     close(data); close(inventory); close(directory); close(cache);
-    printf("Full cache: 15156132 pointers and 40252 tags match independent Python inventory; preparation %.3fs, reused=%d\n", seconds, prepared.reused);
+    printf("Full cache: %llu pointers and %llu tags match independent Python inventory; preparation %.3fs, reused=%d\n",
+           (unsigned long long)prepared.header.fixupCount, (unsigned long long)prepared.header.taggedCount, seconds, prepared.reused);
 }
 int main(int argc, char **argv) {
-    if (argc == 4) { fullCacheTest(argv[1], argv[2], argv[3]); return 0; }
+    if (argc == 4 || argc == 5) {
+        assert(argc == 4 || !strcmp(argv[4], "native-support"));
+        fullCacheTest(argv[1], argv[2], argv[3], argc == 5 ? LSBSlidableCacheNativeSupport : LSBSlidableCacheOriginal); return 0;
+    }
     assert(argc == 1);
-    pageTests(); headerTests(); selectionTests(); fileTests();
-    puts("Slidable cache: strict profile, v2 bounds/tags, immutable reuse and failure cleanup passed");
+    pageTests(); headerTests(); selectionTests(); fileTests(); nativeSupportProfileTests(); profileDiscoveryTests();
+    puts("Slidable cache: exact profile discovery, v2 bounds/tags, native-support isolation, immutable reuse and failure cleanup passed");
 }

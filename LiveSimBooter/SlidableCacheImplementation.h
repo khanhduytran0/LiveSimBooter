@@ -22,6 +22,7 @@ struct SlidableCacheState {
     uint32_t count, seen;
     int cacheFD = -1, dataFD = -1;
     bool enabled, trace, ready, mapped;
+    LSBSlidableCacheProfileKind profile = LSBSlidableCacheOriginal;
 };
 static SlidableCacheState sSlidableCache;
 
@@ -53,9 +54,13 @@ static int slidableRead(int fd, void *bytes, size_t count, off_t offset) {
     }
     return 0;
 }
-static int prepareSlidableData(const char *runtimeRoot, uint64_t actualBase, const uint8_t cacheUUID[16], bool trace) {
+static int prepareSlidableData(const char *runtimeRoot, uint64_t actualBase, const uint8_t cacheUUID[16], bool trace,
+                               LSBSlidableCacheProfileKind profile = LSBSlidableCacheOriginal) {
     if (sSlidableCache.enabled || sSlidableCache.dataFD >= 0) return EALREADY;
     sSlidableCache.trace = trace;
+    const auto *layout = LSBSlidableCacheLayoutForProfile(profile);
+    if (!layout) return EINVAL;
+    sSlidableCache.profile = profile;
     if (!actualBase) return 0;
     if (!runtimeRoot || runtimeRoot[0] != '/' || !cacheUUID || !LSBSlidableCacheUUIDIsNonzero(cacheUUID)) return EINVAL;
     char path[PATH_MAX];
@@ -74,8 +79,8 @@ static int prepareSlidableData(const char *runtimeRoot, uint64_t actualBase, con
     if (lsb::fstat(fd, &info)) error = *lsb::errnoAddress();
     else if (!S_ISREG(info.st_mode) || (info.st_mode & 0222) || info.st_size < static_cast<off_t>(sizeof(header))) error = EINVAL;
     else error = slidableRead(fd, &header, sizeof(header), 0);
-    if (!error && (!LSBValidateSlidableDataHeader(&header, static_cast<uint64_t>(info.st_size), cacheUUID,
-                                                  LSB_SLIDABLE_CACHE_PREFERRED_BASE, LSB_SLIDABLE_CACHE_SPAN) || header.actualBase != actualBase))
+    if (!error && (!LSBValidateSlidableDataHeaderWithProfile(&header, static_cast<uint64_t>(info.st_size), cacheUUID,
+                                                  LSB_SLIDABLE_CACHE_PREFERRED_BASE, layout->span, profile) || header.actualBase != actualBase))
         error = EINVAL;
     if (error) { lsb::close(fd); return error; }
     sSlidableCache.dataFD = fd;
@@ -93,7 +98,7 @@ static void prepareSlidableMappings(int fd) {
     static constexpr char cacheMagic[16] = "dyld_v1   arm64";
     if (!slidableBytesEqual(header.magic, cacheMagic, sizeof(cacheMagic)) ||
         !slidableBytesEqual(header.uuid, sSlidableCache.backing.cacheUUID, sizeof(header.uuid)) || header.sharedRegionStart != LSB_SLIDABLE_CACHE_PREFERRED_BASE ||
-        header.sharedRegionSize != LSB_SLIDABLE_CACHE_SPAN || header.mappingCount != 6 ||
+        header.sharedRegionSize != sSlidableCache.backing.cacheSpan || header.mappingCount != 6 ||
         header.mappingWithSlideCount != header.mappingCount || header.mappingWithSlideOffset < sizeof(header) ||
         !slidableContains(0x4000, header.mappingWithSlideOffset, header.mappingWithSlideCount * sizeof(SlidableCacheMapping)))
         slidableCacheFailure("cache UUID/layout mismatch");
@@ -102,8 +107,8 @@ static void prepareSlidableMappings(int fd) {
     if (slidableRead(fd, sSlidableCache.mappings, bytes, header.mappingWithSlideOffset)) slidableCacheFailure("cache mapping table read");
     for (unsigned i = 0; i < sSlidableCache.count; ++i) {
         const SlidableCacheMapping &m = sSlidableCache.mappings[i];
-        if (!LSBSlidableCacheMappingMatchesProfile(&m, i)) slidableCacheFailure("cache mapping profile mismatch");
-        if (m.address < LSB_SLIDABLE_CACHE_PREFERRED_BASE || !slidableContains(LSB_SLIDABLE_CACHE_SPAN,
+        if (!LSBSlidableCacheMappingMatchesProfileKind(&m, i, sSlidableCache.profile)) slidableCacheFailure("cache mapping profile mismatch");
+        if (m.address < LSB_SLIDABLE_CACHE_PREFERRED_BASE || !slidableContains(sSlidableCache.backing.cacheSpan,
             m.address - LSB_SLIDABLE_CACHE_PREFERRED_BASE, m.size) || !m.size || (m.address & 0x3fff) || (m.size & 0x3fff) ||
             (m.fileOffset & 0x3fff)) slidableCacheFailure("cache mapping bounds");
         if (i && m.address < sSlidableCache.mappings[i - 1].address + sSlidableCache.mappings[i - 1].size)
@@ -187,11 +192,16 @@ static void *slidableCacheMmap(void *address, size_t size, int protection, int f
         slidableCheckVMRegion(static_cast<unsigned>(mappingIndex));
         sSlidableCache.seen |= 1u << mappingIndex;
         if (sSlidableCache.seen == (1u << sSlidableCache.count) - 1) {
+            if (sSlidableCache.profile == LSBSlidableCacheNativeSupport) {
+                const LSBNativeSupportMemory memory = {lsb::mmap, lsb::mprotect};
+                if (!LSBNativeSupportBindingsPrepared() || LSBApplyNativeSupportBindings(&memory))
+                    slidableCacheFailure("native support binding application");
+            }
             sSlidableCache.mapped = true;
             lsb::close(sSlidableCache.dataFD);
             sSlidableCache.dataFD = -1;
             if (sSlidableCache.trace) debuggerLog("[slidable-cache] shared data mapped: %llu pre-rebased pointers; no per-process rebase writes\n",
-                                                 uint64_t(LSB_SLIDABLE_CACHE_FIXUPS));
+                                                 uint64_t(sSlidableCache.backing.fixupCount));
         }
     }
     return result;

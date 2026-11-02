@@ -29,7 +29,9 @@ Do not substitute an iOS 26.x update or iOS 27 runtime because its marketing ver
 
 - `Host/` retains the native cache and owns UIKit, the broker, framebuffer presentation, and public IOSurface service.
 - `LiveProcess/main.c` remains pure C. Simulator guests prepare synchronously, release native XPC objects, and check thread count.
-  Production/unknown devices retain the native cache and redirect workqueue entry with a hardware breakpoint. Only a native
+  The validated native-support cache retains native cache/TSD and reuses its three support libraries without workqueue redirection;
+  see `docs/native-libsystem.md` for its pinned native ABI and setup. With the original cache profile, production/unknown devices
+  retain the native cache and redirect workqueue entry with a hardware breakpoint. Only a native
   non-production MobileGestalt result permits cache detachment; do not infer this from the OS version or Developer Mode.
   Detached code must not call removed host-cache implementations; retained native code must not run against incompatible guest TLS either.
 - Native Metal helpers use separate host-selected LiveProcess roles and keep native libraries. Guests cannot choose arbitrary native roles.

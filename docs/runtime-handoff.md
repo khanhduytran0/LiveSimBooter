@@ -5,6 +5,9 @@ receives its launch plan, locates `RuntimeRoot` in the App Group, maps `usr/lib/
 enters the simulator runtime. LiveProcess uses C for its native startup and releases native XPC objects before handoff.
 The original starter delegates, controller, and storyboards remain in `unused/`; the new host UI lives in `Host/`.
 
+The cache-retention and workqueue-bridge policy below applies to the original cache profile. The validated
+[native-support profile](native-libsystem.md) keeps native kernel/platform/pthread libraries and TLS, without workqueue redirection.
+
 The native host weak-links MobileGestalt and calls the guarded weak `MGCopyAnswer` import to cache `EffectiveProductionStatusAp`
 before launching guests. Haptic capability queries use the same native import. An absent symbol remains an unavailable answer.
 Only an exact Boolean false permits native-cache detachment; missing, malformed, or true results keep the native cache and hardware workqueue bridge.
@@ -105,6 +108,12 @@ This supports explicit pthread creation with the selected simulator libpthread's
 registration remains native. Retained-cache mode redirects workqueue entry using the hardware bridge linked above; detached
 development mode installs the direct entry trampoline below.
 The shim is loaded in the simulator after the native single-thread guard; it does not introduce a native worker during handoff.
+
+The [native libSystem support mode](native-libsystem.md) replaces the three Mac-derived support implementations with
+validated bindings to the retained native libraries, while preserving simulator wrappers and guest libc, malloc, dispatch and XPC.
+Installing its exact cache profile selects native pthread/TSD ownership and transfers initialization callbacks without a
+workqueue breakpoint or trampoline. The inspected native 24A435 ABI passed the threading probe and graphical boot on iPhone 17;
+the original cache profile continues to use the redirection paths described here.
 
 The host tests cover registration validation, state preservation, PC signing, requested suspension, failures, and cleanup,
 including ASan/UBSan runs. An LLDB experiment on the phone redirected a suspended Fish worker and reached another worker

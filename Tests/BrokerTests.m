@@ -726,6 +726,8 @@ static void resetBroker(void) {
     savedDeviceIdentifier = nil;
     devicePreferenceWrites = 0;
     LSBLaunchdConfigurationSetDeviceType(nil);
+    LSBLaunchdConfigurationSetNativeSupport(false);
+    sessionNativeSupport = NO;
     rebootPendingDeaths = nil;
     for (LSBRunningBoardMonitor *monitor in rebootDeathMonitors) LSBRunningBoardMonitorCancel(monitor);
     rebootDeathMonitors = nil;
@@ -4871,6 +4873,37 @@ static NSDictionary *rebootConfiguration(void) {
     return [NSDictionary dictionaryWithContentsOfFile:[data stringByAppendingPathComponent:@"var/run/LiveSimBooter-launchd-bootstrap.plist"]][@"Bootstrap"];
 }
 
+static void testCachePolicyPrecedesLaunchdConfiguration(void) {
+    resetBroker();
+    NSString *directory = makeRebootRuntime();
+    NSString *savedForce = getenv("LSB_NATIVE_SUPPORT") ? @(getenv("LSB_NATIVE_SUPPORT")) : nil;
+    unsetenv("LSB_NATIVE_SUPPORT");
+    const char *arguments[] = {"LiveSimBooter", "--launchd", NULL};
+    const char *environment[] = {"LSB_NATIVE_SUPPORT=1", NULL};
+    uint32_t role = LSB_EXECUTION_NATIVE_METAL_PROBE;
+    sessionNativeSupport = YES;
+    LSBLaunchdConfigurationSetNativeSupport(true);
+    LSBReceivedMessage *initial = calloc(1, sizeof(*initial));
+    assert(initial && !prepareInitialPlan(initial, 2, arguments, environment, &role));
+    assert(role == LSB_EXECUTION_SIMULATOR && !sessionNativeSupport);
+    NSDictionary *configuration = rebootConfiguration();
+    for (NSString *scope in @[@"Self", @"Child"]) assert([configuration[scope][@"LSB_NATIVE_SUPPORT"] isEqual:@"0"]);
+    disposeMessage(initial);
+    NSString *cacheDirectory = [runtimeRoot stringByAppendingPathComponent:@"System/Library/Caches/com.apple.dyld"];
+    assert([NSFileManager.defaultManager createDirectoryAtPath:cacheDirectory withIntermediateDirectories:YES attributes:nil error:NULL]);
+    assert([NSData.data writeToFile:[cacheDirectory stringByAppendingPathComponent:@"dyld_sim_shared_cache_arm64"] atomically:YES]);
+    initial = calloc(1, sizeof(*initial));
+    assert(initial && prepareInitialPlan(initial, 2, arguments, NULL, &role) == EINVAL);
+    // Reject a malformed cache before publishing a fresh bootstrap or acquiring plan descriptors.
+    assert([rebootConfiguration() isEqual:configuration]);
+    assert(!initial->plan.argc && !initial->plan.fdCount);
+    for (unsigned i = 0; i < LSB_MAX_FDS; ++i) assert(initial->fds[i] == -1);
+    disposeMessage(initial);
+    if (savedForce) setenv("LSB_NATIVE_SUPPORT", savedForce.UTF8String, 1);
+    resetBroker();
+    assert([NSFileManager.defaultManager removeItemAtPath:directory error:NULL]);
+}
+
 static void testRebootWaitsForOldGenerationAndRegeneratesConfiguration(void) {
     resetBroker();
     NSString *directory = makeRebootRuntime();
@@ -5688,6 +5721,7 @@ int main(void) {
         testAudioApplyUsesImmutableSessionDecision();
         testDeferredSettingsCombineAtRestart();
         testSavedSettingsValidationAndRestartPreflight();
+        testCachePolicyPrecedesLaunchdConfiguration();
         testPowerOffWaitsThenStartReusesBroker();
         testSessionControlFailureDoesNotBecomeOff();
         testSessionControlDuringChildLaunch();

@@ -980,7 +980,15 @@ int LSBPrepareHostMainThread(lsb::MainThreadBootstrap *bootstrap) {
 static const mach_header *initializedHeader = nullptr;
 static std::string initializedPath;
 const SimSyscallHelpers *LSBGetSimSyscallHelpers() { return &fakeHelpers; }
-int LSBPrepareSlidableCacheData(const char *, uint64_t actualBase, const uint8_t *, bool) { return actualBase ? ENOTSUP : 0; }
+int LSBPrepareSlidableCacheData(const char *, uint64_t actualBase, const uint8_t *, bool, LSBSlidableCacheProfileKind) { return actualBase ? ENOTSUP : 0; }
+int LSBPrepareNativeSupportState(uintptr_t, size_t, char *, size_t) { return ENOTSUP; }
+uintptr_t LSBOverrideNativeSupportSymbol(const char *, const char *, uintptr_t address) { return address; }
+int LSBPrepareNativeSupportBindings(const char *, uint64_t, LSBNativeSupportOverrideCallback, char *, size_t) { return ENOTSUP; }
+int LSBActivateNativeSupportState(void) { return ENOTSUP; }
+namespace lsb {
+uintptr_t currentTSDBase() { return 0x1000; }
+[[noreturn]] void exitProcess(int status) { _exit(status); }
+}
 const LSBSlidableDataHeader *LSBPreparedSlidableCacheData() { return nullptr; }
 bool LSBInitializeSimProcessInfo(const mach_header *header, const char *path) {
     initializedHeader = header; initializedPath = path; return true;

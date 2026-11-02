@@ -21,7 +21,7 @@
 #include <sys/fileport.h>
 #include <unistd.h>
 
-// Audited against the iOS 26 runtime's host support libkernel: action stride 0x410, attributes size 0x100.
+// Audited against the iOS 26 runtime's host support libkernel: file-action stride 0x410.
 // These in-process opaque layouts are translated to SpawnPlan; native pointers are never sent to another process.
 typedef struct {
     int32_t kind, fd;

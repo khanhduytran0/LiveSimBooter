@@ -38,6 +38,10 @@
 #include "SimSyscallHelpers.h"
 #include "SlidableDyldConfig.h"
 #include "LazySignatureClient.h"
+#include "NativeSupportBindings.h"
+#include "NativeSupportState.h"
+#include "LocalPOSIX.h"
+#include "LocalRuntime.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -64,6 +68,7 @@
 namespace {
 
 uint64_t configuredCacheBase;
+bool configuredNativeSupport;
 bool imageMappingStarted;
 
 struct FileMapping {
@@ -188,7 +193,8 @@ bool readCacheReservation(const char *path, CacheReservation &cache, std::string
     }
     if (!parseCacheReservation(header, info.st_size, cache, error)) return false;
     if (header.sharedRegionStart == LSB_SLIDABLE_CACHE_PREFERRED_BASE) {
-        if (!configuredCacheBase || header.sharedRegionSize != LSB_SLIDABLE_CACHE_SPAN || !LSBSlidableCacheUUIDIsNonzero(header.uuid))
+        const auto *layout = LSBSlidableCacheLayoutForProfile(configuredNativeSupport ? LSBSlidableCacheNativeSupport : LSBSlidableCacheOriginal);
+        if (!configuredCacheBase || header.sharedRegionSize != layout->span || !LSBSlidableCacheUUIDIsNonzero(header.uuid))
             return fail(error, "Slidable cache requires a matching host-selected base and prepared data backing");
         cache.address = configuredCacheBase;
     } else if (configuredCacheBase) return fail(error, "Host-selected cache base does not match this runtime cache");
@@ -858,6 +864,13 @@ int LSBConfigureRuntimeCacheBase(uint64_t actualBase) {
     return 0;
 }
 
+int LSBConfigureRuntimeNativeSupport(unsigned enabled) {
+    if (imageMappingStarted) return EBUSY;
+    if (enabled > 1 || (enabled && !configuredCacheBase)) return EINVAL;
+    configuredNativeSupport = enabled;
+    return 0;
+}
+
 bool LSBMapDyldSim(const char *path, LSBMappedImage *image, char *error, size_t errorSize) {
     return mapFile(path, image, error, errorSize, MH_DYLINKER);
 }
@@ -902,7 +915,8 @@ int LSBEnterDyldSim(const LSBMappedImage *image, const mach_header *executable, 
         fprintf(stderr, "Cannot prepare simulator cache reservation: %s\n", stackError.c_str());
         return 1;
     }
-    int backingError = LSBPrepareSlidableCacheData(rootPath, configuredCacheBase, cache.uuid, traceHandoff);
+    int backingError = LSBPrepareSlidableCacheData(rootPath, configuredCacheBase, cache.uuid, traceHandoff,
+                                                 configuredNativeSupport ? LSBSlidableCacheNativeSupport : LSBSlidableCacheOriginal);
     if (backingError) {
         fprintf(stderr, "Cannot prepare simulator shared data backing: %s\n", strerror(backingError));
         return 1;
@@ -969,7 +983,16 @@ int LSBEnterDyldSim(const LSBMappedImage *image, const mach_header *executable, 
     // Capture the real AMFI result and materialize arguments before the cache disappears.
     LSBPrepareHostPolicy();
     lsb::MainThreadBootstrap thread = {};
-    int threadError = LSBPrepareHostMainThread(&thread);
+    int threadError = 0;
+    if (configuredNativeSupport) {
+        char detail[512] = {};
+        std::string cachePath = std::string(rootPath) + "/System/Library/Caches/com.apple.dyld/dyld_sim_shared_cache_arm64";
+        threadError = LSBPrepareNativeSupportState(stackTop, stackSize, detail, sizeof(detail));
+        if (!threadError)
+            threadError = LSBPrepareNativeSupportBindings(cachePath.c_str(), configuredCacheBase, LSBOverrideNativeSupportSymbol, detail, sizeof(detail));
+        if (threadError) fprintf(stderr, "Native support preparation failed: %s\n", detail);
+        thread.hostTSD = thread.simulatorTSD = lsb::currentTSDBase();
+    } else threadError = LSBPrepareHostMainThread(&thread);
     if (threadError) {
         fprintf(stderr, "Cannot prepare simulator main thread: %s\n", strerror(threadError));
         return 1;
@@ -984,7 +1007,8 @@ int LSBEnterDyldSim(const LSBMappedImage *image, const mach_header *executable, 
         // The kernel-registered native metadata pages can survive at their old address when publication is unavailable.
         bool valid = result == KERN_SUCCESS && count >= TASK_DYLD_INFO_COUNT && pageSize && !(pageSize & (pageSize - 1)) &&
                      !(cache.address & (pageSize - 1)) && !(cache.size & (pageSize - 1)) && helpers && helpers->getProcessInfo;
-        if (!valid || !storageInResidentImage(reinterpret_cast<const void *>(thread.simulatorTSD), resident.dli_fbase, stackError) ||
+        if (!valid || (!configuredNativeSupport &&
+            !storageInResidentImage(reinterpret_cast<const void *>(thread.simulatorTSD), resident.dli_fbase, stackError)) ||
             !storageInResidentImage(helpers, resident.dli_fbase, stackError) ||
             !storageInResidentImage(helpers->getProcessInfo(), resident.dli_fbase, stackError) ||
             !debuggerMetadataOutsideCache(nativeInfo, pageSize, cache, stackError)) {
@@ -1015,7 +1039,11 @@ int LSBEnterDyldSim(const LSBMappedImage *image, const mach_header *executable, 
         fprintf(stderr, "Cannot release native stack exclusion: %s\n", stackError.c_str());
         return 1;
     }
+    // Native pthread owns this TSD and its registered entry points. After clearing inherited users of native TLS,
+    // no failure path may return to native allocator or C++ cleanup; all following work uses app-local helpers.
+    if (configuredNativeSupport && LSBActivateNativeSupportState()) lsb::exitProcess(126);
     int detachError = LSBDetachHostCacheAndEnter(&launch);
+    if (configuredNativeSupport) lsb::exitProcess(126);
     // The handoff returns only when detachment failed and host libraries are still mapped.
     fprintf(stderr, "Host shared-cache detach failed: %s\n", strerror(detachError));
     return 1;

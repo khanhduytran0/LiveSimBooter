@@ -1089,7 +1089,7 @@ The tracked implementation now extends the fixed-`0x7000000000` prototype above.
 the native broker inspects the supported slidable cache, obtains a 3 GiB RX `mach_vm_map` ANYWHERE reservation using
 `0x180000000` as the hint, and releases it without touching pages. The returned address is the session's common cache base;
 it is not hardcoded by phone model. A previously selected base can be reused for the same cache UUID across a userspace reboot.
-The authenticated bootstrap carries this value to guests (transport ABI 9, bootstrap ABI 6); native helper roles receive zero.
+The authenticated bootstrap carries this value to guests (transport ABI 9, bootstrap ABI 7); native helper roles receive zero.
 Rebuild the host, extension and guest transport consumers together.
 
 The host decodes the exact v2 chains once into an immutable `lsb-slide-<cache UUID>-<base>.data` file beside the cache.

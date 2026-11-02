@@ -144,7 +144,7 @@ terminal-state file alongside RuntimeRoot. Device-platform executables/dylibs ad
 
 ## Native startup pipes and guest connections
 
-Transport **ABI 9**, bootstrap **ABI 6** separates native startup from guest RPC. Both ends retain the same owned spawn plans,
+Transport **ABI 9**, bootstrap **ABI 7** separates native startup from guest RPC. Both ends retain the same owned spawn plans,
 descriptor transfer and full audit-token authorization. The guest endpoint is supplied only by authenticated native check-in;
 native Metal roles cannot receive or select it. Failed preparation releases both endpoints. The native pipe right is released
 after READY; only the guest endpoint's send reference survives a successful handoff.

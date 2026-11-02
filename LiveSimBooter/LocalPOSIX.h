@@ -17,6 +17,7 @@ ssize_t pread(int fd, void *buffer, size_t size, off_t offset);
 ssize_t write(int fd, const void *buffer, size_t size);
 void *mmap(void *address, size_t size, int protection, int flags, int fd, off_t offset);
 int munmap(void *address, size_t size);
+int mprotect(void *address, size_t size, int protection);
 int madvise(void *address, size_t size, int advice);
 int stat(const char *path, struct stat *result);
 int fstat(int fd, struct stat *result);

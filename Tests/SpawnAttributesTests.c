@@ -1,4 +1,5 @@
 #include "../Guest/SpawnAttributes.h"
+#include "../Guest/SpawnAttributeLayout.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -7,6 +8,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 typedef struct { int32_t kind; uint32_t mask; mach_port_t port; int32_t behavior, flavor, which; } TestPortAction;
 typedef struct { int32_t allocated, count; TestPortAction actions[133]; } TestPortActions;
@@ -242,7 +245,82 @@ static void testImportanceWatchHints(void) {
     assert(!mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1));
 }
 
+// Setter offsets independently recorded from extracted native libraries; padding is deliberately nonzero.
+static void testNativeLayoutProfiles(void) {
+    static const struct { LSBSpawnAttributeLayout layout; size_t size, crash, tecs, ports; } profiles[] = {
+        {LSBSpawnAttributeLayout23B50, 0xf8, 0xac, 0x69, 0xc0},
+        {LSBSpawnAttributeLayout23H128, 0xf8, 0xac, 0x6a, 0xc0},
+        {LSBSpawnAttributeLayoutModern, 0x100, 0xb4, 0x6a, 0xc8},
+    };
+    for (size_t i = 0; i < sizeof(profiles) / sizeof(profiles[0]); ++i) {
+        unsigned char before[0xf8], after[0xf8];
+        memset(before, 0xa5, sizeof(before));
+        memset(before + profiles[i].ports, 0, 8);
+        memset(before + profiles[i].crash, 0, 8);
+        before[profiles[i].tecs] = 0;
+        memcpy(after, before, sizeof(after));
+        const uint32_t crash[] = {0x13579bdf, 0x2468ace0};
+        const uintptr_t ports = 0x123456780;
+        memcpy(after + profiles[i].ports, &ports, sizeof(ports));
+        memcpy(after + profiles[i].crash, crash, sizeof(crash));
+        after[profiles[i].tecs] = 1;
+        assert(LSBSpawnAttributeProbeLayout(before, after, profiles[i].size) == profiles[i].layout);
+        assert(LSBSpawnAttributeProbeLayout(before, after, profiles[i].size - 1) == LSBSpawnAttributeLayoutUnknown);
+        // The allocator may round the old 248-byte request to 256; it must not select the modern layout.
+        assert(LSBSpawnAttributeProbeLayout(before, after, 0x100) == profiles[i].layout);
+        after[0x30] ^= 1;
+        assert(LSBSpawnAttributeProbeLayout(before, after, profiles[i].size) == LSBSpawnAttributeLayoutUnknown);
+        after[0x30] ^= 1;
+        after[profiles[i].tecs] = 0;
+        assert(LSBSpawnAttributeProbeLayout(before, after, profiles[i].size) == LSBSpawnAttributeLayoutUnknown);
+        after[profiles[i].tecs] = 1;
+        after[profiles[i].crash] ^= 1;
+        assert(LSBSpawnAttributeProbeLayout(before, after, profiles[i].size) == LSBSpawnAttributeLayoutUnknown);
+        after[profiles[i].crash] ^= 1;
+        memset(after + profiles[i].ports, 0, 8);
+        assert(LSBSpawnAttributeProbeLayout(before, after, profiles[i].size) == LSBSpawnAttributeLayoutUnknown);
+    }
+    assert(LSBSpawnAttributeProbeLayout(NULL, NULL, 0) == LSBSpawnAttributeLayoutUnknown);
+    assert(LSBSpawnAttributePortActionsOffset(LSBSpawnAttributeLayoutModern) == 0xc8);
+    assert(LSBSpawnAttributePortActionsOffset(LSBSpawnAttributeLayout23B50) == 0xc0);
+    assert(LSBSpawnAttributePortActionsOffset(LSBSpawnAttributeLayout23H128) == 0xc0);
+
+    size_t page = (size_t)getpagesize();
+    unsigned char *mapping = mmap(NULL, 4 * page, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    assert(mapping != MAP_FAILED);
+    assert(!mprotect(mapping + page, page, PROT_NONE) && !mprotect(mapping + 3 * page, page, PROT_NONE));
+    unsigned char *attributes = mapping + page - 0xf8, *defaults = mapping + 3 * page - 0xf8;
+    memset(attributes, 0x5a, 0xf8);
+    memset(defaults, 0x5a, 0xf8);
+    // Guard pages prove there is no comparison of the rounded allocator tail at 0xf8..0xff.
+    size_t difference = SIZE_MAX;
+    assert(!LSBSpawnAttributeFindDifference(LSBSpawnAttributeLayout23B50, attributes, defaults, &difference));
+    static const uint16_t padding[][2] = {{0x6a, 0x6c}, {0x9c, 0xa0}, {0xa9, 0xaa}};
+    for (size_t i = 0; i < sizeof(padding) / sizeof(padding[0]); ++i)
+        memset(attributes + padding[i][0], 0xa5, padding[i][1] - padding[i][0]);
+    memset(attributes + 0xc0, 0, 8); // Borrowed port actions are decoded separately, not rejected as an unknown field.
+    assert(!LSBSpawnAttributeFindDifference(LSBSpawnAttributeLayout23B50, attributes, defaults, &difference));
+    static const uint16_t unsupported[][2] = {
+        {32, 36}, {40, 88}, {92, 106}, {108, 112}, {132, 152}, {160, 169}, {170, 192}, {200, 248}
+    };
+    for (size_t range = 0; range < sizeof(unsupported) / sizeof(unsupported[0]); ++range) {
+        for (size_t at = unsupported[range][0]; at < unsupported[range][1]; ++at) {
+            attributes[at] ^= 1;
+            assert(LSBSpawnAttributeFindDifference(LSBSpawnAttributeLayout23B50, attributes, defaults, &difference) == 1);
+            assert(difference == at);
+            attributes[at] ^= 1;
+        }
+    }
+    // 23H128 still has the old extent/port layout, but byte 0x6a is now a real initialized control field.
+    assert(LSBSpawnAttributeFindDifference(LSBSpawnAttributeLayout23H128, attributes, defaults, &difference) == 1 && difference == 0x6a);
+    attributes[0x6a] = defaults[0x6a];
+    assert(!LSBSpawnAttributeFindDifference(LSBSpawnAttributeLayout23H128, attributes, defaults, &difference));
+    assert(LSBSpawnAttributeFindDifference(LSBSpawnAttributeLayoutUnknown, attributes, defaults, &difference) == -1);
+    assert(!munmap(mapping, 4 * page));
+}
+
 int main(void) {
+    testNativeLayoutProfiles();
     testPolicyAndArchitecture();
     testUnsupportedFields();
     testLocalFilePolicy();

@@ -9,10 +9,15 @@ root `SimulatorData` or place roots directly inside a group or Documents; those 
 These notes record experiments since 2026-10-25. The tested 23A343 guest reaches SpringBoard with app icons and opens
 Contacts on iPhone18,2 / iOS 27.0 build 24A435. Touches, the simulator keyboard, the launchd-owned Fish terminal, native Metal
 presentation, the performance HUD, and live touch-marker settings have device evidence. The host keeps persistent IOSurface,
-Fish and Settings tabs. The default retains the native cache with hardware workqueue redirection when the guest reservation
-fits below the loaded native cache. Automatic detachment requires exact Boolean false for `EffectiveProductionStatusAp` plus
-a confirmed native-header collision; unavailable layout information keeps retention. Production/unknown status never permits
-detachment. Developer Mode alone does not select it. See [handoff policy](runtime-handoff.md).
+Fish and Settings tabs. The validated native-support cache reuses the phone's kernel/platform/pthread libraries without
+workqueue redirection. Native 24A435 passed the thread probe, graphical boot, Contacts search and Fish. Native 23B50 on
+iPhone16,2 also passed the thread probe, launchd-managed `df`, Home Screen/widgets and Contacts keyboard checks after the
+older native spawn-attribute layout was decoded. The final build also started Fish on cold boots and after userspace reboot;
+the user confirmed `df` and terminal input. An initial terminal `ENOTTY` was not reproduced. Native 23H128 has offline decoder checks only.
+See [native-library device results](native-libsystem.md#iphone-15-result-and-remaining-validation).
+The original cache profile retains its hardware-breakpoint or development trampoline behavior. Automatic detachment requires exact Boolean
+false for `EffectiveProductionStatusAp` plus a confirmed native-header collision; unavailable layout information keeps retention.
+Production/unknown status never permits detachment. Developer Mode alone does not select it. See [handoff policy](runtime-handoff.md).
 
 The user verified **Home Screen → Edit → Edit Wallpaper** and color/gradient wallpaper rendering. The ordinary lock screen also
 renders now; the lock-screen long-press picker and Customize editor work with the scoped scene-presentation helper on iPhone 15 and iPhone 17.
@@ -29,6 +34,7 @@ Historical sections below describe earlier cache layouts and failures; use the s
 - [Lazy sign](lazy-signing.md): optional isolated Security signer, P12 import, registration retries and preserved originals.
 - [Guest app installation](app-installation.md): native IPA import through guest InstallCoordination/installd, data containers, and live icon notifications.
 - [Runtime handoff](runtime-handoff.md): startup, local callbacks, thread storage, cache detachment, and debugger metadata.
+- [Native libSystem reuse](native-libsystem.md): retained-cache pthread ownership, older extracted library imports, and workqueue bridge requirements.
 - [Multiprocess](multiprocess.md): App Group migration, native extension launches, synchronous XPC, FD replay, and current validation limits.
 - [Process inspection](process-inspection.md): authenticated guest process lists, original entitlement metadata, CocoaTop staging, and device-tested limits.
 - [Native process names](process-names.md): readable `ps` names with logical PIDs and preservation of the kernel's native argument stack.

@@ -192,8 +192,8 @@ def plan_aliases(data, layout):
                          mappings_and_image_count_unchanged=True, aliases=aliases)
 
 
-def patch_cache(source, output=None, manifest=None):
-    return compatibility.patch_cache(source, output, manifest, planner=plan_aliases)
+def patch_cache(source, output=None, manifest=None, *, native_support=False):
+    return compatibility.patch_cache(source, output, manifest, planner=plan_aliases, native_support=native_support)
 
 
 def main():
@@ -203,9 +203,10 @@ def main():
     action.add_argument('--output', type=Path)
     action.add_argument('--check-only', action='store_true')
     parser.add_argument('--manifest', type=Path)
+    parser.add_argument('--native-support', action='store_true', help='Require the experimental placeholder cache with export reserves')
     args = parser.parse_args()
     require(not args.check_only or not args.manifest, '--manifest requires --output')
-    print(json.dumps(patch_cache(args.source, args.output, args.manifest), indent=2))
+    print(json.dumps(patch_cache(args.source, args.output, args.manifest, native_support=args.native_support), indent=2))
 
 
 if __name__ == '__main__':

@@ -114,7 +114,7 @@ background audio. AudioQueue, AVAudioEngine and AVAudioPlayer tone probes have p
 
 The optional audio-output and haptic dylibs are separate from the always-loaded C spawn shim. Stage them before enabling either
 feature in the native host; a missing enabled helper prevents guest startup. These settings are broker-owned session decisions,
-not guest environment overrides. The current transport is **ABI 9** (bootstrap ABI 6, child ledger ABI 5): rebuild and deploy the native host,
+not guest environment overrides. The current transport is **ABI 9** (bootstrap ABI 7, child ledger ABI 5): rebuild and deploy the native host,
 LiveProcess extension, core spawn shim and optional helpers together. Do not mix an older installed host with the new overlay.
 Native check-in and readiness retain the single-threaded pipe path. The authenticated check-in additionally supplies a guest-only
 connection endpoint; the simulator creates its sim-to-host XPC connection after libSystem/TLS initialization. Native Metal helpers
@@ -523,6 +523,18 @@ both expanded App Groups, device authorization, development debugging permission
 Do not re-sign the extension with the app's identifier. Native backend libraries receive no application entitlements.
 The backend packaging step is required for graphics and is not an automatic Xcode build phase.
 See [NativeMetal/README.md](../NativeMetal/README.md) for the host/guest library distinction.
+
+An alternative [native support cache](native-libsystem.md#native-support-bridge-and-device-probe) reuses only native
+libsystem_kernel/platform/pthread. Installing its validated profile selects the bridge automatically, preserving the native
+cache and TSD without the workqueue breakpoint. With the pinned 23A343 guest, native iOS 26.1/23B50 and 27.0/24A435 have
+thread-probe, launchd-managed `df`, SpringBoard and Contacts input evidence. Native 26.7.2/23H128 has offline decoder checks
+only. Native initializer and private spawn-attribute layouts are validated against reviewed instruction sequences;
+the physical OS version alone does not establish compatibility. Rebuild the host, extension and guest shim together:
+the host must select the mode before writing launchd's Self/Child configurations, and the shim must decode the bound native
+spawn initializer rather than assume the original Mac layout. No guest environment override is needed to select this mode.
+On 23B50, the final build passed Fish cold-start and userspace-reboot checks, with user-confirmed `df` and terminal input.
+An initial helper `ENOTTY` was not reproduced. Verify Fish separately rather than treating Home Screen as a complete setup
+pass. The original cache setup and redirection behavior below remain supported.
 
 Keep the experimental native stack-exclusion segment disabled for the baseline package. On the destination iPhone 17, that
 wide variant still failed the simulator-cache reservation with `mmap` returning `EACCES`, even after releasing the reservation.

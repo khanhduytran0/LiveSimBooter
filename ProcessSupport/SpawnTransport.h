@@ -15,7 +15,7 @@
 #define LSB_TRANSPORT_VERSION 9
 
 // Bootstrap-only metadata is versioned independently from the outer transport envelope.
-#define LSB_BOOTSTRAP_VERSION 6
+#define LSB_BOOTSTRAP_VERSION 7
 enum LSBExecutionRole {
     LSB_EXECUTION_SIMULATOR = 0, LSB_EXECUTION_NATIVE_METAL_PROBE = 1, LSB_EXECUTION_NATIVE_METAL_SERVICE = 2, LSB_EXECUTION_NATIVE_SIGNER = 3
 };
@@ -32,6 +32,7 @@ typedef struct {
     uint32_t executionRole;
     uint64_t simulatorCacheBase; // Session-selected by the native host; zero for ordinary caches and native helper roles.
     uint32_t nativeProductionStatus; // Authenticated native host classification, never supplied through a guest spawn plan.
+    uint32_t nativeSupport; // Experimental retained native kernel/platform/pthread ownership; authenticated host choice, 0 or 1.
     int32_t error, pid, guestPID, parentPID;
     int statusFD, wakeFD;
     mach_port_t launchdTankPort;
@@ -54,6 +55,7 @@ typedef struct {
     uint32_t executionRole; // Chosen by the native broker, never supplied by a guest spawn plan.
     uint64_t simulatorCacheBase; // Session-selected by the native host; zero for ordinary caches and native helper roles.
     uint32_t nativeProductionStatus;
+    uint32_t nativeSupport;
     LSBTaskPortCaptureOffer taskCapture; // Borrowed endpoint and nonce supplied only by the native broker.
 } LSBBootstrapMetadata;
 

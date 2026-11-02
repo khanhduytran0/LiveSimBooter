@@ -177,6 +177,7 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     if (launch.executionRole == LSB_EXECUTION_NATIVE_METAL_SERVICE) return runNativeMetalService(error, planApplied);
     if (launch.executionRole == LSB_EXECUTION_NATIVE_SIGNER) return runNativeSigner(error);
     if (!error) error = LSBConfigureRuntimeCacheBase(launch.simulatorCacheBase);
+    if (!error) error = LSBConfigureRuntimeNativeSupport(launch.nativeSupport);
     if (!error) LSBConfigureLazySignature(launch.lazySigningPort, &launch.brokerAudit);
     // The native host receives a kernel-created movable task right through this one-shot thread exception.
     // Restore the thread's prior handlers before simulator TLS/workqueue initialization; never send mach_task_self() over XPC.
@@ -188,8 +189,9 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     policyEnvironment[launch.plan.envc] = NULL;
     LSBNativeRuntimePolicy nativePolicy = {0};
     // Repeat the native preflight in this child; host configuration is not evidence about this process's actual cache address.
-    if (!error) error = LSBResolveNativeRuntimePolicy(launch.nativeProductionStatus, LSBReadNativeCacheLayout(launch.runtimeRoot),
-                                                     policyEnvironment, &nativePolicy);
+    if (!error && launch.nativeSupport) nativePolicy = (LSBNativeRuntimePolicy){.retainHostCache = true, .hardwareWorkqueue = false};
+    else if (!error) error = LSBResolveNativeRuntimePolicy(launch.nativeProductionStatus, LSBReadNativeCacheLayout(launch.runtimeRoot),
+                                                          policyEnvironment, &nativePolicy);
     char executablePath[PATH_MAX], dyldPath[PATH_MAX], insertLibrary[LSB_INSERT_LIBRARIES_BYTES], brokerEnvironment[64], detail[1024] = {0};
     char capabilitiesEnvironment[PATH_MAX + sizeof("SIMULATOR_CAPABILITIES=")];
     char statusEnvironment[64], wakeEnvironment[64];
@@ -225,7 +227,7 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     snprintf(wakeEnvironment, sizeof(wakeEnvironment), LSB_CHILD_WAKE_FD_ENV "=%d", launch.wakeFD);
     snprintf(guestPIDEnvironment, sizeof(guestPIDEnvironment), "LSB_GUEST_PID=%d", launch.guestPID);
     snprintf(parentPIDEnvironment, sizeof(parentPIDEnvironment), "LSB_GUEST_PPID=%d", launch.parentPID);
-    const char *arguments[LSB_MAX_VECTOR + 1], *environment[LSB_MAX_VECTOR + 17];
+    const char *arguments[LSB_MAX_VECTOR + 1], *environment[LSB_MAX_VECTOR + 18];
     LSBApplicationEnvironment applicationEnvironment = {0};
     unsigned count = 0;
     int stopBeforeHandoff = 0;
@@ -234,6 +236,9 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
         arguments[launch.plan.argc] = NULL;
         for (unsigned i = 0; i < launch.plan.envc; ++i) {
             const char *entry = launch.plan.strings + launch.plan.envp[i];
+            if (launch.nativeSupport &&
+                (!strncmp(entry, LSB_RETAIN_HOST_CACHE_ENV "=", sizeof(LSB_RETAIN_HOST_CACHE_ENV)) ||
+                 !strncmp(entry, LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV "=", sizeof(LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV)))) continue;
             const size_t debugPrefixLength = sizeof("LSB_DEBUG_STOP_BEFORE_HANDOFF=") - 1;
             if (!strncmp(entry, "LSB_DEBUG_STOP_BEFORE_HANDOFF=", debugPrefixLength)) {
                 stopBeforeHandoff = !strcmp(entry + debugPrefixLength, "1");
@@ -248,6 +253,7 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
                 strncmp(entry, "LSB_GUEST_PPID=", sizeof("LSB_GUEST_PPID=") - 1) &&
                 strncmp(entry, "LSB_HOST_WORKQUEUE_START=", sizeof("LSB_HOST_WORKQUEUE_START=") - 1) &&
                 strncmp(entry, "LSB_HOST_WORKQUEUE_FEATURES=", sizeof("LSB_HOST_WORKQUEUE_FEATURES=") - 1) &&
+                strncmp(entry, "LSB_NATIVE_SUPPORT=", sizeof("LSB_NATIVE_SUPPORT=") - 1) &&
                 strncmp(entry, LSB_CHILD_STATUS_ENV "=", sizeof(LSB_CHILD_STATUS_ENV)) &&
                 strncmp(entry, LSB_CHILD_WAKE_FD_ENV "=", sizeof(LSB_CHILD_WAKE_FD_ENV))) environment[count++] = entry;
         }
@@ -268,6 +274,7 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
         environment[count++] = workqueueFeaturesEnvironment;
         environment[count++] = guestPIDEnvironment;
         environment[count++] = parentPIDEnvironment;
+        if (launch.nativeSupport) environment[count++] = "LSB_NATIVE_SUPPORT=1";
         environment[count] = NULL;
         // Direct probes and children with a replacement environment also need the native policy before simulator initialization.
         error = LSBAppendNativeRuntimePolicy(environment, &count, sizeof(environment) / sizeof(*environment), nativePolicy);

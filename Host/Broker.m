@@ -147,6 +147,7 @@ static dispatch_source_t adoptionRetrySource;
 static LSBJob *startingJob;
 static NSString *runtimeRoot;
 static uint64_t sessionCacheBase;
+static BOOL sessionNativeSupport;
 static uint8_t sessionCacheUUID[16];
 static uint64_t nextIdentifier = 1;
 static BOOL launchLaneFailed;
@@ -2135,6 +2136,7 @@ static void handleMessage(LSBReceivedMessage *message) {
                 .launchdTankPort = job.simulatorLaunchd ? LSBLaunchdHandshakeTankPort(job.launchdHandshake) : MACH_PORT_NULL,
                 .ports = &job.request->ports, .executionRole = job.executionRole, .taskCapture = job.taskCapture,
                 .simulatorCacheBase = job.executionRole == LSB_EXECUTION_SIMULATOR ? sessionCacheBase : 0,
+                .nativeSupport = job.executionRole == LSB_EXECUTION_SIMULATOR && sessionNativeSupport,
                 .nativeProductionStatus = job.executionRole == LSB_EXECUTION_SIMULATOR ? LSBHostNativeProductionStatus() : LSB_NATIVE_PRODUCTION_UNKNOWN };
             error = LSBTransportReplyBootstrapWithMetadata(message, 0, pid, identifier, runtimeRoot.fileSystemRepresentation,
                 &job.request->plan, job.request->fds, job.statusFD, job.wakeReadFD, &metadata);
@@ -2454,24 +2456,32 @@ static int prepareLazySigningSession(void) {
 
 // Called on the native main queue only, before any job in a new session. Reboots reach here after all old guests have exited.
 static int prepareRuntimeCache(void) {
+    const char *nativeSupport = getenv("LSB_NATIVE_SUPPORT");
+    BOOL requireNativeSupport = nativeSupport && !strcmp(nativeSupport, "1");
+    sessionNativeSupport = NO;
+    LSBSlidableCacheProfileKind profile = requireNativeSupport ? LSBSlidableCacheNativeSupport : LSBSlidableCacheOriginal;
     NSString *directory = [runtimeRoot stringByAppendingPathComponent:@"System/Library/Caches/com.apple.dyld"];
     int directoryFD = open(directory.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (directoryFD < 0) {
         if (errno != ENOENT) return errno;
         sessionCacheBase = 0;
-        return 0; // Loose-library runtimes do not have a cache.
+        return requireNativeSupport ? ENOENT : 0;
     }
     int cacheFD = openat(directoryFD, "dyld_sim_shared_cache_arm64", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     int error = cacheFD < 0 && errno != ENOENT ? errno : 0;
     LSBSlidableCacheInfo info;
-    int supported = cacheFD < 0 ? 0 : LSBInspectSlidableCache(cacheFD, &info);
+    int supported = cacheFD < 0 ? 0 : requireNativeSupport ? LSBInspectSlidableCacheWithProfile(cacheFD, &info, profile) :
+                    LSBInspectSlidableCacheProfile(cacheFD, &info, &profile);
     if (supported < 0) error = errno;
     if (!error && !supported) sessionCacheBase = 0;
+    if (!error && !supported && requireNativeSupport) error = ENOTSUP;
     if (!error && supported > 0) {
+        // Installing this exact placeholder cache opts the runtime into native support. Guests still cannot select the mode.
+        sessionNativeSupport = profile == LSBSlidableCacheNativeSupport;
         uint64_t base = !memcmp(sessionCacheUUID, info.uuid, sizeof(sessionCacheUUID)) ? sessionCacheBase : 0;
-        if (!base) error = LSBSelectSlidableCacheBase(&info, &base);
+        if (!base) error = LSBSelectSlidableCacheBaseWithProfile(&info, &base, profile);
         LSBSlidableCachePreparation prepared;
-        if (!error) error = LSBPrepareSlidableCache(cacheFD, directoryFD, base, &prepared);
+        if (!error) error = LSBPrepareSlidableCacheWithProfile(cacheFD, directoryFD, base, &prepared, profile);
         if (!error) {
             sessionCacheBase = base;
             memcpy(sessionCacheUUID, info.uuid, sizeof(sessionCacheUUID));
@@ -2483,9 +2493,18 @@ static int prepareRuntimeCache(void) {
     return error;
 }
 
+static int prepareInitialPlan(LSBReceivedMessage *initial, int argc, const char *argv[], const char *envp[], uint32_t *executionRole) {
+    if (!initial || !executionRole) return EINVAL;
+    for (unsigned i = 0; i < LSB_MAX_FDS; ++i) initial->fds[i] = -1;
+    int error = initialExecutionRole(argc, argv, executionRole);
+    if (!error && *executionRole == LSB_EXECUTION_SIMULATOR) error = prepareRuntimeCache();
+    if (error) return error;
+    // Cache selection precedes launchd's Self/Child environment serialization, on cold starts and userspace reboots alike.
+    LSBLaunchdConfigurationSetNativeSupport(*executionRole == LSB_EXECUTION_SIMULATOR && sessionNativeSupport);
+    return initialPlan(initial, argc, argv, envp);
+}
+
 static int enqueueInitialJob(LSBReceivedMessage *initial, uint32_t executionRole) {
-    int cacheError = executionRole == LSB_EXECUTION_SIMULATOR ? prepareRuntimeCache() : 0;
-    if (cacheError) { disposeMessage(initial); return cacheError; }
     int signingError = prepareLazySigningSession();
     if (signingError) { disposeMessage(initial); return signingError; }
     if (!enableIndigo) { enqueueJob(initial, nil, executionRole); return 0; }
@@ -2614,8 +2633,7 @@ static void completeUserspaceReboot(uint64_t generation) {
     int error = initial ? 0 : ENOMEM;
     uint32_t role = LSB_EXECUTION_SIMULATOR;
     enableIndigo = enableSpringBoardMetal = NO;
-    if (!error) error = initialExecutionRole((int)rebootArguments.count, arguments, &role);
-    if (!error) error = initialPlan(initial, (int)rebootArguments.count, arguments, environment);
+    if (!error) error = prepareInitialPlan(initial, (int)rebootArguments.count, arguments, environment, &role);
     if (error) {
         if (initial) disposeMessage(initial);
         rebootDrainFailed = YES;
@@ -2740,8 +2758,7 @@ int LSBStartHost(int argc, const char *argv[], const char *envp[]) {
         LSBReceivedMessage *initial = calloc(1, sizeof(*initial));
         if (!initial) return failSessionStart(ENOMEM);
         uint32_t executionRole = LSB_EXECUTION_SIMULATOR;
-        error = initialPlan(initial, argc, argv, envp);
-        if (!error) error = initialExecutionRole(argc, argv, &executionRole);
+        error = prepareInitialPlan(initial, argc, argv, envp, &executionRole);
         if (error) { disposeMessage(initial); fprintf(stderr, "[broker] Invalid initial plan: %s\n", strerror(error)); return failSessionStart(error); }
         if (!jobs) {
             // Registration and its receiver live for the native host lifetime, including powered-off intervals.

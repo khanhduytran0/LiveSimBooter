@@ -80,6 +80,13 @@ void testForwardingAndErrors()
     response = {0x100000000, 0};
     assert(lsb::mmap(nullptr, 16384, PROT_READ, MAP_PRIVATE, 17, 0x100000000) == reinterpret_cast<void *>(0x100000000));
 
+    expectedNumber = SYS_mprotect;
+    expected = {0x100000000, 16384, PROT_READ};
+    response = {0, 0};
+    assert(lsb::mprotect(reinterpret_cast<void *>(0x100000000), 16384, PROT_READ) == 0);
+    response = {EACCES, EACCES};
+    assert(lsb::mprotect(reinterpret_cast<void *>(0x100000000), 16384, PROT_READ) == -1 && localError == EACCES);
+
     expectedNumber = SYS_fcntl;
     expected = {17, F_GETFD};
     response = {0, 0};
@@ -101,7 +108,7 @@ void testForwardingAndErrors()
     assert(lsb::ioctl(17, FIOCLEX) == 0);
     expected = {17, FIONREAD, ptr(buffer)};
     assert(lsb::ioctl(17, FIONREAD, buffer) == 0);
-    assert(calls == 14);
+    assert(calls == 16);
 
     struct stat info;
     expectedNumber = SYS_stat64;

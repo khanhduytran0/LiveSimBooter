@@ -10,6 +10,7 @@ result. The source is immutable. Sign the output separately with sign-dyld-cache
 """
 
 import argparse
+import collections
 import ctypes
 import errno
 import hashlib
@@ -45,6 +46,44 @@ MASK_SYMBOL = '_objc_debug_isa_class_mask'
 OLD_MASK, NEW_MASK = 0x0000000FFFFFFFF8, 0x007FFFFFFFFFFFF8
 MASK_OFFSET = 0x61BB8
 CHUNK = 4 * 1024 * 1024
+
+# The opt-in native-support profile includes 96 KiB of read-only export-trie reserves,
+# added by prepare-native-support-exports.py before compatibility/alias patching.
+NATIVE_SUPPORT_SPAN = 0x7E14C000
+NATIVE_SUPPORT_FIXUPS = 15154973
+NATIVE_SUPPORT_MAPPINGS = (
+    (0x00000000, 0x5C544000, 0x00000000, 0, 0, 0, 5, 5),
+    (0x5C544000, 0x09A80000, 0x5C544000, 0x6E48CD68, 79144, 4, 3, 1),
+    (0x67FC4000, 0x00004000, 0x65FC4000, 0x6E484000, 48, 0x44, 3, 1),
+    (0x67FC8000, 0x04688000, 0x65FC8000, 0x6E484030, 36152, 0, 3, 3),
+    (0x6E650000, 0x03E34000, 0x6A650000, 0, 0, 0x20, 1, 1),
+    (0x72484000, 0x0BCC4000, 0x6E484000, 0, 0, 0, 1, 1),
+)
+
+
+def inspect_layout(data, native_support=False):
+    if native_support:
+        return slide.inspect_slide_layout(data, expected_mappings=NATIVE_SUPPORT_MAPPINGS, expected_span=NATIVE_SUPPORT_SPAN)
+    return slide.inspect_slide_layout(data)
+
+
+def check_cache(source, inventory, native_support=False):
+    if not native_support:
+        return slide.check_cache(source, inventory)
+    report = slide.setup.check_cache(source, inventory, expected_base=slide.BASE, shared_region_limit=None)
+    with source.open('rb') as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
+        layout = inspect_layout(data, True)
+        counts, digest = collections.Counter(), hashlib.sha256()
+        for _, slot, value in slide.iter_fixups(data, layout):
+            counts['fixups'] += 1
+            counts['tagged'] += bool(value >> 56)
+            counts['null'] += not value
+            digest.update(struct.pack('<QQ', slot, value))
+        require(counts['fixups'] == NATIVE_SUPPORT_FIXUPS and counts['tagged'] == slide.TAGGED and counts['null'] == 0,
+                'Unexpected native-support cache fixup counts')
+    report.update(slide_layout=layout, exact_fixups=dict(counts), fixup_inventory_sha256=digest.hexdigest(),
+                  native_support=True, requires_native_binding_bridge=True)
+    return report
 
 
 def cache_images(data, layout):
@@ -211,7 +250,7 @@ def clone_or_copy(stream, output, source_size):
     return False
 
 
-def patch_cache(source, output=None, manifest=None, *, planner=plan_patches):
+def patch_cache(source, output=None, manifest=None, *, planner=plan_patches, native_support=False):
     source = Path(source).absolute()
     output = Path(output).absolute() if output else None
     manifest = Path(manifest).absolute() if manifest else Path(str(output) + '.patch-manifest.json') if output else None
@@ -220,20 +259,20 @@ def patch_cache(source, output=None, manifest=None, *, planner=plan_patches):
     if output:
         require(output.parent.resolve() == output.parent and manifest.parent.resolve() == manifest.parent, 'Output parents must be canonical')
     inventory = slide.setup.read_inventory()
-    validation = slide.check_cache(source, inventory)
+    validation = check_cache(source, inventory, native_support)
     created = []
     try:
         descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(descriptor, 'rb') as stream:
             require(metadata.file_identity(os.fstat(stream.fileno())) == metadata.file_identity(before), 'Source changed before opening')
             with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
-                layout = slide.inspect_slide_layout(data)
+                layout = inspect_layout(data, native_support)
                 require(hashlib.sha256(data).hexdigest() == validation['sha256'], 'Source changed after cache validation')
                 patches, details = planner(data, layout)
             report = dict(version=1, runtime_build='23A343', source=str(source), source_sha256=validation['sha256'], bytes=before.st_size,
                           preferred_base=hex(layout['base']), span=hex(layout['span']), image_count=1353, mapping_count=layout['mapping_count'],
                           exact_fixups=validation['exact_fixups'], fixup_inventory_sha256=validation['fixup_inventory_sha256'],
-                          requires_separate_signing=True, fixup_tables_and_slots_unchanged=True, **details)
+                          requires_separate_signing=True, fixup_tables_and_slots_unchanged=True, native_support=native_support, **details)
             report['patches'] = [dict(patch, before=patch['before'].hex(), after=patch['after'].hex()) for patch in patches]
             if output is None:
                 return dict(report, validation_only=True)
@@ -291,9 +330,10 @@ def main():
     action.add_argument('--output', type=Path)
     action.add_argument('--check-only', action='store_true')
     parser.add_argument('--manifest', type=Path)
+    parser.add_argument('--native-support', action='store_true', help='Require the experimental placeholder cache with export reserves')
     args = parser.parse_args()
     require(not args.check_only or not args.manifest, '--manifest requires --output')
-    print(json.dumps(patch_cache(args.source, args.output, args.manifest), indent=2))
+    print(json.dumps(patch_cache(args.source, args.output, args.manifest, native_support=args.native_support), indent=2))
 
 
 if __name__ == '__main__':

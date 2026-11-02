@@ -30,6 +30,7 @@
 #include "LocalPOSIX.h"
 #include "LazySignatureClient.h"
 #include "LocalMach.h"
+#include "NativeSupportBindings.h"
 #include "../ProcessSupport/SlidableCache.h"
 
 #include <errno.h>
@@ -82,7 +83,16 @@ void publishDebuggerSnapshot(uint64_t state = 0) {
     }
 }
 void notifyMainCalled() { publishDebuggerSnapshot(0x50); }
-void notifyBeforeInitializers() { publishDebuggerSnapshot(0x40); }
+void notifyBeforeInitializers() {
+    if (LSBNativeSupportBindingsPrepared()) {
+        const LSBNativeSupportMemory memory = {lsb::mmap, lsb::mprotect};
+        for (uint32_t index = 0; index < sActiveProcessInfo->infoArrayCount; ++index) {
+            if (LSBApplyNativeSupportInterposing(sActiveProcessInfo->infoArray[index].imageLoadAddress, &memory))
+                slidableCacheFailure("native support interposition replay");
+        }
+    }
+    publishDebuggerSnapshot(0x40);
+}
 void notifyImageChanges(bool unloading, unsigned count, const mach_header *headers[], const char *paths[]) {
     // Version 18 delegates breakpoint notifications here. dyld_sim has already updated the canonical image list.
     if (!count) return;
@@ -198,8 +208,9 @@ bool LSBInitializeSimProcessInfo(const mach_header *dyldHeader, const char *dyld
     return true;
 }
 
-int LSBPrepareSlidableCacheData(const char *runtimeRoot, uint64_t actualBase, const uint8_t cacheUUID[16], bool trace) {
-    return prepareSlidableData(runtimeRoot, actualBase, cacheUUID, trace);
+int LSBPrepareSlidableCacheData(const char *runtimeRoot, uint64_t actualBase, const uint8_t cacheUUID[16], bool trace,
+                               LSBSlidableCacheProfileKind profile) {
+    return prepareSlidableData(runtimeRoot, actualBase, cacheUUID, trace, profile);
 }
 
 const LSBSlidableDataHeader *LSBPreparedSlidableCacheData() {

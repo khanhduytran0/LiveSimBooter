@@ -66,6 +66,27 @@ static int writeConfiguration(int directory, const char *name, NSData *data) {
     return error;
 }
 
+static bool isCanonicalRegularFile(NSString *path) {
+    const char *name = path.fileSystemRepresentation;
+    char actual[PATH_MAX];
+    struct stat status;
+    return realpath(name, actual) && !strcmp(actual, name) && !lstat(actual, &status) && S_ISREG(status.st_mode);
+}
+
+static void addProcursusAptDefault(NSString *dataPath, int runDirectory, NSMutableDictionary<NSString *, NSString *> *childDefaults) {
+    if (!isCanonicalRegularFile([dataPath stringByAppendingPathComponent:@"var/jb/usr/bin/apt"])) return;
+    // APT 2.9.4 scans double-quoted tokens before interpreting escapes and expands literal tabs before parsing.
+    if (strpbrk(dataPath.fileSystemRepresentation, "\"\\\t\r\n")) return;
+    NSString *name = @"LiveSimBooter-apt.conf";
+    // RootDir rebases Procursus's absolute /var/jb directories. A nonempty architecture list skips its fork of dpkg.
+    NSString *config = [NSString stringWithFormat:@"RootDir \"%@\";\nAPT::Architectures { \"iphoneos-arm64\"; };\n", dataPath];
+    // The HTTPS method passes CAInfo directly to GnuTLS without applying RootDir.
+    NSString *caPath = [dataPath stringByAppendingPathComponent:@"var/jb/etc/ssl/certs/cacert.pem"];
+    if (isCanonicalRegularFile(caPath)) config = [config stringByAppendingFormat:@"Acquire::https::CAInfo \"%@\";\n", caPath];
+    if (!writeConfiguration(runDirectory, name.fileSystemRepresentation, [config dataUsingEncoding:NSUTF8StringEncoding]))
+        childDefaults[@"APT_CONFIG"] = [[dataPath stringByAppendingPathComponent:@"var/run"] stringByAppendingPathComponent:name];
+}
+
 static int checkJobDirectory(int directory, NSSet<NSString *> *jobNames) {
     int duplicate = fcntl(directory, F_DUPFD_CLOEXEC, 3);
     if (duplicate < 0) return errno;
@@ -464,8 +485,6 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
             @"MultipleInstanceLimit": @64, @"LogToConsole": @YES, @"LogToFlatFile": @NO,
             @"LogServiceLifecycle": @YES, @"LogAllBootstrapErrors": @YES, @"RequireDomainBinding": @NO
         };
-        NSData *plist = [NSPropertyListSerialization dataWithPropertyList:configuration format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
-        if (!plist) return EINVAL;
         NSMutableDictionary<NSString *, NSData *> *jobPlists = [NSMutableDictionary dictionary];
         NSMutableArray<NSString *> *serviceLogs = [NSMutableArray array];
         if (includeJob) {
@@ -613,7 +632,11 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
             error = writeConfiguration(directories[7], name.UTF8String, jobPlists[name]);
         }
         if (!error && touchPreferences) error = writeConfiguration(directories[8], "com.apple.backboardd.plist", touchPreferences);
-        if (!error) error = writeConfiguration(directories[4], "LiveSimBooter-launchd-bootstrap.plist", plist);
+        if (!error) {
+            addProcursusAptDefault(dataPath, directories[4], childDefaults);
+            NSData *plist = [NSPropertyListSerialization dataWithPropertyList:configuration format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
+            error = plist ? writeConfiguration(directories[4], "LiveSimBooter-launchd-bootstrap.plist", plist) : EINVAL;
+        }
         if (!error) {
             plan->fdCount = 3;
             for (int i = 0; i < 3; ++i) { plan->fds[i] = (LSBInheritedFD){i, 0}; message->fds[i] = fds[i]; fds[i] = -1; }

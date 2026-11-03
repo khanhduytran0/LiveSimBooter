@@ -14,3 +14,6 @@ APSL §4 permits combining covered code with separately licensed code in a large
 covered portions. Distributing or externally deploying modified covered code carries APSL's notice, license-copy and source
 availability requirements; executable-only distributions also need a notice identifying how to obtain that covered source.
 The licenses here do not grant rights to separately supplied Apple simulator binaries, runtime images, or SDKs.
+
+The optional Procursus APT build applies [source patches](../Tools/procursus/) to APT 2.9.4. The patched APT sources use
+GPL-2.0-or-later. APT's [copyright file](https://github.com/Debian/apt/blob/2.9.4/COPYING) lists the upstream notices.

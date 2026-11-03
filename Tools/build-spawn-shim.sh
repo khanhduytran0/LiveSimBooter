@@ -13,8 +13,8 @@ if [ "${LSB_FORK_SNAPSHOT_TRIAL:-0}" = 1 ]; then fork_trial='-DLSB_FORK_SNAPSHOT
 xcrun --sdk iphonesimulator clang -arch arm64 -target arm64-apple-ios14.0-simulator -std=c11 -Wall -Wextra -Werror \
     -dynamiclib -fblocks -fvisibility=hidden -DLSB_GUEST_RUNTIME $trace_flags $fork_trial \
     -install_name /usr/lib/libLiveSimSpawn.dylib -Wl,-not_for_dyld_shared_cache -Wl,-U,_BSSelfTaskHasEntitlement \
-    Guest/BrokerConnection.c Guest/SpawnShim.c Guest/SpawnAttributes.c Guest/CreationMask.c Guest/ExecutableAccess.c Guest/ChildWait.c Guest/ChildKill.c \
-    Guest/TerminalStopWitness.c \
+    Guest/BrokerConnection.c Guest/SpawnShim.c Guest/SpawnAttributes.c Guest/CreationMask.c Guest/ExecutableAccess.c Guest/RuntimeDirectories.c \
+    Guest/ChildWait.c Guest/ChildKill.c Guest/TerminalStopWitness.c \
     Guest/ProcessIdentity.c Guest/ProcessEvents.c Guest/ProcessSession.c Guest/FakePTY.c Guest/FileLockCompatibility.c \
     Guest/ForkHook.c Guest/ForkHook_arm64.S Guest/ForkContext_arm64.S \
     Guest/ThreadBootstrap.c Guest/MetalCompilerRegistration.c \

@@ -14,13 +14,14 @@
 // read-only kern.bootsessionuuid queries; absent/invalid values and pre-constructor queries retain native behavior.
 int LSBLaunchdSysctlByName(const char *name, void *oldValue, size_t *oldSize, void *newValue, size_t newSize);
 
-// Only the fixed simulator launchd state subtree is redirected, into SIMULATOR_SHARED_RESOURCES_DIRECTORY/tmp/launchd.
+// The fixed simulator launchd state subtree is redirected into SIMULATOR_SHARED_RESOURCES_DIRECTORY/tmp/launchd.
 // These wrappers do not virtualize sockets: the legacy syslogsock bind keeps its native, nonfatal failure behavior.
 int LSBLaunchdMkdir(const char *path, mode_t mode);
 int LSBLaunchdOpen(const char *path, int flags, ...);
 FILE *LSBLaunchdFopen(const char *path, const char *mode);
 int LSBLaunchdRename(const char *from, const char *to, unsigned flags);
 int LSBLaunchdUnlink(const char *path);
+// Fish uses stat to verify that a /var/jb executable found by access(X_OK) is a regular file.
 int LSBLaunchdStat(const char *path, struct stat *status);
 
 #endif

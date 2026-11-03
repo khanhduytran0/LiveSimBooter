@@ -1,4 +1,5 @@
 #include "LaunchdCompatibility.h"
+#include "ExecutableAccess.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -155,6 +156,8 @@ int LSBLaunchdUnlink(const char *path) {
 int LSBLaunchdStat(const char *path, struct stat *status) {
     char translated[PATH_MAX];
     int error = launchdStatePath(path, translated, &path);
+    // Fish calls stat after access(X_OK) while resolving each command. Both must inspect the same guest file.
+    if (!error) error = LSBTranslateBootstrapAccessPath(&path, translated, false);
     if (error) { errno = error; return -1; }
     return stat(path, status);
 }

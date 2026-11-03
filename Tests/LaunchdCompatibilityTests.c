@@ -266,7 +266,8 @@ static void testFilesystem(void) {
     environmentAvailable = false;
     unsigned beforeEnvironment = environmentCalls;
     const char *unrelated[] = {NULL, "/dev/null", "/private/var/tmp/com.kdt.LiveSimBooter.launchd-extra/disabled.plist",
-                              "/private/var/tmp/com.kdt.LiveSimBooter.launch", "private/var/tmp/com.kdt.LiveSimBooter.launchd"};
+                              "/private/var/tmp/com.kdt.LiveSimBooter.launch", "private/var/tmp/com.kdt.LiveSimBooter.launchd",
+                              "/var/jb-extra/tool", "/private/var/jb-extra/tool", "var/jb/tool"};
     for (unsigned i = 0; i < sizeof(unrelated) / sizeof(unrelated[0]); ++i) checkFilesystemPath(unrelated[i], unrelated[i]);
     expectedPath = "/early-a";
     expectedOtherPath = "/early-b";
@@ -357,6 +358,27 @@ static void testFilesystem(void) {
     assert(!unsetenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY") && !unsetenv(LSB_SIMULATOR_LAUNCHD_ENV));
 }
 
+static void testBootstrapStat(void) {
+    char temporary[] = "/tmp/LSB-bootstrap-stat.XXXXXX", cwd[PATH_MAX], root[PATH_MAX], data[PATH_MAX];
+    assert(getcwd(cwd, sizeof(cwd)) && mkdtemp(temporary) && !chdir(temporary));
+    assert(!mkdir("RuntimeRoot", 0700) && !mkdir("data", 0700) && !mkdir("data/var", 0700) && !mkdir("data/var/jb", 0700));
+    assert(realpath("RuntimeRoot", root) && realpath("data", data));
+    assert(!setenv("DYLD_ROOT_PATH", root, 1) && !setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", data, 1));
+    LSBResetExecutableAccessForTesting();
+    assert(!unsetenv("DYLD_ROOT_PATH"));
+    int fd = open("data/var/jb/test-command", O_CREAT | O_EXCL | O_WRONLY, 0755);
+    struct stat source, guest;
+    assert(fd >= 0 && !fstat(fd, &source) && !close(fd));
+    realFilesystem = true;
+    assert(!LSBLaunchdStat("/var/jb/test-command", &guest) && source.st_dev == guest.st_dev && source.st_ino == guest.st_ino);
+    assert(!LSBLaunchdStat("/private/var/jb/test-command", &guest) && source.st_dev == guest.st_dev && source.st_ino == guest.st_ino);
+    assert(LSBLaunchdStat("/var/jb/missing-command", &guest) == -1 && errno == ENOENT);
+    realFilesystem = false;
+    assert(!unsetenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY"));
+    assert(!unlink("data/var/jb/test-command") && !rmdir("data/var/jb") && !rmdir("data/var") && !rmdir("data") && !rmdir("RuntimeRoot"));
+    assert(!chdir(cwd) && !rmdir(temporary));
+}
+
 int main(void) {
     char output[4] = {'a', 'b', 'c', 'd'}, replacement[] = "changed";
     size_t size = sizeof(output);
@@ -412,6 +434,7 @@ int main(void) {
     expectPassthrough("kern.bootargs", output, &size, NULL, 0);
     testBootUUID();
     testFilesystem();
+    testBootstrapStat();
     puts("LaunchdCompatibility: early-init bypass, bootargs/boot UUID semantics, exact state subtree and file lifecycle passed");
     return 0;
 }

@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 static int nativeResult, nativeError, remainingResult, remainingError;
-static unsigned accessCalls, atCalls, openCalls, remainingCalls;
+static unsigned accessCalls, atCalls, openCalls, remainingCalls, getenvCalls, realpathCalls, statCalls;
 static int lastMode, lastDirectory, lastFlags;
 static uid_t realUser, effectiveUser;
 static gid_t realGroup, effectiveGroup, supplementary[NGROUPS_MAX];
@@ -59,6 +59,9 @@ static int testGetgroups(int capacity, gid_t *groups) {
     memcpy(groups, supplementary, (size_t)supplementaryCount * sizeof(*groups));
     return supplementaryCount;
 }
+static char *testGetenv(const char *name) { ++getenvCalls; return getenv(name); }
+static char *testRealpath(const char *path, char *resolved) { ++realpathCalls; return realpath(path, resolved); }
+static int testStat(const char *path, struct stat *metadata) { ++statCalls; return stat(path, metadata); }
 
 #define LSB_EXECUTABLE_ACCESS_TESTING
 #define access testAccess
@@ -70,7 +73,14 @@ static int testGetgroups(int capacity, gid_t *groups) {
 #define getgid testGetgid
 #define getegid testGetegid
 #define getgroups testGetgroups
+#define getenv testGetenv
+#define realpath testRealpath
+#define stat(path, metadata) testStat(path, metadata)
+#include "../Guest/RuntimeDirectories.c"
 #include "../Guest/ExecutableAccess.c"
+#undef stat
+#undef realpath
+#undef getenv
 #undef access
 #undef faccessat
 #undef open
@@ -84,7 +94,7 @@ static int testGetgroups(int capacity, gid_t *groups) {
 static void reset(void) {
     nativeResult = -1; nativeError = EPERM;
     remainingResult = 0; remainingError = ENOTTY;
-    accessCalls = atCalls = openCalls = remainingCalls = 0;
+    accessCalls = atCalls = openCalls = remainingCalls = getenvCalls = realpathCalls = statCalls = 0;
     realUser = effectiveUser = 501;
     realGroup = effectiveGroup = 20;
     supplementaryCount = 0;
@@ -110,6 +120,7 @@ static void testNativeBehavior(const char *path) {
     reset();
     nativeResult = 0; nativeError = ENOTTY;
     assert(!LSBAccess("/outside/native-success", X_OK) && errno == ENOTTY && accessCalls == 1 && !openCalls);
+    assert(!getenvCalls && !realpathCalls && !statCalls);
     const int errors[] = {EACCES, ENOENT, ENOTDIR, EINVAL, EFAULT};
     for (unsigned index = 0; index < sizeof(errors) / sizeof(*errors); ++index) {
         reset(); nativeError = errors[index];
@@ -174,6 +185,52 @@ static void testAt(const char *root, const char *path) {
     assert(!chmod(path, 0755));
 }
 
+static void testBootstrap(const char *base, const char *data, const struct mach_header_64 *header) {
+    char var[PATH_MAX], jb[PATH_MAX], bin[PATH_MAX], image[PATH_MAX], link[PATH_MAX], systemImage[PATH_MAX], expected[PATH_MAX];
+    snprintf(var, sizeof(var), "%s/var", data);
+    snprintf(jb, sizeof(jb), "%s/jb", var);
+    snprintf(bin, sizeof(bin), "%s/bin", jb);
+    snprintf(image, sizeof(image), "%s/tool", bin);
+    snprintf(link, sizeof(link), "%s/link", bin);
+    snprintf(systemImage, sizeof(systemImage), "%s/RuntimeRoot/bin/other", base);
+    // Installing the optional bootstrap while the guest is running must make it immediately visible.
+    reset(); assert(LSBAccess("/var/jb/bin/tool", F_OK) == -1 && errno == ENOENT && !accessCalls);
+    assert(!mkdir(var, 0700) && !mkdir(jb, 0700) && !mkdir(bin, 0700));
+    writeImage(image, header); writeImage(systemImage, header);
+    assert(realpath(image, expected) && !symlink("tool", link));
+    reset(); assert(!LSBAccess("/var/jb/bin/link", X_OK) && errno == EDOM && !strcmp(lastPath, expected));
+    assert(!getenvCalls && realpathCalls <= 1 && !statCalls);
+    reset(); assert(!LSBFAccessAt(-123, "/private/var/jb/bin/tool", X_OK, AT_EACCESS) && errno == EDOM && !strcmp(lastPath, expected));
+    reset(); assert(!LSBAccess(image, X_OK));
+    reset(); assert(!LSBFAccessAt(AT_FDCWD, image, X_OK, AT_EACCESS));
+
+    reset(); nativeResult = 0;
+    assert(LSBAccess("/var/jb/bin/missing", X_OK) == -1 && errno == ENOENT && !accessCalls);
+    assert(LSBAccess("/var/jb/bin/../bin/tool", X_OK) == -1 && errno == EINVAL && !accessCalls);
+    assert(!LSBAccess("/var/jb-other/tool", X_OK) && !strcmp(lastPath, "/var/jb-other/tool"));
+    assert(!unlink(link) && !symlink(systemImage, link));
+    reset(); assert(LSBAccess("/var/jb/bin/link", R_OK) == -1 && errno == EACCES && !accessCalls);
+    reset(); expectDenied(link); assert(!openCalls);
+    // Checking the link itself keeps the real no-follow target, even when its referent is elsewhere or absent.
+    reset(); assert(!LSBFAccessAt(AT_FDCWD, "/var/jb/bin/link", F_OK, AT_SYMLINK_NOFOLLOW) && lastFlags == AT_SYMLINK_NOFOLLOW);
+    assert(realpath(bin, expected) && strlcat(expected, "/link", sizeof(expected)) < sizeof(expected) && !strcmp(expected, lastPath));
+    assert(!unlink(link) && !symlink("../../../..", link)); // The link now leads to the directory containing RuntimeRoot and data.
+    reset(); assert(LSBFAccessAt(AT_FDCWD, "/var/jb/bin/link/RuntimeRoot", F_OK, AT_SYMLINK_NOFOLLOW) == -1 && errno == EACCES && !atCalls);
+    char sibling[PATH_MAX];
+    snprintf(sibling, sizeof(sibling), "%s-extra", jb);
+    assert(!mkdir(sibling, 0700) && !unlink(link) && !symlink(sibling, link));
+    reset(); assert(LSBAccess("/private/var/jb/bin/link", F_OK) == -1 && errno == EACCES && !accessCalls);
+
+    struct mach_header_64 wrong = *header;
+    wrong.cpusubtype = CPU_SUBTYPE_ARM64E;
+    writeImage(image, &wrong); reset(); expectDenied("/var/jb/bin/tool");
+    atomic_store_explicit(&directoriesReady, false, memory_order_release);
+    reset(); assert(LSBAccess("/var/jb/bin/tool", X_OK) == -1 && errno == EACCES && !accessCalls);
+    assert(!getenvCalls && !realpathCalls && !statCalls);
+    atomic_store_explicit(&directoriesReady, true, memory_order_release);
+    assert(!unlink(systemImage));
+}
+
 static void testInstalledApplications(const char *base, const struct mach_header_64 *header) {
     char data[PATH_MAX], app[PATH_MAX], path[PATH_MAX], parent[PATH_MAX];
     assert(snprintf(data, sizeof(data), "%s/data", base) > 0);
@@ -200,6 +257,7 @@ static void testInstalledApplications(const char *base, const struct mach_header
     assert(!unlink(path)); writeImage(path, header);
     struct mach_header_64 invalid = *header; invalid.filetype = MH_DYLIB;
     writeImage(path, &invalid); reset(); expectDenied(path);
+    testBootstrap(base, data, header);
     char *paths[] = {data, NULL}; FTS *tree = fts_open(paths, FTS_PHYSICAL | FTS_NOCHDIR, NULL); assert(tree);
     FTSENT *entry;
     while ((entry = fts_read(tree))) {
@@ -228,15 +286,26 @@ int main(void) {
     writeImage(path, &header); writeImage(outside, &header);
     assert(!symlink(outside, escape) && !symlink(root, rootLink) && !symlink(path, insideLink));
     assert(!setenv("DYLD_ROOT_PATH", root, 1));
+    LSBResetExecutableAccessForTesting();
+    // The guest captures its namespace before its first lookup, even when its application later changes environ.
+    assert(!unsetenv("DYLD_ROOT_PATH"));
     reset(); assert(!LSBAccess(path, X_OK) && errno == EDOM);
+    assert(!getenvCalls);
     reset(); expectDenied(outside); expectDenied(root); expectDenied(escape);
     assert(accessCalls == 3 && !remainingCalls && !openCalls);
     reset(); assert(!LSBAccess(insideLink, X_OK));
+    assert(!getenvCalls && realpathCalls <= 1 && !statCalls);
     assert(!setenv("DYLD_ROOT_PATH", rootLink, 1));
+    LSBResetExecutableAccessForTesting();
     reset(); assert(!LSBAccess(path, X_OK));
-    assert(!unsetenv("DYLD_ROOT_PATH")); reset(); expectDenied(path);
-    assert(!setenv("DYLD_ROOT_PATH", "/", 1)); reset(); expectDenied(path);
+    assert(!unsetenv("DYLD_ROOT_PATH"));
+    LSBResetExecutableAccessForTesting();
+    reset(); expectDenied(path);
+    assert(!setenv("DYLD_ROOT_PATH", "/", 1));
+    LSBResetExecutableAccessForTesting();
+    reset(); expectDenied(path);
     assert(!setenv("DYLD_ROOT_PATH", root, 1));
+    LSBResetExecutableAccessForTesting();
     testNativeBehavior(path); testModes(path); testAt(root, path);
     for (unsigned variant = 0; variant < 8; ++variant) {
         struct mach_header_64 bad = header;

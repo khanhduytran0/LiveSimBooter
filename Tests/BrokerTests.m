@@ -4675,6 +4675,22 @@ static void testPeerExecutablePathContainment(void) {
     assert(copyGuestExecutablePath(&request->plan, output) == ENOENT && !output[0]);
     setRequestProgram(request, [app stringByAppendingPathComponent:@"Frameworks"].fileSystemRepresentation);
     assert(copyGuestExecutablePath(&request->plan, output) == EINVAL && !output[0]);
+    NSString *bootstrap = [data stringByAppendingPathComponent:@"var/jb"];
+    NSString *tool = [bootstrap stringByAppendingPathComponent:@"usr/libexec/runningboardd"];
+    assert([manager createDirectoryAtPath:tool.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:NULL]);
+    assert([[@"bootstrap fixture" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:tool atomically:YES]);
+    for (NSString *path in @[tool, @"/var/jb/usr/libexec/runningboardd", @"/private/var/jb/usr/libexec/runningboardd"]) {
+        setRequestProgram(request, path.fileSystemRepresentation);
+        int opened = -1;
+        assert(!openGuestExecutable(&request->plan, &opened, output) && opened >= 0);
+        assert(!strcmp(output, tool.fileSystemRepresentation)); // Keep the bootstrap binary distinct from the stock runningboardd role.
+        struct stat descriptor, current;
+        assert(!fstat(opened, &descriptor) && !stat(tool.fileSystemRepresentation, &current));
+        assert(descriptor.st_dev == current.st_dev && descriptor.st_ino == current.st_ino && !close(opened));
+    }
+    assert(!symlink(image.fileSystemRepresentation, [bootstrap stringByAppendingPathComponent:@"alias"].fileSystemRepresentation));
+    setRequestProgram(request, "/var/jb/alias");
+    assert(copyGuestExecutablePath(&request->plan, output) == EACCES && !output[0]);
     disposeMessage(request);
     resetBroker();
     assert([manager removeItemAtPath:directory error:NULL]);

@@ -1,0 +1,10 @@
+--- a/apt-pkg/cacheset.h
++++ b/apt-pkg/cacheset.h
+@@ -221 +221 @@
+-	inline iterator_type operator+(typename container_iterator::difference_type const &n) { return iterator_type(_iter + n); }
++	inline iterator_type operator+(typename container_iterator::difference_type const &n) const { return iterator_type(_iter + n); }
+@@ -225,2 +225,2 @@
+-	inline iterator_type operator-(typename container_iterator::difference_type const &n) { return iterator_type(_iter - n); }
+-	inline typename container_iterator::difference_type operator-(iterator_type const &b) { return (_iter - b._iter); }
++	inline iterator_type operator-(typename container_iterator::difference_type const &n) const { return iterator_type(_iter - n); }
++	inline typename container_iterator::difference_type operator-(iterator_type const &b) const { return (_iter - b._iter); }

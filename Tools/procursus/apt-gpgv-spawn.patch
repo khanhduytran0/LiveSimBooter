@@ -1,0 +1,227 @@
+--- a/methods/CMakeLists.txt
++++ b/methods/CMakeLists.txt
+@@ -10,0 +11,3 @@
++if(APPLE)
++   target_link_libraries(gpgv resolv)
++endif()
+--- a/methods/gpgv.cc
++++ b/methods/gpgv.cc
+@@ -28,0 +29,3 @@
++#ifdef __APPLE__
++#include "gpgv-spawn.h"
++#endif
+@@ -191,0 +195,13 @@
++#ifdef __APPLE__
++   FileFd statusFile;
++   if (!GetTempFile("apt.status", true, &statusFile)) return "Cannot create gpgv status file";
++   int const verifierExit = verifyWithSpawn(file, outfile, keyFiles, statusFile.Fd());
++   if (verifierExit < 0) return "Could not verify release signature";
++   if (!statusFile.Seek(0)) return "Cannot rewind gpgv status file";
++   int statusReader = dup(statusFile.Fd());
++   FILE *pipein = statusReader < 0 ? nullptr : fdopen(statusReader, "r");
++   if (!pipein) {
++      if (statusReader >= 0) close(statusReader);
++      return "Cannot read gpgv status file";
++   }
++#else
+@@ -210,0 +227,2 @@
++#endif
++
+@@ -403,0 +422 @@
++#ifndef __APPLE__
+@@ -405,0 +425,2 @@
++   int const verifierExit = WEXITSTATUS(status);
++#endif
+@@ -408 +429 @@
+-      ioprintf(std::clog, "gpgv exited with status %i\n", WEXITSTATUS(status));
++      ioprintf(std::clog, "gpgv exited with status %i\n", verifierExit);
+@@ -430 +451 @@
+-   if (WEXITSTATUS(status) == 112)
++   if (verifierExit == 112)
+@@ -446 +467 @@
+-   else if (WEXITSTATUS(status) == 0)
++   else if (verifierExit == 0)
+@@ -462 +483 @@
+-   else if (WEXITSTATUS(status) == 1)
++   else if (verifierExit == 1)
+@@ -464 +485 @@
+-   else if (WEXITSTATUS(status) == 111)
++   else if (verifierExit == 111)
+@@ -544 +565,5 @@
+-	    keyFiles.emplace_back(std::move(key));
++#ifdef __APPLE__
++            keyFiles.emplace_back(guestPath(key));
++#else
++            keyFiles.emplace_back(std::move(key));
++#endif
+--- /dev/null
++++ b/methods/gpgv-spawn.h
+@@ -0,0 +1,168 @@
++// Darwin guest acquire method for APT 2.9.4. Keep APT's signer policy in gpgv.cc and verify with the configured GnuPG binary.
++#include <crt_externs.h>
++#include <fcntl.h>
++#include <fstream>
++#include <resolv.h>
++#include <spawn.h>
++
++namespace {
++struct VerificationFile {
++   FileFd file;
++   ~VerificationFile() { if (!file.Name().empty()) unlink(file.Name().c_str()); }
++   bool create(char const *name) { return GetTempFile(name, false, &file) != nullptr; }
++};
++
++static std::string guestPath(std::string const &path)
++{
++   auto root = _config->Find("RootDir");
++   while (!root.empty() && root.back() == '/') root.pop_back();
++   if (!root.empty() && !path.empty() && path.front() == '/' && path != root && path.compare(0, root.size() + 1, root + "/") != 0)
++      return root + path;
++   return path;
++}
++
++static void stripCR(std::string &line)
++{
++   if (!line.empty() && line.back() == '\r') line.pop_back();
++}
++
++// apt-key accepts binary OpenPGP keyrings and armored public-key blocks, including inline Signed-By keys.
++static bool appendKeyring(std::string const &path, FileFd &output)
++{
++   std::ifstream input(path, std::ios::binary);
++   if (!input) return _error->Errno("open", "Cannot read OpenPGP keyring %s", path.c_str());
++   int const first = input.peek();
++   bool const packet = first == 0x98 || first == 0x99 || first == 0xc6;
++   auto invalid = [&] { return _error->Error("Invalid OpenPGP keyring %s", path.c_str()); };
++   if (first != EOF && path.size() >= 4) {
++      auto ext = path.substr(path.size() - 4);
++      if ((ext == ".gpg" && !packet) || (ext == ".asc" && packet)) return invalid();
++   }
++   if (packet || first == EOF)
++   {
++      char bytes[8192];
++      while (input.read(bytes, sizeof(bytes)) || input.gcount() != 0)
++         if (!output.Write(bytes, input.gcount())) return false;
++      return input.eof() || _error->Error("Cannot read OpenPGP keyring %s", path.c_str());
++   }
++
++   std::string line;
++   bool any = false;
++   while (std::getline(input, line))
++   {
++      stripCR(line);
++      if (line.empty()) continue;
++      if (line != "-----BEGIN PGP PUBLIC KEY BLOCK-----") return invalid();
++      while (std::getline(input, line)) { stripCR(line); if (line.empty()) break; }
++      std::string encoded;
++      while (std::getline(input, line))
++      {
++         stripCR(line);
++         if (line == "-----END PGP PUBLIC KEY BLOCK-----") break;
++         if (!line.empty() && line.front() != '=') encoded += line;  // Skip the optional armor checksum.
++      }
++      if (line != "-----END PGP PUBLIC KEY BLOCK-----" || encoded.empty()) return invalid();
++      std::vector<unsigned char> bytes(encoded.size());
++      int decoded = b64_pton(encoded.c_str(), bytes.data(), bytes.size());
++      if (decoded <= 0 || (bytes[0] != 0x98 && bytes[0] != 0x99 && bytes[0] != 0xc6)) return invalid();
++      if (!output.Write(bytes.data(), decoded)) return false;
++      any = true;
++   }
++   return (any && input.eof() && !input.bad()) || invalid();
++}
++
++// Match ExecGPGV's detached-format gate before passing the two files to gpgv. Reject mixed or appended unsigned content.
++static bool detachedSignatures(std::string const &filename)
++{
++   std::ifstream input(filename);
++   std::string line;
++   bool opened = false, complete = false;
++   while (std::getline(input, line))
++   {
++      line.erase(line.find_last_not_of("\t\n\v\f\r ") + 1);
++      if (!opened)
++      {
++         if (line != "-----BEGIN PGP SIGNATURE-----") return false;
++         opened = true;
++      }
++      else if (line == "-----END PGP SIGNATURE-----") { opened = false; complete = true; }
++      else if (!line.empty() && line.front() == '-') return false;
++   }
++   return input.eof() && complete && !opened;
++}
++
++static int runVerifier(std::vector<std::string> const &args, int statusfd)
++{
++   std::vector<char *> argv;
++   for (auto const &arg : args) argv.push_back(const_cast<char *>(arg.c_str()));
++   argv.push_back(nullptr);
++   posix_spawn_file_actions_t actions;
++   int error = posix_spawn_file_actions_init(&actions);
++   if (error != 0) {
++      _error->Error("posix_spawn_file_actions_init: %s", strerror(error));
++      return -1;
++   }
++   posix_spawnattr_t attr;
++   error = posix_spawnattr_init(&attr);
++   if (error != 0) {
++      posix_spawn_file_actions_destroy(&actions);
++      _error->Error("posix_spawnattr_init: %s", strerror(error));
++      return -1;
++   }
++   error = posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
++   if (!error) error = posix_spawn_file_actions_adddup2(&actions, statusfd, STDOUT_FILENO);
++   if (!error) error = posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
++   pid_t pid;
++   if (!error) error = posix_spawnp(&pid, argv[0], &actions, &attr, argv.data(), *_NSGetEnviron());
++   posix_spawnattr_destroy(&attr);
++   posix_spawn_file_actions_destroy(&actions);
++   if (error) {
++      _error->Error("Cannot start %s: %s", argv[0], strerror(error));
++      return -1;
++   }
++   int status;
++   while (waitpid(pid, &status, 0) != pid) {
++      if (errno == EINTR) continue;
++      _error->Errno("waitpid", "Waiting for %s", argv[0]);
++      return -1;
++   }
++   if (!WIFEXITED(status)) {
++      _error->Error("%s terminated abnormally", argv[0]);
++      return -1;
++   }
++   return WEXITSTATUS(status);
++}
++
++static int verifyWithSpawn(std::string const &signature, std::string const &message, std::vector<std::string> keyrings, int statusfd)
++{
++   VerificationFile keys, data, sig;
++   if (!keys.create("apt.keys")) return -1;
++   if (keyrings.empty())
++      keyrings = GetListOfFilesInDir(_config->FindDir("Dir::Etc::TrustedParts"), std::vector<std::string>{"gpg", "asc"}, true);
++   for (auto const &keyring : keyrings)
++      if (!appendKeyring(keyring, keys.file)) return -1;
++   if (!keys.file.Close()) return -1;
++
++   auto const gpgv = guestPath(_config->Find("APT::Key::gpgvcommand", "/var/jb/usr/bin/gpgv"));
++   std::vector<std::string> args{gpgv, "--keyring", keys.file.Name(), "--ignore-time-conflict"};
++   auto const algo = _config->Find("APT::Key::assert-pubkey-algo");
++   if (!algo.empty()) args.push_back("--assert-pubkey-algo=" + algo);
++   for (auto const &option : _config->FindVector("Acquire::gpgv::Options"))
++      args.push_back(option);
++   args.insert(args.end(), {"--status-fd", "1", "--"});
++
++   if (signature == message)
++   {
++      if (!data.create("apt.data") || !sig.create("apt.sig")) return -1;
++      if (!SplitClearSignedFile(message, &data.file, nullptr, &sig.file)) return 112;
++      if (!data.file.Close() || !sig.file.Close()) return -1;
++      args.insert(args.end(), {sig.file.Name(), data.file.Name()});
++   }
++   else
++   {
++      if (!detachedSignatures(signature)) return 112;
++      args.insert(args.end(), {signature, message});
++   }
++   return runVerifier(args, statusfd);
++}
++}

@@ -393,11 +393,6 @@ static BOOL isConfigdProgram(const LSBReceivedMessage *request) {
     return !strcmp(program, physical.fileSystemRepresentation);
 }
 
-static BOOL containedPath(const char *path, const char *root) {
-    size_t length = strlen(root);
-    return length > 1 && !strncmp(path, root, length) && path[length] == '/';
-}
-
 static int openGuestExecutable(const LSBSpawnPlan *plan, int *descriptor, char guestPath[LSB_PATH_BYTES]) {
     *descriptor = -1;
     if (guestPath) guestPath[0] = '\0';
@@ -406,22 +401,13 @@ static int openGuestExecutable(const LSBSpawnPlan *plan, int *descriptor, char g
     const char *path = plan->strings + plan->path;
     // Relative executable resolution depends on ordered child-only CHDIR/FCHDIR actions. Never guess an image in the host cwd.
     if (path[0] != '/') return ENOTSUP;
-    char root[PATH_MAX], candidate[PATH_MAX], canonical[PATH_MAX], descriptorPath[PATH_MAX], descriptorCanonical[PATH_MAX];
-    int rootError = realpath(runtimeRoot.fileSystemRepresentation, root) ? 0 : errno;
-    error = LSBGuestExecutableInputError(rootError ? runtimeRoot.fileSystemRepresentation : root, path);
-    if (error) return error;
-    if (rootError) return rootError;
-    BOOL resolved = realpath(path, canonical) != NULL;
-    int resolveError = errno;
-    BOOL physical = resolved && LSBGuestExecutableIsContained(root, canonical);
-    if (!physical) {
-        // An explicit physical path cannot escape through a symlink and be reinterpreted as a guest path.
-        if (LSBGuestPathUsesPhysicalStorage(root, path)) return resolved ? EACCES : resolveError;
-        int length = snprintf(candidate, sizeof(candidate), "%s%s", root, path);
-        if (length < 0 || (size_t)length >= sizeof(candidate)) return ENAMETOOLONG;
-        if (!realpath(candidate, canonical)) return errno;
-        if (!LSBGuestExecutableIsContained(root, canonical)) return EACCES;
+    char root[PATH_MAX], canonical[PATH_MAX], descriptorPath[PATH_MAX], descriptorCanonical[PATH_MAX];
+    if (!realpath(runtimeRoot.fileSystemRepresentation, root)) {
+        int rootError = errno;
+        return LSBGuestExecutableInputError(runtimeRoot.fileSystemRepresentation, path) ?: rootError;
     }
+    error = LSBResolveAbsoluteExecutablePath(root, path, canonical);
+    if (error) return error;
     int fd = open(canonical, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return errno;
     struct stat info, current;
@@ -433,8 +419,8 @@ static int openGuestExecutable(const LSBSpawnPlan *plan, int *descriptor, char g
     else if (stat(descriptorCanonical, &current)) error = errno;
     else if (info.st_dev != current.st_dev || info.st_ino != current.st_ino) error = EAGAIN;
     if (!error && guestPath) {
-        // System-role comparisons retain their virtual paths. User apps keep their canonical installed-container path.
-        const char *guest = containedPath(descriptorCanonical, root) ? descriptorCanonical + strlen(root) : descriptorCanonical;
+        // System-role comparisons retain their virtual paths. Apps and bootstrap tools keep their canonical physical path.
+        const char *guest = LSBGuestPathInsideRoot(descriptorCanonical, root) ? descriptorCanonical + strlen(root) : descriptorCanonical;
         size_t size = strlen(guest) + 1;
         if (size > LSB_PATH_BYTES) error = ENAMETOOLONG;
         else memcpy(guestPath, guest, size);

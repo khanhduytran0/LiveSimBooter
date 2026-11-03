@@ -17,15 +17,28 @@ static int prepareEnvironment(void) {
     const char *terminal = getenv(LSB_FAKE_PTY_ENV);
     if (dyld_get_active_platform() != 7 || !configuredRoot || configuredRoot[0] != '/' || !configuredData || configuredData[0] != '/' ||
         !terminal || terminal[0] != '/' || !isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO) || !isatty(STDERR_FILENO)) return ENOTTY;
-    char root[PATH_MAX], data[PATH_MAX], expectedData[PATH_MAX], path[PATH_MAX * 5 + 80];
+    char root[PATH_MAX], data[PATH_MAX], expectedData[PATH_MAX];
     if (!realpath(configuredRoot, root) || !realpath(configuredData, data)) return errno;
     const char *leaf = strrchr(root, '/');
     if (!leaf || strcmp(leaf, "/" LSB_RUNTIME_DIRECTORY)) return EINVAL;
     int length = snprintf(expectedData, sizeof(expectedData), "%.*s/" LSB_DATA_DIRECTORY, (int)(leaf - root), root);
     if (length < 0 || (size_t)length >= sizeof(expectedData)) return ENAMETOOLONG;
     if (strcmp(data, expectedData)) return EINVAL;
-    length = snprintf(path, sizeof(path), "%s/usr/local/bin:%s/bin:%s/usr/bin:%s/usr/sbin:%s/sbin", root, root, root, root, root);
-    if (length < 0 || (size_t)length >= sizeof(path)) return ENAMETOOLONG;
+    static const char *const bootstrapDirs[] = {"usr/bin", "bin", "usr/sbin", "sbin"};
+    char path[PATH_MAX * (5 + sizeof(bootstrapDirs) / sizeof(bootstrapDirs[0])) + 80];
+    size_t used = 0;
+    for (size_t i = 0; i < sizeof(bootstrapDirs) / sizeof(bootstrapDirs[0]); ++i) {
+        char directory[PATH_MAX], canonical[PATH_MAX];
+        struct stat info;
+        length = snprintf(directory, sizeof(directory), "%s/var/jb/%s", data, bootstrapDirs[i]);
+        if (length < 0 || (size_t)length >= sizeof(directory) || !realpath(directory, canonical) || strcmp(canonical, directory) ||
+            stat(canonical, &info) || !S_ISDIR(info.st_mode)) continue;
+        memcpy(path + used, directory, length);
+        used += (size_t)length;
+        path[used++] = ':';
+    }
+    length = snprintf(path + used, sizeof(path) - used, "%s/usr/local/bin:%s/bin:%s/usr/bin:%s/usr/sbin:%s/sbin", root, root, root, root, root);
+    if (length < 0 || (size_t)length >= sizeof(path) - used) return ENAMETOOLONG;
     if (setenv("TERM", "xterm-256color", 1) || setenv("HOME", data, 1) || setenv("CFFIXED_USER_HOME", data, 1) || setenv("PATH", path, 1))
         return errno;
     return chdir(data) ? errno : 0;

@@ -1,0 +1,92 @@
+--- a/apt-pkg/acquire-worker.cc
++++ b/apt-pkg/acquire-worker.cc
+@@ -36,4 +36,9 @@
+ #include <sys/stat.h>
+ #include <unistd.h>
++#ifdef __APPLE__
++#include <crt_externs.h>
++#include <fcntl.h>
++#include <spawn.h>
++#endif
+
+ #include <apti18n.h>
+@@ -90,2 +95,57 @@
++#ifdef __APPLE__
++// Darwin can start the method directly with the same two channels and ExecFork's signal defaults.
++static int SpawnAcquireMethod(pid_t &pid, std::string const &method, std::string const &calling, int const pipes[4])
++{
++   std::set<int> keep;
++   MergeKeepFdsFromConfiguration(keep);
++   posix_spawn_file_actions_t actions;
++   int error = posix_spawn_file_actions_init(&actions);
++   if (error != 0)
++      return error;
++   posix_spawnattr_t attr;
++   error = posix_spawnattr_init(&attr);
++   if (error != 0)
++   {
++      posix_spawn_file_actions_destroy(&actions);
++      return error;
++   }
++
++   sigset_t defaults;
++   sigemptyset(&defaults);
++   for (int sig : {SIGPIPE, SIGQUIT, SIGINT, SIGWINCH, SIGCONT, SIGTSTP})
++      sigaddset(&defaults, sig);
++   error = posix_spawnattr_setsigdefault(&attr, &defaults);
++   if (error == 0)
++      error = posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF);
++   auto channel = [&](int source, int target) {
++      return source == target ? posix_spawn_file_actions_addinherit_np(&actions, source) :
++                                posix_spawn_file_actions_adddup2(&actions, source, target);
++   };
++   if (error == 0)
++      error = channel(pipes[1], STDOUT_FILENO);
++   if (error == 0)
++      error = channel(pipes[2], STDIN_FILENO);
++   // If stderr was closed, pipe() may have taken its number. Do not also pass that pipe end as stderr.
++   if (error == 0 && std::find(pipes, pipes + 4, STDERR_FILENO) == pipes + 4 && fcntl(STDERR_FILENO, F_GETFD) >= 0)
++      error = posix_spawn_file_actions_addinherit_np(&actions, STDERR_FILENO);
++   for (int fd : keep)
++   {
++      if (fd < 3 || error != 0)
++         continue;
++      int flags = fcntl(fd, F_GETFD);
++      if (flags >= 0 && (flags & FD_CLOEXEC) == 0)
++         error = posix_spawn_file_actions_addinherit_np(&actions, fd);
++   }
++   if (error == 0)
++   {
++      char *argv[] = {const_cast<char *>(calling.c_str()), nullptr};
++      error = posix_spawn(&pid, method.c_str(), &actions, &attr, argv, *_NSGetEnviron());
++   }
++   posix_spawnattr_destroy(&attr);
++   posix_spawn_file_actions_destroy(&actions);
++   return error;
++}
++#endif
++
+ // Worker::Start - Start the worker process				/*{{{*/
+ // ---------------------------------------------------------------------
+@@ -141,4 +201,15 @@
+       SetCloseExec(Pipes[I],true);
+
++#ifdef __APPLE__
++   int const spawnError = SpawnAcquireMethod(Process, Method, Calling, Pipes);
++   if (spawnError != 0)
++   {
++      Process = -1;
++      for (int fd : Pipes)
++         close(fd);
++      errno = spawnError;
++      return _error->Errno("posix_spawn", "Failed to start method %s (via %s)", Calling.c_str(), Method.c_str());
++   }
++#else
+    // Fork off the process
+    Process = ExecFork();
+@@ -158,4 +229,5 @@
+    }
+
++#endif
+    // Fix up our FDs
+    InFd = Pipes[0];

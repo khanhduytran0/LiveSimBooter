@@ -17,6 +17,12 @@ ASSET = "https://github.com/NyaMisty/sshdog_ios/releases/download/v1.1/sshdog"
 RELEASE_SHA256 = "9aaec8f86fde670c5141754e98f6853c149a117e195ada9e0babb4963a11608c"
 LABEL = "com.kdt.LiveSimBooter.sshdog"
 PUBLIC_KEY_TYPES = {"ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521"}
+FISH_CONFIG = b"""status job-control none
+set -g fish_use_posix_spawn 1
+if test -n "$SIMULATOR_SHARED_RESOURCES_DIRECTORY"
+    fish_add_path --path --move "$SIMULATOR_SHARED_RESOURCES_DIRECTORY"/var/jb/{usr/bin,bin,usr/sbin,sbin}
+end
+"""
 
 
 def validate_authorized_keys(path):
@@ -117,8 +123,7 @@ def stage(options):
     write_file(config / "port", (str(options.port) + "\n").encode(), 0o644)
     write_file(config / "ssh_host_rsa_key", options.host_key.read_bytes(), 0o600)
     write_file(config / "ssh_host_rsa_key.pub", public, 0o644)
-    write_file(output / "data/Library/sshdog/xdg/fish/config.fish",
-               b"status job-control none\nset -g fish_use_posix_spawn 1\n", 0o644)
+    write_file(output / "data/Library/sshdog/xdg/fish/config.fish", FISH_CONFIG, 0o644)
     if options.ssh_host:
         entry = "[{}]:{} ".format(options.ssh_host, options.port).encode() + public
         write_file(output / "client/known_hosts", entry, 0o644)

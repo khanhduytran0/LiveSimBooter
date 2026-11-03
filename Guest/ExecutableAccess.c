@@ -1,5 +1,5 @@
 #include "ExecutableAccess.h"
-#include "../ProcessSupport/GuestExecutablePath.h"
+#include "RuntimeDirectories.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -10,6 +10,38 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+static bool insideBootstrap(const LSBGuestRuntimeDirectories *directories, const char *path) {
+    const char *base = LSBGuestStorageRootSpelling(directories->bootstrap, path);
+    size_t length = directories->bootstrapLength - (size_t)(base - directories->bootstrap);
+    return length && !strncmp(path, base, length) && (!path[length] || path[length] == '/');
+}
+
+int LSBResolveBootstrapAccess(const char *guest, const char **path, char resolved[PATH_MAX], bool nofollow) {
+    const LSBGuestRuntimeDirectories *directories;
+    int error = LSBGetRuntimeDirectories(&directories);
+    if (error) return error;
+    if (!LSBGuestPathIsCanonical(*path)) return EINVAL;
+    if (!directories->bootstrapLength) return EACCES;
+
+    const char *suffix = guest + sizeof("/var/jb") - 1;
+    // For AT_SYMLINK_NOFOLLOW only resolve the parent; the native call must still see the final symlink.
+    const char *leaf = nofollow ? strrchr(suffix, '/') : NULL;
+    size_t length = leaf ? (size_t)(leaf - suffix) : strlen(suffix);
+    char candidate[PATH_MAX];
+    if (length >= sizeof(candidate) - directories->bootstrapLength) return ENAMETOOLONG;
+    memcpy(candidate, directories->bootstrap, directories->bootstrapLength);
+    memcpy(candidate + directories->bootstrapLength, suffix, length);
+    candidate[directories->bootstrapLength + length] = 0;
+
+    int saved = errno;
+    if (!realpath(candidate, resolved)) return errno;
+    if (!insideBootstrap(directories, resolved) || strchr(resolved, ':')) return EACCES;
+    if (leaf && strlcat(resolved, leaf, PATH_MAX) >= PATH_MAX) return ENAMETOOLONG;
+    *path = resolved;
+    errno = saved;
+    return 0;
+}
 
 static bool executableMode(const struct stat *metadata, bool effective) {
     uid_t user = effective ? geteuid() : getuid();
@@ -27,13 +59,12 @@ static bool executableMode(const struct stat *metadata, bool effective) {
 }
 
 static bool resolveRuntimePath(const char *path, char canonical[PATH_MAX]) {
-    const char *configuredRoot = getenv("DYLD_ROOT_PATH");
-    char root[PATH_MAX];
-    struct stat rootMetadata;
-    if (!configuredRoot || !*configuredRoot || !realpath(configuredRoot, root) || !realpath(path, canonical) ||
-        !LSBGuestExecutableIsContained(root, canonical))
-        return false;
-    return !stat(root, &rootMetadata) && S_ISDIR(rootMetadata.st_mode);
+    const LSBGuestRuntimeDirectories *directories;
+    if (LSBGetRuntimeDirectories(&directories) || !realpath(path, canonical)) return false;
+    bool bootstrap = insideBootstrap(directories, canonical);
+    if (path[0] == '/' && bootstrap != insideBootstrap(directories, path)) return false;
+    if (bootstrap || LSBGuestPathInsideRoot(canonical, directories->runtime)) return !strchr(canonical, ':');
+    return LSBGuestInstalledApplicationPath(directories->runtime, canonical) != NULL;
 }
 
 static bool executableFile(const char *canonical, bool effective) {
@@ -58,26 +89,31 @@ static bool executableFile(const char *canonical, bool effective) {
 static bool fallbackMode(int mode) { return (mode & X_OK) && !(mode & ~(R_OK | W_OK | X_OK)); }
 
 int LSBAccess(const char *path, int mode) {
-    int savedErrno = errno;
+    char canonical[PATH_MAX];
+    int error = LSBTranslateBootstrapAccessPath(&path, canonical, false);
+    if (error) { errno = error; return -1; }
     // Calls from this image retain the native symbol, as with the existing signal and spawn interposers.
+    if (!fallbackMode(mode) || !path) return access(path, mode);
+    int savedErrno = errno;
     int result = access(path, mode);
     int nativeErrno = errno;
-    if (!result || nativeErrno != EPERM || !fallbackMode(mode) || !path) return result;
+    if (!result || nativeErrno != EPERM) return result;
     // Keep native read/write and directory-traversal policy; manual loading additionally requires a readable file.
-    char canonical[PATH_MAX];
-    bool allowed = resolveRuntimePath(path, canonical) && !access(path, (mode & ~X_OK) | R_OK) && executableFile(canonical, false);
+    bool allowed = (path == canonical || resolveRuntimePath(path, canonical)) && !access(path, (mode & ~X_OK) | R_OK) && executableFile(canonical, false);
     errno = allowed ? savedErrno : nativeErrno;
     return allowed ? 0 : result;
 }
 
 int LSBFAccessAt(int directory, const char *path, int mode, int flags) {
+    char canonical[PATH_MAX];
+    int error = LSBTranslateBootstrapAccessPath(&path, canonical, flags & AT_SYMLINK_NOFOLLOW);
+    if (error) { errno = error; return -1; }
+    if (!fallbackMode(mode) || (flags & ~AT_EACCESS) || !path || (path[0] != '/' && directory != AT_FDCWD)) return faccessat(directory, path, mode, flags);
     int savedErrno = errno;
     int result = faccessat(directory, path, mode, flags);
     int nativeErrno = errno;
-    if (!result || nativeErrno != EPERM || !fallbackMode(mode) || (flags & ~AT_EACCESS) || !path ||
-        (path[0] != '/' && directory != AT_FDCWD)) return result;
-    char canonical[PATH_MAX];
-    bool allowed = resolveRuntimePath(path, canonical) && !faccessat(directory, path, (mode & ~X_OK) | R_OK, flags) &&
+    if (!result || nativeErrno != EPERM) return result;
+    bool allowed = (path == canonical || resolveRuntimePath(path, canonical)) && !faccessat(directory, path, (mode & ~X_OK) | R_OK, flags) &&
                    executableFile(canonical, (flags & AT_EACCESS) != 0);
     errno = allowed ? savedErrno : nativeErrno;
     return allowed ? 0 : result;

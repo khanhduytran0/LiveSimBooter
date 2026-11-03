@@ -74,10 +74,10 @@ physical paths. Copy those two trees under `<selected store group>/LSB/iOS/23A34
 uid 501, with its host private key and authorized_keys mode 0600 and config directory mode 0700. Create
 `data/Library/Logs` if needed. No checksum pass after copying is required by this workflow.
 
-The generated environment sets `SSHDOG_SHELL` to the **physical** Fish executable, sets HOME/CFFIXED_USER_HOME to the
-physical data path, and points XDG_CONFIG_HOME to the staged Fish configuration. `SSHDOG_SHELL` is only a pathname;
-appended `-C` arguments fail upstream's `os.Stat` check and cause fallback to `/bin/sh`. The Fish file instead sets
-`status job-control none` and `fish_use_posix_spawn`. The server reads `./config`, so its working directory matters.
+The generated job sets `SSHDOG_SHELL` to the physical Fish executable, `HOME` and `CFFIXED_USER_HOME` to the guest data directory,
+and `XDG_CONFIG_HOME` to the SSH-specific Fish configuration. The Fish startup file disables job control, enables `posix_spawn`,
+and prepends the installed Procursus command directories to `PATH`. This lets a remote command find `apt` by name even when
+its starting environment contains only runtime tools. The server reads `./config` from its working directory.
 No `config/daemon` marker is installed: launchd owns the foreground process. Port 2223 keeps it separate from native phone
 SSH on 2222; upstream stores ports in a signed 16-bit value, so the tool accepts only 1–32767.
 
@@ -106,6 +106,12 @@ twice. Use `print system` or `list` for diagnostics; use `user/501` for the test
 `kickstart -k user/501/com.kdt.LiveSimBooter.sshdog` requests a restart, and `bootout user/501/com.kdt.LiveSimBooter.sshdog`
 removes it without restarting the simulator session.
 
+After a simulator reboot, run this in the Fish tab to start the service again.
+
+```fish
+launchctl bootstrap user/501 "$DYLD_ROOT_PATH/System/Library/LaunchDaemons/com.kdt.LiveSimBooter.sshdog.plist"
+```
+
 Start validation without a PTY and inspect the daemon log alongside command output:
 
 ```sh
@@ -117,6 +123,9 @@ ssh -T -i "$LSB_CLIENT_PRIVATE_KEY" -o IdentitiesOnly=yes \
 The SSH username does not select a separate guest account; the daemon runs as its existing guest uid. Upstream's channel
 exit-status field does not consistently reflect ordinary child failures: the tested `exit 23` reached Go as status 23 but
 the SSH client returned 0. Inspect command output and the daemon log instead of treating SSH exit 0 as proof of success.
+
+To copy output to the Mac clipboard, pipe the local SSH command to `pbcopy`. With Procursus installed, for example,
+run the connection command above with `'apt-cache policy cmake' | pbcopy` in place of `'echo sshdog-fish-ready; df -h'`.
 
 ## Device checkpoint
 

@@ -223,8 +223,9 @@ on the second Home Screen page, confirming icon presentation.
 ## Installed executables and remaining validation
 
 [GuestExecutablePath.h](../ProcessSupport/GuestExecutablePath.h) now classifies canonical executable paths inside
-RuntimeRoot or this runtime's `data/Containers/Bundle/Application/<container>/<App>.app/` tree, including nested app
-extensions/XPC/framework executables. Data homes, Imports staging, other runtimes and paths escaping through symlinks
+RuntimeRoot, the selected runtime's [optional bootstrap](fish.md#optional-procursus-commands) in `data/var/jb`, or its
+`data/Containers/Bundle/Application/<container>/<App>.app/` tree, including nested app extensions/XPC/framework executables.
+Data homes, Imports staging, other runtimes and paths escaping through symlinks
 are not executable roots. [ExecutablePath](../LiveProcess/ExecutablePath.c) and the [broker](../Host/Broker.m) use the
 same containment rules and retain opened-FD identity checks. System roles retain virtual identities; installed apps retain
 their physical paths, so adding data apps does not grant native helper roles.

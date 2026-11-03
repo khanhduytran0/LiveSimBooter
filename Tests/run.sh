@@ -96,7 +96,7 @@ xcrun --sdk macosx clang++ -std=c++17 -Wall -Wextra -Werror -arch arm64 -fno-bui
 "$test_directory/DebuggerNotification"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/SpawnPlanTests.c Guest/SpawnAttributes.c Guest/ProcessSession.c Guest/ProcessIdentity.c ProcessSupport/SpawnPlan.c ProcessSupport/ChildStatus.c \
-    Guest/ExecutableAccess.c LiveProcess/ExecutablePath.c -DLSB_EXECUTABLE_ACCESS_TESTING \
+    Guest/ExecutableAccess.c Guest/RuntimeDirectories.c LiveProcess/ExecutablePath.c -DLSB_EXECUTABLE_ACCESS_TESTING \
     -DLSB_PROCESS_IDENTITY_TESTING -DLSB_PROCESS_SESSION_TESTING -o "$test_directory/SpawnPlan"
 "$test_directory/SpawnPlan"
 LSB_SIMULATE_SESSIONS=1 LSB_TEST_SESSION_GROUP=1 "$test_directory/SpawnPlan"
@@ -177,7 +177,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/PeerDebuggerTests.c ProcessSupport/PeerDebugger.c -o "$test_directory/PeerDebugger"
 "$test_directory/PeerDebugger"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib -DLSB_INSPECTION_INTERPOSE_FIXTURE \
-    Guest/ProcessInspection.c Tests/ProcessInspectionInterposeTests.c -o "$test_directory/libProcessInspection.dylib"
+    Guest/ProcessInspection.c Guest/RuntimeDirectories.c Tests/ProcessInspectionInterposeTests.c -o "$test_directory/libProcessInspection.dylib"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ProcessInspectionInterposeTests.c -o "$test_directory/ProcessInspectionInterpose"
 DYLD_INSERT_LIBRARIES="$test_directory/libProcessInspection.dylib" "$test_directory/ProcessInspectionInterpose"
@@ -256,6 +256,8 @@ python3 -B Tests/SetupIOS26SlidableCacheTests.py
 python3 -B Tests/SetupIOS26PlaceholderCacheTests.py
 python3 -B Tests/CacheAliasTrieTests.py
 python3 -B Tests/SetupIOS26RuntimeTests.py
+python3 -B Tests/PrepareProcursusTests.py
+python3 -B Tests/InstallProcursusTests.py
 python3 -B Tests/LaunchdIdentityPatchTests.py
 python3 -B Tests/ContainerMetadataPatchTests.py
 python3 -B Tests/KeyboardHapticsPatchTests.py
@@ -295,7 +297,8 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/LaunchdProbeTests.c ProcessSupport/LaunchdProbe.c -o "$test_directory/LaunchdProbe"
 "$test_directory/LaunchdProbe"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/LaunchdCompatibilityTests.c -o "$test_directory/LaunchdCompatibility"
+    Tests/LaunchdCompatibilityTests.c Guest/ExecutableAccess.c Guest/RuntimeDirectories.c \
+    -DLSB_EXECUTABLE_ACCESS_TESTING -o "$test_directory/LaunchdCompatibility"
 "$test_directory/LaunchdCompatibility"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/FileLockCompatibilityTests.c -o "$test_directory/FileLockCompatibility"

@@ -1,5 +1,6 @@
 #include "ProcessInspection.h"
 #include "ProcessIdentity.h"
+#include "RuntimeDirectories.h"
 #if defined(LSB_GUEST_RUNTIME) || defined(LSB_PROCESS_INSPECTION_TESTING)
 #include "ProcessDebugger.h"
 #endif
@@ -32,22 +33,6 @@ _Static_assert(sizeof(InspectionBSDInfo) == LSB_PEER_SHORT_INFO_BYTES, "short BS
 static _Atomic(bool) inspectionReady, hasProcessSnapshot;
 static pthread_mutex_t snapshotLock = PTHREAD_MUTEX_INITIALIZER;
 static LSBProcessList *processSnapshot;
-static char inspectionRuntimeRoot[PATH_MAX];
-static int inspectionRootError = ENOENT;
-
-static int configureInspectionRoot(const char *root) {
-    inspectionRuntimeRoot[0] = '\0';
-    if (!root || !*root) return ENOENT;
-    if (root[0] != '/') return EINVAL;
-    char canonical[PATH_MAX];
-    if (!realpath(root, canonical)) return errno;
-    if (!canonical[1]) return EINVAL;
-    struct stat metadata;
-    if (stat(canonical, &metadata)) return errno;
-    if (!S_ISDIR(metadata.st_mode)) return ENOTDIR;
-    strcpy(inspectionRuntimeRoot, canonical);
-    return 0;
-}
 
 static bool readBytes(const void *input, void *output, size_t size) {
     mach_vm_size_t copied = 0;
@@ -233,8 +218,9 @@ bool LSBInspectionPIDPath(int pid, void *buffer, uint32_t size, int *result) {
     for (uint32_t i = 0; i < processSnapshot->count; ++i) if (processSnapshot->records[i].guestPID == pid) {
         // Like macOS Simulator, proc_pidpath exposes physical runtime and installed-app executables for bundle/resource lookup.
         char path[PATH_MAX];
-        int pathError = inspectionRootError ? inspectionRootError :
-            LSBGuestExecutablePhysicalPath(inspectionRuntimeRoot, processSnapshot->records[i].executablePath, path, sizeof(path));
+        const LSBGuestRuntimeDirectories *directories;
+        int pathError = LSBGetRuntimeDirectories(&directories);
+        if (!pathError) pathError = LSBGuestExecutablePhysicalPath(directories->runtime, processSnapshot->records[i].executablePath, path, sizeof(path));
         size_t length = pathError ? 0 : strlen(path);
         if (!buffer) error = EFAULT;
         else if (pathError) error = pathError;
@@ -250,9 +236,6 @@ bool LSBInspectionPIDPath(int pid, void *buffer, uint32_t size, int *result) {
 
 #ifndef LSB_PROCESS_INSPECTION_TESTING
 __attribute__((constructor)) static void initializeInspection(void) {
-    int saved = errno;
-    inspectionRootError = configureInspectionRoot(getenv("DYLD_ROOT_PATH"));
-    errno = saved;
     atomic_store_explicit(&inspectionReady, true, memory_order_release);
 }
 __attribute__((used, section("__DATA,__interpose"))) static const struct { const void *replacement, *original; } inspectionInterpose[] = {

@@ -352,6 +352,8 @@ Use `--offline` once Cargo dependencies are already available. Inspect the resul
 the recorded build loads only libiconv and libSystem. The terminal helper disables job control and uses the simulated
 spawn/SETEXEC/wait path. Generic fork/execve and kernel PTYs remain unsupported. See [Fish](fish.md).
 
+Once Fish works, you can [install the optional Procursus command-line tools and APT](procursus.md).
+
 ## Stage resources, apps, and signed loose code
 
 The runtime stager inventories the selected original trees before copying; default scopes include the app/system/library

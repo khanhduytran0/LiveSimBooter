@@ -17,6 +17,7 @@ static void *testKinfoAlloc(size_t, size_t);
 #define mach_port_mod_refs testPortModRefs
 #define calloc testKinfoAlloc
 #define LSB_PROCESS_INSPECTION_TESTING
+#include "../Guest/RuntimeDirectories.c"
 #include "../Guest/ProcessInspection.c"
 #undef sysctl
 #undef proc_pid_rusage
@@ -174,17 +175,23 @@ static void testValidation(void) {
     free(list);
 }
 
+static void expectRootError(const char *root, int error) {
+    directoriesError = configureRuntimeDirectories(root);
+    const LSBGuestRuntimeDirectories *resolved = NULL;
+    assert(LSBGetRuntimeDirectories(&resolved) == error && !resolved);
+}
+
 int main(void) {
     testValidation(); listCalls = 0;
     char temporary[] = "/tmp/LSBInspection.XXXXXX", canonical[PATH_MAX], physicalDF[PATH_MAX];
     assert(mkdtemp(temporary) && realpath(temporary, canonical));
-    assert(configureInspectionRoot(NULL) == ENOENT && !inspectionRuntimeRoot[0]);
-    assert(configureInspectionRoot("relative") == EINVAL && !inspectionRuntimeRoot[0]);
-    assert(configureInspectionRoot("/") == EINVAL && !inspectionRuntimeRoot[0]);
-    assert(configureInspectionRoot("/dev/null") == ENOTDIR && !inspectionRuntimeRoot[0]);
-    assert(configureInspectionRoot("/nonexistent-LSB-runtime") == ENOENT && !inspectionRuntimeRoot[0]);
-    inspectionRootError = configureInspectionRoot(temporary);
-    assert(!inspectionRootError && !strcmp(inspectionRuntimeRoot, canonical)); // Resolve the /tmp alias once, after guest TLS is available.
+    expectRootError(NULL, ENOENT);
+    expectRootError("relative", EINVAL);
+    expectRootError("/", EINVAL);
+    expectRootError("/dev/null", ENOTDIR);
+    expectRootError("/nonexistent-LSB-runtime", ENOENT);
+    directoriesError = configureRuntimeDirectories(temporary);
+    assert(!directoriesError && !strcmp(directories.runtime, canonical)); // Resolve the /tmp alias once, after guest TLS is available.
     assert(snprintf(physicalDF, sizeof(physicalDF), "%s/bin/df", canonical) > 0);
     int physicalLength = (int)strlen(physicalDF);
     int maximum[] = {CTL_KERN, KERN_MAXPROC}, all[] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
@@ -258,15 +265,17 @@ int main(void) {
     strcpy(processSnapshot->records[1].executablePath, installed);
     assert(LSBInspectionPIDPath(22, path, sizeof(path), &pathResult) && !pathResult && errno == EACCES);
     strcpy(processSnapshot->records[1].executablePath, "/bin/df");
-    inspectionRootError = configureInspectionRoot(NULL);
+    directoriesError = configureRuntimeDirectories(NULL);
     assert(LSBInspectionPIDPath(22, path, sizeof(path), &pathResult) && !pathResult && errno == ENOENT);
-    inspectionRootError = 0;
-    memset(inspectionRuntimeRoot, 'a', sizeof(inspectionRuntimeRoot));
-    inspectionRuntimeRoot[0] = '/'; inspectionRuntimeRoot[sizeof(inspectionRuntimeRoot) - 1] = '\0';
+    directoriesError = configureRuntimeDirectories(temporary);
+    assert(!directoriesError);
+    char *longIdentity = processSnapshot->records[1].executablePath;
+    size_t identitySize = sizeof(processSnapshot->records[1].executablePath);
+    memset(longIdentity, 'a', identitySize - 1);
+    longIdentity[0] = '/'; longIdentity[identitySize - 1] = '\0';
     memset(path, 0xa5, sizeof(path));
     assert(LSBInspectionPIDPath(22, path, sizeof(path), &pathResult) && !pathResult && errno == ENAMETOOLONG && (unsigned char)path[0] == 0xa5);
-    inspectionRootError = configureInspectionRoot(temporary);
-    assert(!inspectionRootError);
+    strcpy(longIdentity, "/bin/df");
     unsigned calls = listCalls;
     int self[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, 21};
     nativeError = 0;

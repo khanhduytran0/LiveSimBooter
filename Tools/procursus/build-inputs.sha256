@@ -1,0 +1,21 @@
+# SHA-256 and fetch path. Patch paths are relative to the pinned Procursus commit; package paths are relative to apt.procurs.us.
+52ebe6b390f309b1f8fdb8e4aef276b2ae58703b34121d8bac026f8d831eae52  https://codeload.github.com/Debian/apt/tar.gz/refs/tags/2.9.4
+c1ee3a8333e0e0c0c1c01ab7f699db7880ffc11c6581aeeeee95a399bbec38f3  build_patch/apt/algorithms.diff
+9bf090600e52a5af1ad26fbbf617c19d2b99686c51eeeed0e39ce1d7452a2c8a  build_patch/apt/compile.diff
+fd91f106cd95265335388118d78bf93bd2a6dcab3c8b287d7960a477a5dcaf8a  build_patch/apt/fork-fd-close.diff
+e34cb47f2c9accdb823826b0985a96c56c596be865517db9a96aa98942cd86c5  build_patch/apt/mmap.diff
+218ee7571e48c72ac2b94ed877be202e562c8e021ec77af670d46a359f3e39da  build_patch/apt/path.diff
+c91bd19691324674d325a435ff193c84b76c06858f6e4fbc8650256d240c9a13  build_patch/apt/private-output.diff
+146917df904aa61a011232a0712a043a9fb5540af4a05ac622cd59bced5d97a3  build_patch/apt/space-calculation.diff
+35d1de91d4ce249545693726e784cbb33cd581867220fd9dec80eaef9ef9de20  build_patch/apt/useragent.diff
+f971872f4d768ca17f27785d0dc9e323e53231c2e28bbe8bf07423a3c30fc9f7  build_patch/apt/zstd-eipp-log.diff
+02b5f758cc5684eeb04f44815989b4c7965a86881176d815844f86bcaa7abea4  pool/main/iphoneos-arm64-rootless/1900/berkeleydb/libdb18.1-dev_18.1.40-1_iphoneos-arm64.deb
+8eb71c15b13f87cc9dfc864ca1f09f3927c9caebe0da7666aa578823a04d3c0b  pool/main/iphoneos-arm64-rootless/1900/gettext/libintl-dev_0.22_iphoneos-arm64.deb
+406720bf5f76642ce7b4648378fda84d3c507b5d530f9d8c197471c3b5a22a87  pool/main/iphoneos-arm64-rootless/1900/libgcrypt/libgcrypt20-dev_1.10.3_iphoneos-arm64.deb
+30f71c2c9fee88394d1a0931a4e8c1722515d5a3ed3bb2c13043731d39f2ad71  pool/main/iphoneos-arm64-rootless/1900/libgpg-error/libgpg-error-dev_1.48_iphoneos-arm64.deb
+dea5d00bda0dcd747087b3a9f5fd1c987130c620310cb25311301c744144fb30  pool/main/iphoneos-arm64-rootless/1900/libiosexec/libiosexec-dev_1.3.1_iphoneos-arm64.deb
+5f2745b612cf393798af464155972cf3c61ddc54c25d1590f530062f306ec6ae  pool/main/iphoneos-arm64-rootless/1900/lz4/liblz4-dev_1.9.4_iphoneos-arm64.deb
+7a75ad338d2936679fcd742b4ad46defdf4f1ced3ee9d8479ec5ad80cf93f824  pool/main/iphoneos-arm64-rootless/1900/triehash/triehash_0.3_all.deb
+0c199eee933a49f185edc1ebdcb66c4284c78eee3bc454792f90fbea1c448995  pool/main/iphoneos-arm64-rootless/1900/xxhash/libxxhash-dev_0.8.2_iphoneos-arm64.deb
+e3d8eb03453c461f8dc4a6457f9786dc1aaea9011753842ba421d82c27ac705f  pool/main/iphoneos-arm64-rootless/1900/xz/liblzma-dev_5.4.4_iphoneos-arm64.deb
+4062ea544cb0b75b0c9280aa1860cac02f8dedc75827e1e3ae91fd025dfaedce  pool/main/iphoneos-arm64-rootless/1900/zstd/libzstd-dev_1.5.5_iphoneos-arm64.deb

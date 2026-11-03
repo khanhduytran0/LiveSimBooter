@@ -40,7 +40,7 @@ static void makeDirectories(const char *path) {
     assert(!mkdir(copy, 0700) || errno == EEXIST);
 }
 
-static void testInstalledApplications(const char *base, const char *root) {
+static void testDataExecutables(const char *base, const char *root) {
     char data[PATH_MAX], app[PATH_MAX], image[PATH_MAX], path[PATH_MAX], output[PATH_MAX];
     join(data, base, "data");
     join(app, data, "Containers/Bundle/Application/11111111-1111-1111-1111-111111111111/Example.app");
@@ -77,6 +77,31 @@ static void testInstalledApplications(const char *base, const char *root) {
     assert(LSBGuestExecutablePhysicalPath(root, path, output, sizeof(output)) == EACCES);
     join(path, root, "bin/df");
     assert(!LSBGuestExecutablePhysicalPath(root, "/bin/df", output, sizeof(output)) && !strcmp(output, path));
+
+    // Bootstrap executables keep their physical identity for ps and never acquire a simulator service's virtual path through a symlink.
+    char jb[PATH_MAX], tool[PATH_MAX], runtimeFile[PATH_MAX];
+    join(jb, data, "var/jb"); join(path, jb, "usr/bin"); makeDirectories(path);
+    join(tool, path, "example"); makeFile(tool);
+    resolves(root, tool, tool);
+    resolves(root, "/var/jb/usr/bin/example", tool);
+    resolves(root, "/private/var/jb/usr/bin/example", tool);
+    join(path, root, "/var/jb/usr/bin/example"); resolves(root, path, tool); // launchd prefixes RuntimeRoot + "/"
+    join(path, jb, "internal"); assert(!symlink("usr/bin/example", path)); resolves(root, "/var/jb/internal", tool);
+    join(path, jb, "bad:name"); makeFile(path); fails(root, "/var/jb/bad:name", EACCES);
+    join(runtimeFile, root, "bin/df");
+    join(path, jb, "system"); assert(!symlink(runtimeFile, path)); fails(root, path, EACCES);
+    fails(root, "/var/jb/system", EACCES);
+    join(path, jb, "installed"); assert(!symlink(image, path)); fails(root, "/private/var/jb/installed", EACCES);
+    join(path, jb, "native"); assert(!symlink("/usr/bin/false", path)); fails(root, path, EACCES);
+    join(path, app, "bootstrap"); assert(!symlink(tool, path)); fails(root, path, EACCES);
+    join(path, data, "var/jb-other/file"); join(alias, data, "var/jb-other"); makeDirectories(alias); makeFile(path);
+    fails(root, path, EACCES);
+    fails(root, "/var/jb/missing", ENOENT); fails(root, "/var/jb/../jb/usr/bin/example", EINVAL);
+    fails(root, "/var/jb", EINVAL);
+    assert(!LSBGuestExecutablePhysicalPath(root, tool, output, sizeof(output)) && !strcmp(output, tool));
+    cwd = open(".", O_RDONLY | O_DIRECTORY); assert(cwd >= 0 && !chdir(jb));
+    resolves(root, "internal", tool); fails(root, "system", EACCES); assert(!fchdir(cwd) && !close(cwd));
+
     char *paths[] = {data, NULL}; FTS *tree = fts_open(paths, FTS_PHYSICAL | FTS_NOCHDIR, NULL); assert(tree);
     FTSENT *entry;
     while ((entry = fts_read(tree))) {
@@ -152,7 +177,7 @@ int main(void) {
     oversized[0] = '/'; oversized[PATH_MAX] = 0;
     fails(root, oversized, ENAMETOOLONG);
 
-    testInstalledApplications(base, root);
+    testDataExecutables(base, root);
     oversized[PATH_MAX - 1] = 0;
     fails(root, oversized, ENAMETOOLONG);
 

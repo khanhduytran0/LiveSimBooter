@@ -14,6 +14,16 @@ logical job PID 10516 retained across native PIDs 10516, 10517 and 10518. Fish s
 `DF_STATUS=0`, and the broker recorded wait status `0x0`. Evidence:
 [`console-path.log`](../tmp/terminal-launchd-tests/console-path.log). The later cache-base trial is recorded below.
 
+## Optional Procursus commands
+
+Fish searches the installed `data/var/jb/{usr/bin,bin,usr/sbin,sbin}` directories before the runtime's standard command
+directories. Use `command -s ls` to see which file Fish selected, or `command printf` to select an external command over a builtin.
+See [Procursus setup and APT verification](procursus.md) for installation and the supported package operations.
+
+Every simulator guest redirects `/var/jb` and `/private/var/jb` for `stat`, `access`, and `faccessat`. The native host and native
+helpers keep their own filesystem view. Each guest caches the physical bootstrap prefix at startup and resolves the target on
+each matching call, or its parent for `AT_SYMLINK_NOFOLLOW`, so subsequent package and symlink changes are visible.
+
 Settings contains one **Silent background audio** switch, off by default, with no separate status row. An explicit opt-in
 is saved and starts native silent playback that mixes with other audio; turning it off stops playback and deactivates the
 audio session. Interruptions or errors appear in the footer. This is a native host option, not simulator audio support or

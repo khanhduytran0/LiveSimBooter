@@ -12,7 +12,7 @@ extern char **environ;
 
 static unsigned platform = 7, replacementCalls;
 static int terminalFDs = 1;
-static char expectedRoot[PATH_MAX], expectedData[PATH_MAX];
+static char expectedRoot[PATH_MAX], expectedData[PATH_MAX], expectedBootstrapPath[PATH_MAX * 2 + 32];
 
 unsigned dyld_get_active_platform(void) { return platform; }
 static int testIsATTY(int descriptor) { return terminalFDs && descriptor >= 0 && descriptor <= 2; }
@@ -27,9 +27,9 @@ static int testSpawn(pid_t *pid, const char *path, const posix_spawn_file_action
     assert(strstr(arguments[5], "status job-control none") && strstr(arguments[5], "fish_use_posix_spawn 1") && !arguments[6]);
     assert(environment == environ && !strcmp(getenv("TERM"), "xterm-256color") && !strcmp(getenv("HOME"), expectedData));
     assert(!strcmp(getenv("CFFIXED_USER_HOME"), expectedData));
-    char pathExpected[PATH_MAX * 5 + 80], cwd[PATH_MAX];
-    assert(snprintf(pathExpected, sizeof(pathExpected), "%s/usr/local/bin:%s/bin:%s/usr/bin:%s/usr/sbin:%s/sbin",
-                    expectedRoot, expectedRoot, expectedRoot, expectedRoot, expectedRoot) > 0);
+    char pathExpected[sizeof(expectedBootstrapPath) + PATH_MAX * 5 + 80], cwd[PATH_MAX];
+    assert(snprintf(pathExpected, sizeof(pathExpected), "%s%s/usr/local/bin:%s/bin:%s/usr/bin:%s/usr/sbin:%s/sbin",
+                    expectedBootstrapPath, expectedRoot, expectedRoot, expectedRoot, expectedRoot, expectedRoot) > 0);
     assert(!strcmp(getenv("PATH"), pathExpected) && getcwd(cwd, sizeof(cwd)) && !strcmp(cwd, expectedData));
     return EACCES; // A failed replacement is reported; the helper must not fall back to an ordinary child spawn.
 }
@@ -67,6 +67,12 @@ int main(void) {
     assert(terminalFishMain() == 1 && !replacementCalls && !rmdir(previousData));
     assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", expectedData, 1));
     assert(terminalFishMain() == 127 && replacementCalls == 1);
+    // The helper leaves cwd at data. An absent directory and a link out of var/jb must stay off PATH.
+    assert(!mkdir("var", 0700) && !mkdir("var/jb", 0700) && !mkdir("var/jb/usr", 0700) && !mkdir("var/jb/usr/bin", 0700));
+    assert(!mkdir("var/jb/bin", 0700) && !symlink(expectedRoot, "var/jb/sbin"));
+    assert(snprintf(expectedBootstrapPath, sizeof(expectedBootstrapPath), "%s/var/jb/usr/bin:%s/var/jb/bin:", expectedData, expectedData) > 0);
+    assert(terminalFishMain() == 127 && replacementCalls == 2);
+    assert(!unlink("var/jb/sbin") && !rmdir("var/jb/bin") && !rmdir("var/jb/usr/bin") && !rmdir("var/jb/usr") && !rmdir("var/jb") && !rmdir("var"));
     assert(!chdir(cwd) && !rmdir(expectedData) && !rmdir(expectedRoot) && !rmdir(base));
     puts("TerminalFish: platform/PTY/data-root guards, controlled environment, SETEXEC-only Fish replacement and failure reporting passed");
     return 0;

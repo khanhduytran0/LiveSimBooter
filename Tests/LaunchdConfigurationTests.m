@@ -56,6 +56,59 @@ static void assertPlistBoolean(id value, BOOL expected) {
     assert([value boolValue] == expected);
 }
 
+static void testProcursusAptDefault(LSBReceivedMessage *message, NSString *group) {
+    NSFileManager *files = NSFileManager.defaultManager;
+    for (NSString *folder in @[@"apt test", @"unrepresentable\"root"]) {
+        NSString *build = [group stringByAppendingPathComponent:folder];
+        NSString *root = [build stringByAppendingPathComponent:@LSB_RUNTIME_DIRECTORY];
+        NSString *data = [build stringByAppendingPathComponent:@LSB_DATA_DIRECTORY];
+        NSString *apt = [data stringByAppendingPathComponent:@"var/jb/usr/bin/apt"];
+        NSString *output = [data stringByAppendingPathComponent:@"var/run/LiveSimBooter-apt.conf"];
+        NSString *bootstrap = [data stringByAppendingPathComponent:@"var/run/LiveSimBooter-launchd-bootstrap.plist"];
+        assert([files createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:NULL]);
+        assert([files createDirectoryAtPath:apt.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:NULL]);
+        assert(!symlink("/usr/bin/true", apt.fileSystemRepresentation));
+        assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, NULL));
+        assert(!readPlist(bootstrap)[@"Bootstrap"][@"ChildDefaults"][@"APT_CONFIG"] && ![files fileExistsAtPath:output]);
+        dispose(message);
+        assert(!unlink(apt.fileSystemRepresentation) && [files createFileAtPath:apt contents:nil attributes:nil]);
+        const char *caller[] = {"APT_CONFIG=/custom.conf", NULL};
+        assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, caller));
+        NSDictionary *scopes = readPlist(bootstrap)[@"Bootstrap"];
+        assert(!scopes[@"Self"][@"APT_CONFIG"] && !scopes[@"Child"][@"APT_CONFIG"]);
+        assert(!strcmp(environmentValue(&message->plan, "APT_CONFIG"), "/custom.conf"));
+        dispose(message);
+        if ([folder containsString:@"\""]) {
+            assert(!scopes[@"ChildDefaults"][@"APT_CONFIG"] && ![files fileExistsAtPath:output]);
+            continue;
+        }
+        assert([scopes[@"ChildDefaults"][@"APT_CONFIG"] isEqual:output]);
+        NSString *expected = [NSString stringWithFormat:@"RootDir \"%@\";\nAPT::Architectures { \"iphoneos-arm64\"; };\n", data];
+        assert([[NSString stringWithContentsOfFile:output encoding:NSUTF8StringEncoding error:NULL] isEqual:expected]);
+        NSString *backup = [build stringByAppendingPathComponent:@"old-config"];
+        assert(!link(output.fileSystemRepresentation, backup.fileSystemRepresentation) && !chmod(backup.fileSystemRepresentation, 0400));
+        NSString *ca = [data stringByAppendingPathComponent:@"var/jb/etc/ssl/certs/cacert.pem"];
+        assert([files createDirectoryAtPath:ca.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:NULL]);
+        assert([files createFileAtPath:ca contents:nil attributes:nil]);
+        assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, NULL));
+        NSString *withCA = [expected stringByAppendingFormat:@"Acquire::https::CAInfo \"%@\";\n", ca];
+        assert([[NSString stringWithContentsOfFile:output encoding:NSUTF8StringEncoding error:NULL] isEqual:withCA]);
+        struct stat old, next;
+        assert(!stat(backup.fileSystemRepresentation, &old) && !stat(output.fileSystemRepresentation, &next));
+        assert(old.st_ino != next.st_ino && (old.st_mode & 0777) == 0400 && (next.st_mode & 0777) == 0600);
+        dispose(message);
+        assert(!unlink(ca.fileSystemRepresentation) && !symlink(backup.fileSystemRepresentation, ca.fileSystemRepresentation));
+        assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, NULL));
+        assert([[NSString stringWithContentsOfFile:output encoding:NSUTF8StringEncoding error:NULL] isEqual:expected]);
+        dispose(message);
+        assert(!unlink(output.fileSystemRepresentation) && !symlink(backup.fileSystemRepresentation, output.fileSystemRepresentation));
+        assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, NULL));
+        assert(!readPlist(bootstrap)[@"Bootstrap"][@"ChildDefaults"][@"APT_CONFIG"]);
+        assert(!lstat(output.fileSystemRepresentation, &next) && S_ISLNK(next.st_mode));
+        dispose(message);
+    }
+}
+
 static void testWebContentStartupEnvironment(LSBReceivedMessage *message, NSString *root, NSString *dataPath, NSString *configPath) {
     NSString *warningPath = [dataPath stringByAppendingPathComponent:@"var/run/LiveSimBooter-memory-warnings"];
     NSDictionary *expected = @{@"JSC_useJIT": @"false", @"GIGACAGE_ENABLED": @"false", @"SIMULATOR_MEMORY_WARNINGS": warningPath};
@@ -1056,6 +1109,7 @@ int main(void) {
         assert(write(message->fds[1], "again\n", 6) == 6);
         dispose(message);
         assert([[NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL] isEqualToString:@"stdout\nstderr\nagain\n"]);
+        testProcursusAptDefault(message, group);
         testWebContentStartupEnvironment(message, root, dataPath, configPath);
         testDeviceProfile(message, root, configPath);
         testDFMode(message, root, dataPath, configPath, inherited);

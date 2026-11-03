@@ -58,6 +58,7 @@ Historical sections below describe earlier cache layouts and failures; use the s
 - [Metal](metal.md): isolated native service, stock guest compiler registration, and verified shader-based triangle rendering.
 - [Native Metal backend](../NativeMetal/README.md): host-selected roles, pinned metadata adaptation, signing and fixed-path packaging.
 - [Bash](bash.md) covers the copied stack and heap, interactive job control, pipelines, background waits, parenthesized subshells, command substitution and the on-device tests.
+- [Procursus](procursus.md) covers installing or patching the guest bootstrap and verifying APT repository updates.
 - [Fish](fish.md): unmodified-source shell results, executable-access compatibility, and interactive startup.
 - [Fake terminal](fake-pty.md): launchd-owned Fish tab, socket transport, guest terminal controls, native keyboard/display, and validation limits.
 - [Creation mask](creation-mask.md): tracked `umask` state for spawning after guest worker threads start on Darwin 25.

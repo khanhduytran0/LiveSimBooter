@@ -2736,6 +2736,8 @@ static int prepareRuntimeCache(void) {
             sessionCacheBase = base;
             memcpy(sessionCacheUUID, info.uuid, sizeof(sessionCacheUUID));
             fprintf(stderr, "[broker] Simulator cache base=0x%llx DATA=%s (%s)\n", base, prepared.fileName, prepared.reused ? "reused" : "created");
+            int cleanupError = LSBRemoveOldSlidableData(directoryFD, prepared.fileName);
+            if (cleanupError) fprintf(stderr, "[broker] Could not remove old simulator cache DATA: %s\n", strerror(cleanupError));
         }
     }
     if (cacheFD >= 0) close(cacheFD);

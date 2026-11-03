@@ -139,6 +139,30 @@ static void makeCacheForProfile(int fd, LSBSlidableCacheProfileKind kind) {
     }
     uint64_t mask = UINT64_C(0x007ffffffffffff8); assert(!writeAt(fd, &mask, sizeof(mask), 0x61bb8));
 }
+static void checkOldDataCleanup(int dir, const char *active) {
+    const char *stale[] = {
+        "lsb-slide-f79708e3-14b8-5968-a655-9e5e5791efdd-300000000.data",
+        "lsb-slide-1a2b3c4d-1234-1234-1234-112233445566-7000000000.data",
+    };
+    const char *keep[] = {
+        ".lsb-slide-f79708e3-14b8-5968-a655-9e5e5791efdd-300000000.data.deadbeef.tmp",
+        "lsb-slide-f79708e3-14b8-5968-a655-9e5e5791efdd-300000000.data.bak",
+        "lsb-slide-not-a-uuid-300000000.data",
+        "lsb-slide-f79708e3-14b8-5968-a655-9e5e5791efdd-other.data",
+    };
+    const char *link = "lsb-slide-f79708e3-14b8-5968-a655-9e5e5791efdd-400000000.data";
+    const char *folder = "lsb-slide-f79708e3-14b8-5968-a655-9e5e5791efdd-500000000.data";
+    for (unsigned i = 0; i < sizeof(stale) / sizeof(stale[0]); ++i) assert(!close(openat(dir, stale[i], O_CREAT | O_EXCL | O_WRONLY, 0444)));
+    for (unsigned i = 0; i < sizeof(keep) / sizeof(keep[0]); ++i) assert(!close(openat(dir, keep[i], O_CREAT | O_EXCL | O_WRONLY, 0600)));
+    assert(!symlinkat("cache", dir, link) && !mkdirat(dir, folder, 0700));
+    assert(LSBRemoveOldSlidableData(dir, "") == EINVAL && !faccessat(dir, stale[0], F_OK, 0));
+    assert(!LSBRemoveOldSlidableData(dir, active) && !LSBRemoveOldSlidableData(dir, active));
+    assert(!faccessat(dir, active, F_OK, 0) && !faccessat(dir, "cache", F_OK, 0));
+    for (unsigned i = 0; i < sizeof(stale) / sizeof(stale[0]); ++i) assert(faccessat(dir, stale[i], F_OK, 0) && errno == ENOENT);
+    for (unsigned i = 0; i < sizeof(keep) / sizeof(keep[0]); ++i) assert(!unlinkat(dir, keep[i], 0));
+    assert(!unlinkat(dir, link, 0) && !unlinkat(dir, folder, AT_REMOVEDIR));
+}
+
 static void fileTests(void) {
     char directory[] = "/tmp/LSB-slidable-test.XXXXXX";
     assert(mkdtemp(directory));
@@ -186,6 +210,7 @@ static void fileTests(void) {
     struct stat first, second; assert(!fstat(data, &first)); close(data);
     assert(!LSBPrepareSlidableCache(fd, dir, testBase, &prepared) && prepared.reused);
     assert(!fstatat(dir, prepared.fileName, &second, 0) && first.st_ino == second.st_ino);
+    checkOldDataCleanup(dir, prepared.fileName);
     assert(!unlinkat(dir, prepared.fileName, 0));
     assert(!symlinkat("cache", dir, prepared.fileName));
     assert(LSBPrepareSlidableCache(fd, dir, testBase, &prepared) == ELOOP);

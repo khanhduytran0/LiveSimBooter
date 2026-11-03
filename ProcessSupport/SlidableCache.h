@@ -167,6 +167,8 @@ int LSBInspectSlidableCacheProfile(int cacheFD, LSBSlidableCacheInfo *info, LSBS
 // Probe a 3 GiB RX reservation with a preferred-base hint, without faulting any pages; releases it before returning. Returns errno or zero.
 int LSBSelectSlidableCacheBase(const LSBSlidableCacheInfo *info, uint64_t *actualBase);
 int LSBSelectSlidableCacheBaseWithProfile(const LSBSlidableCacheInfo *info, uint64_t *actualBase, LSBSlidableCacheProfileKind kind);
+// Session startup only, after preparation succeeds and before launching guests. Removes other generated DATA files.
+int LSBRemoveOldSlidableData(int directoryFD, const char *activeName);
 // Caller serializes session selection. Publishes/reuses an immutable UUID+base file in directoryFD; never modifies the cache. Returns errno or zero.
 int LSBPrepareSlidableCache(int cacheFD, int directoryFD, uint64_t actualBase, LSBSlidableCachePreparation *result);
 int LSBPrepareSlidableCacheWithProfile(int cacheFD, int directoryFD, uint64_t actualBase, LSBSlidableCachePreparation *result,

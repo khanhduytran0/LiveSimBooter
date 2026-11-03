@@ -1104,6 +1104,10 @@ This shares their initial pages and leaves later guest writes private. It avoids
 The file is **trusted unsigned DATA**, not authenticated by the cache's signature; keep it with the matching trusted runtime.
 It is never used for executable mappings. Signed cache TEXT and read-only metadata continue to use the original cache file.
 
+After a successful preparation or reuse, and before starting guests, the host removes other regular files with the
+generated `lsb-slide-<UUID>-<base>.data` name from that cache directory. Switching back to an older cache or base
+regenerates its DATA on demand. A cleanup error is logged and the session can still boot with the selected file.
+
 [The dynamic loader patch](../Tools/patch-ios26-cache-slide.py) takes the original, hash-pinned 23A343 `dyld_sim`, preserves
 the eleven iOS-platform compatibility changes, and installs a signed instruction stub plus a marked 64-byte record in verified
 unused `__DATA_DIRTY` padding. Native preparation validates that writable record and its section boundaries, then supplies the

@@ -1,4 +1,5 @@
 #include "SlidableCache.h"
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -233,6 +234,41 @@ static int generateData(int cacheFD, int outputFD, const LSBSlidableCacheInfo *i
     }
     free(buffer);
     if (!error && (counts.fixups != header->fixupCount || counts.tagged != header->taggedCount)) error = EINVAL;
+    return error;
+}
+
+static int isSlidableDataName(const char *name) {
+    static const char prefix[] = "lsb-slide-", hex[] = "0123456789abcdef";
+    if (!name || strncmp(name, prefix, sizeof(prefix) - 1)) return 0;
+    name += sizeof(prefix) - 1;
+    const unsigned groups[] = {8, 4, 4, 4, 12};
+    for (unsigned i = 0; i < sizeof(groups) / sizeof(groups[0]); ++i) {
+        if (strspn(name, hex) != groups[i] || name[groups[i]] != '-') return 0;
+        name += groups[i] + 1;
+    }
+    size_t digits = strspn(name, hex);
+    return digits && digits <= 16 && (digits == 1 || *name != '0') && !strcmp(name + digits, ".data");
+}
+
+int LSBRemoveOldSlidableData(int directoryFD, const char *activeName) {
+    if (!isSlidableDataName(activeName)) return EINVAL;
+    int fd = openat(directoryFD, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return errno;
+    DIR *dir = fdopendir(fd);
+    if (!dir) { int error = errno; close(fd); return error; }
+    int error = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) { if (!error) error = errno; break; }
+        const char *name = entry->d_name;
+        if (!strcmp(name, activeName) || !isSlidableDataName(name)) continue;
+        struct stat item;
+        int result = fstatat(directoryFD, name, &item, AT_SYMLINK_NOFOLLOW);
+        if (!result && S_ISREG(item.st_mode)) result = unlinkat(directoryFD, name, 0);
+        if (result && errno != ENOENT && !error) error = errno;
+    }
+    closedir(dir);
     return error;
 }
 

@@ -43,8 +43,12 @@ App launching also passed a cold-start check and two consecutive userspace reboo
 Home Screen → Edit → Edit Wallpaper supports color/gradient rendering. PosterBoard’s lock-screen path and direct activation
 remain broken with black output; the editor’s clipped Done button is also deferred. See [wallpaper status](docs/springboard-services.md#current-wallpaper-status).
 
-Generic `fork`/`execve`, native PTYs, stopped/continued wait events, and full job control are not implemented.
-The supported process-replacement path uses `POSIX_SPAWN_SETEXEC`. Missing daemons, resources, and private API differences
+Guest Mach-O executables can replace their image with `execve` or `POSIX_SPAWN_SETEXEC` while keeping their logical PID.
+On iPhone 15 the opt-in Bash fork trial runs foreground commands, pipelines, background jobs, subshells and command substitution.
+Interactive Bash supports Ctrl-Z, `bg` and `fg` on the fake PTY. Background readers stop with SIGTTIN, and
+enabling `TOSTOP` also stops background writers. [Bash instructions and tests](docs/bash.md)
+
+Native PTYs remain unsupported. Missing daemons, resources, and private API differences
 still limit applications; the observed Spotlight last-character crash is deferred. This remains a partial simulator environment.
 
 ## Documentation

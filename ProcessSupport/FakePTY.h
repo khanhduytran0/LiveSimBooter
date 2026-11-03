@@ -23,7 +23,8 @@ typedef struct {
     _Atomic(uint32_t) inputFlush;
     struct termios attributes;
     struct winsize window;
-    pid_t foreground;
+    _Atomic(pid_t) foreground;
+    _Atomic(uint32_t) stopBackgroundOutput;
 } LSBFakePTYState;
 
 typedef struct {
@@ -50,11 +51,12 @@ int LSBFakePTYGetWindow(LSBFakePTYState *state, struct winsize *window);
 int LSBFakePTYSetWindow(LSBFakePTYState *state, const struct winsize *window);
 int LSBFakePTYGetForeground(LSBFakePTYState *state, pid_t *foreground);
 int LSBFakePTYSetForeground(LSBFakePTYState *state, pid_t foreground);
+bool LSBFakePTYRequiresForeground(const LSBFakePTYState *state, pid_t group, bool checkTOSTOP);
 int LSBFakePTYFlush(LSBFakePTYState *state, int selector);
 
 // The host serializes calls per session. Real socket I/O supplies readiness, backpressure and descriptor inheritance.
 // Input implements canonical editing/echo, CR conversion and signal characters; output implements OPOST/ONLCR.
-// Canonical empty-line EOF, software flow control, suspend, VDISCARD, timed/minimum-length reads and guest drain/flush are unsupported.
+// Canonical empty-line EOF, software flow control, VDISCARD, timed/minimum-length reads and guest flush are unsupported.
 int LSBFakePTYInput(LSBFakePTYState *state, LSBFakePTYDiscipline *discipline, const void *bytes, size_t length,
                     const LSBFakePTYCallbacks *callbacks);
 int LSBFakePTYOutput(LSBFakePTYState *state, const void *bytes, size_t length, const LSBFakePTYCallbacks *callbacks);

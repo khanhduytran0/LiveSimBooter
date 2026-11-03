@@ -11,17 +11,18 @@
 static unsigned reservationCalls, releaseCalls;
 static kern_return_t reservationError, releaseError;
 static mach_vm_address_t selectedAddress = UINT64_C(0x7100000000);
+static mach_vm_size_t expectedProbeSize = LSB_SLIDABLE_CACHE_RESERVATION_SIZE;
 kern_return_t testMachVMMap(vm_map_t task, mach_vm_address_t *address, mach_vm_size_t size, mach_vm_offset_t mask, int flags,
                             mem_entry_name_port_t object, memory_object_offset_t offset, boolean_t copy,
                             vm_prot_t current, vm_prot_t maximum, vm_inherit_t inheritance) {
-    assert(task == mach_task_self() && *address == LSB_SLIDABLE_CACHE_PREFERRED_BASE && size == LSB_SLIDABLE_CACHE_RESERVATION_SIZE);
+    assert(task == mach_task_self() && *address == LSB_SLIDABLE_CACHE_PREFERRED_BASE && size == expectedProbeSize);
     assert(!mask && flags == VM_FLAGS_ANYWHERE && !object && !offset && !copy && inheritance == VM_INHERIT_NONE);
     assert(current == (VM_PROT_READ | VM_PROT_EXECUTE) && maximum == current);
     ++reservationCalls; *address = selectedAddress;
     return reservationError;
 }
 kern_return_t testMachVMDeallocate(vm_map_t task, mach_vm_address_t address, mach_vm_size_t size) {
-    assert(task == mach_task_self() && address == selectedAddress && size == LSB_SLIDABLE_CACHE_RESERVATION_SIZE);
+    assert(task == mach_task_self() && address == selectedAddress && size == expectedProbeSize);
     ++releaseCalls;
     return releaseError;
 }
@@ -209,7 +210,14 @@ static void nativeSupportProfileTests(void) {
     assert(!LSBSlidableCacheMappingMatchesProfileKind(&info.mappings[0], 0, 42));
     uint64_t base = 0;
     assert(LSBSelectSlidableCacheBase(&info, &base) == EINVAL);
-    assert(!LSBSelectSlidableCacheBaseWithProfile(&info, &base, kind));
+    expectedProbeSize = UINT64_C(0x1fe14c000);
+    selectedAddress = UINT64_C(0x300000000);
+    assert(!LSBSelectSlidableCacheBaseWithProfile(&info, &base, kind) && base == UINT64_C(0x480000000));
+    selectedAddress = UINT64_C(0x7000000000);
+    assert(!LSBSelectSlidableCacheBaseWithProfile(&info, &base, kind) && base == UINT64_C(0x7180000000));
+    selectedAddress = UINT64_MAX - 0x3fff;
+    assert(LSBSelectSlidableCacheBaseWithProfile(&info, &base, kind) == ERANGE);
+    expectedProbeSize = LSB_SLIDABLE_CACHE_RESERVATION_SIZE;
     header.fixupCount = LSB_SLIDABLE_CACHE_FIXUPS;
     assert(!LSBValidateSlidableDataHeaderWithProfile(&header, header.fileSize, testUUID, info.preferredBase, info.span, kind));
 

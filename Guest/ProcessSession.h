@@ -7,7 +7,7 @@
 #define LSB_SESSION_ID_ENV "LSB_GUEST_SID"
 #define LSB_PROCESS_GROUP_ENV "LSB_GUEST_PGID"
 
-// Opt-in guest metadata only: kernel sessions, process groups, controlling terminals and group signals remain unchanged.
+// The attached fake terminal uses broker-owned logical groups. Other opted-in processes retain local session metadata.
 // Spawn/exec must replace inherited SID/PGID environment entries with this snapshot, including when envp is rebuilt by xpcproxy.
 // Returns ENOTSUP when disabled, EINVAL for malformed inherited metadata, or a native initialization error.
 int LSBProcessSessionSnapshot(pid_t *session, pid_t *group);

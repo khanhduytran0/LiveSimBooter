@@ -144,7 +144,7 @@ terminal-state file alongside RuntimeRoot. Device-platform executables/dylibs ad
 
 ## Native startup pipes and guest connections
 
-Transport **ABI 9**, bootstrap **ABI 7** separates native startup from guest RPC. Both ends retain the same owned spawn plans,
+The spawn transport (ABI 12) separates native startup (bootstrap ABI 7) from guest RPC. Both ends retain the same owned spawn plans,
 descriptor transfer and full audit-token authorization. The guest endpoint is supplied only by authenticated native check-in;
 native Metal roles cannot receive or select it. Failed preparation releases both endpoints. The native pipe right is released
 after READY; only the guest endpoint's send reference survives a successful handoff.
@@ -294,16 +294,17 @@ unsupported. See [creation-mask tracking and tests](creation-mask.md) for initia
 
 Current limits are 256 argv entries, 256 environment entries, 64 file actions, 128 transferred descriptors, and 49,152 bytes of
 combined string storage. Executable/cwd/action paths must fit within 1,024 bytes including their terminator. The 128-FD limit
-counts open CLOEXEC descriptors too. Count/string overflow and descriptor exhaustion return errors before launch.
+counts transferred descriptors, including close-on-exec descriptors needed by an explicit file action.
 
 Executable paths are resolved under RuntimeRoot and canonical paths escaping it are rejected. This is not a `chroot`: open/chdir
 file actions operate on the actual sandbox filesystem, and general guest filesystem-path virtualization is not implemented.
 The child replaces incoming `DYLD_INSERT_LIBRARIES`, `LSB_BROKER_PORT`, `LSB_CHILD_STATUS`, and `LSB_CHILD_WAKE_FD` values with
 its own resources. Interposition still depends on dyld's captured AMFI policy; `DYLD_PRINT_INTERPOSING=1` must show actual interposition.
 
-Returned PIDs identify real extension processes, but the simulator caller is not their kernel parent. Parent-PID virtualization,
-fork, exec replacement, and full session/process-group inheritance remain unimplemented. A default child retains its system
-launch session/group; guest waiting is provided by the separate mechanism below.
+The broker assigns logical parent and child PIDs to the extension processes it launches. A guest `execve` or
+`POSIX_SPAWN_SETEXEC` replacement keeps the logical PID while changing the native process. Attached terminal jobs
+also have logical sessions and process groups. The opt-in Bash fork trial supports the pinned shell and fork sites.
+[Bash instructions and limits](bash.md)
 
 ## Executable access checks
 
@@ -322,10 +323,11 @@ with these runtime checks and the accepted standard wait options; general filesy
 
 ## Signaling a simulated child
 
-[ChildKill.c](../Guest/ChildKill.c) interposes `kill`. The initial scope is exact positive PIDs belonging to the caller's direct
+[ChildKill.c](../Guest/ChildKill.c) interposes `kill` and `killpg`. Positive PIDs select the caller or one of its direct
 simulated children. An exact self PID calls the simulator's original `kill` implementation without broker IPC. Other positive
 PIDs go through synchronous XPC to the authenticated broker; it rejects unknown, unrelated, and completed child jobs with
-`ESRCH`. Nonpositive selectors, including process groups, `0`, and `-1`, return `ENOTSUP`. Signals outside `[0, NSIG)` return
+`ESRCH`. A terminal guest can signal its own group with `0` or a specific group in its terminal session with a negative PGID.
+Broadcast `-1` and group signaling outside a managed terminal return `ENOTSUP`. Signals outside `[0, NSIG)` return
 `EINVAL`. Successful broker calls return 0 and preserve `errno`.
 
 The broker validates the target's full audit identity against RunningBoard before signaling. This protects against a retained
@@ -336,9 +338,25 @@ the request through `xpc_connection_kill`. The fallback targets that instance, n
 An accepted launchd request is asynchronous; the child's exit monitor and `waitpid` establish the resulting terminal status.
 
 The guest's cross-process `kill` implementation is **not async-signal-safe**: it allocates XPC objects and performs a synchronous
-broker call. It starts no guest worker and needs the foreground host to remain runnable. It does not provide process-group
-signaling, arbitrary-process signaling, or `sigqueue` payloads. Stop/continue signals do not add stopped/continued wait events;
-the current waiting implementation still reports terminal statuses only.
+broker call. It starts no guest worker and needs the foreground host to remain runnable. Each group member is validated separately.
+At least one successful submission makes the group call succeed. Arbitrary-process signaling and `sigqueue` payloads remain unsupported.
+
+The fake terminal sends signal characters to the selected logical foreground group. The native extensions can belong to orphaned
+process groups, for which XNU drops a default tty stop. Terminal guests install a handler for the default dispositions of
+`SIGTSTP`, `SIGTTIN` and `SIGTTOU`. The handler records the signal in the guest’s shared status page around
+its own native `kill(self, SIGSTOP)`. An explicit guest `kill(self, SIGSTOP)` or `raise(SIGSTOP)` uses the same marker.
+Normal signal masks and custom or ignored handlers still apply.
+
+The broker registers an `EVFILT_PROC` filter for `NOTE_SIGNAL` at terminal guest check-in. Registration omits `NOTE_EXITSTATUS`,
+which requires different credentials. The filter reports a signal-delivery hint without its number. It also fires on the
+guest's self-SIGSTOP when a previously blocked tty signal reaches its default handler. The host checks the process state on
+the hint and again after kernel delivery. If the filter cannot be registered, a timer checks only that terminal job.
+On hosts that permit an idversion-checked `PROC_PIDTBSDINFO` query, `p_stat` and `p_xstat` identify a BSD stop and its cause.
+The iPhone 15 host gets `EPERM` for this query even for its own Fish extension. There the broker confirms a tty stop or its
+own SIGSTOP request with the task's suspend count. For an external SIGSTOP it also needs the guest signal record described
+below. It publishes continuation after the task's suspend count reaches zero. The parent receives a wake hint and, unless
+it set `SA_NOCLDSTOP`, `SIGCHLD`.
+See [XNU’s orphaned tty-stop handling](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c).
 
 ## Child status, waiting, and SIGCHLD
 
@@ -348,10 +366,19 @@ status ledger described below. Direct audited signaling is sandbox denied on the
 delivery to launchd using the retained extension instance. Hosting an extension does not grant ordinary parent-process
 `waitpid` or signal permissions.
 
-Each guest receives a 4 KiB shared mapping with 120 child slots and a nonblocking wake-pipe reader. Ledger ABI version 5 uses
-3872 bytes of that mapping; the backing-file and mapping sizes remain unchanged. Widget discovery exhausted the former 64-child
-limit and prevented app launches. Version and capacity checks reject the old 16/64-slot ABIs, so the host, extension and guest shim
-must be deployed together. The outer spawn transport is ABI 9. The host creates the backing
+After runtime initialization, each guest attached to the fake terminal starts one sleeping thread. It registers
+`EVFILT_SIGNAL` for SIGSTOP and SIGCONT and waits in `kevent64` with its output buffer in the shared status page.
+XNU can write the signal record while the task is stopped. Its stamp identifies the native audit PID version, wait sequence
+and signal. The broker checks the latest stamp against the live job and consumes each stop once. The guest's tty handler
+still supplies the original reason when SIGTTIN, SIGTTOU or SIGTSTP caused its self-SIGSTOP.
+
+LLDB's `PT_ATTACHEXC` sends a real SIGSTOP after installing an `EXC_SOFTWARE` handler. The host checks the task's exception
+port information and suppresses an external stop record if a handler is installed or inspection fails. A plain Mach hold
+does not generate a SIGSTOP record. Both controls were tested against a running Bash job on iPhone 15.
+
+Each guest receives a 4 KiB shared mapping with 120 child slots and a nonblocking wake-pipe reader. Ledger ABI version 8 uses
+3936 bytes of that mapping. Widget discovery exhausted the former 64-child limit and prevented app launches. Version and
+capacity checks reject older layouts, so the host, extension and guest shim must be deployed together. The host creates the backing
 file inside the App Group, unlinks it immediately, and transfers its descriptor at check-in. Native preparation maps it, closes
 the file descriptor, and preserves the reader outside file-action destinations and close sweeps. The mapping and FD survive
 cache detachment; no native object or callback is retained. The spawn shim excludes this private reader from ordinary FD inheritance.
@@ -379,7 +406,7 @@ The temporary native connection is canceled and activated in that canceled state
 requirements without starting a peer handshake.
 
 [ChildWait.c](../Guest/ChildWait.c) supports exact PID, any child (`-1`), current group (`0`), and explicit negative-group selectors,
-plus `WNOHANG` and `wait()`. It preserves the raw status for `WIFEXITED`, `WEXITSTATUS`, `WIFSIGNALED`, and `WTERMSIG`. A second wait
+plus `WNOHANG`, `WUNTRACED`, `WCONTINUED` and `wait()`. It preserves the raw status for `WIFEXITED`, `WEXITSTATUS`, `WIFSIGNALED`, and `WTERMSIG`. A second wait
 returns `ECHILD`; `WNOHANG` returns 0 without changing the status output when a matching child is still live. Blocking waits use
 the pipe only as a hint and rescan every 100 ms, so another waiter draining it cannot lose an exit. Waiting performs no XPC and
 starts no worker thread. Nonblocking reaping uses lock-free operations and is exercised from a signal handler.
@@ -411,19 +438,22 @@ ordering, reaped exit delivery and cancellation/pinned-ticket lifetime when chan
 
 The current limits are:
 
-- `WUNTRACED` and `WCONTINUED` are accepted alongside `WNOHANG`; unknown option bits return `EINVAL`. The ledger still
-  reports terminal exits only. A live child yields 0 under `WNOHANG`, and normal/signal exits remain reapable with these flags.
-  Stop/continue events are not synthesized or reported, so this is not full job-control support. `waitid` remains unsupported.
+- A terminal child’s latest confirmed stop or continuation can be consumed once with the matching option. The final exit supersedes either.
+  Monitoring covers the job through exec or exit, including tty signals delivered outside the broker or unblocked later.
+  External SIGSTOP observation on sandboxed hosts starts when the guest's signal thread enters its wait. Rapid CONT→STOP
+  sequences can coalesce if the thread has no chance to rearm. A guest that installs its own task-level `EXC_SOFTWARE`
+  handler also suppresses this fallback. Ordinary terminal stop handling remains available.
+  A live child yields 0 under `WNOHANG` if no selected event is pending. Unknown option bits return `EINVAL`. `waitid` remains unsupported.
 - `wait4` supports the same terminal statuses and selectors when rusage is null. By default, nonnull rusage returns
   `ENOTSUP` without consuming a status. The explicit `LSB_WAIT4_STATUS_ONLY=1` initialization option permits callers such as
   Go's `os/exec` to request rusage: the shim clears it only after returning a positive reaped PID. These zeros mean
   **uncollected**, not measured usage; `WNOHANG` returning 0 and all errors leave the usage buffer unchanged. Normal and signal
   exit statuses still come from real broker terminal events. The sshdog staging recipe enables this compatibility mode.
-- Process-group selectors use the group captured at READY. Later guest `setpgid` changes are not reflected in stored child records.
+- Terminal group selectors follow the logical group updated by `setpgid`. Other managed children retain the group captured at READY.
 - A signal may interrupt a blocking wait with `EINTR` even with `SA_RESTART`; callers must retry. A status already available after interruption is returned first.
 - Interposed `sigaction`/`signal` mirror `SIG_IGN` and `SA_NOCLDWAIT` into the table and discard unreaped/future statuses.
   Concurrent changes to the SIGCHLD disposition must be serialized by the caller.
-- This models the broker's simulated children only. It does not merge native kernel-child waits, synthesize child `siginfo_t`, or virtualize sessions and parent PIDs.
+- The wait ledger covers broker-managed children. Native kernel-child waits and synthesized child `siginfo_t` remain unsupported.
 
 The [sshdog device experiment](sshdog.md#device-checkpoint) exercised non-PTY remote Fish and df after fixing the guest
 account-home path and excluding unused close-on-exec descriptors from FD export. After the initial nonnull-rusage

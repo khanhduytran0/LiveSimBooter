@@ -2,10 +2,14 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <stddef.h>
 
 enum { Empty, Reserved, Running, Exited, Reaped, Publishing, Exiting, Replacing, Abandoned, PhaseMask = 15,
-       PinShift = 4, PinBits = 16, GenerationShift = PinShift + PinBits };
+       PinShift = 4, PinBits = 16, JobShift = PinShift + PinBits, JobBits = 5, GenerationShift = JobShift + JobBits };
+#define JOB_MASK (((UINT64_C(1) << JobBits) - 1) << JobShift)
+_Static_assert(NSIG <= (1 << JobBits), "Job signal field is too narrow");
 #define PIN_UNIT (UINT64_C(1) << PinShift)
 #define PIN_MASK (((UINT64_C(1) << PinBits) - 1) << PinShift)
 _Static_assert(ATOMIC_LLONG_LOCK_FREE == 2 && ATOMIC_LONG_LOCK_FREE == 2 && ATOMIC_INT_LOCK_FREE == 2,
@@ -21,7 +25,10 @@ void LSBChildStatusInitialize(LSBChildStatus *ledger) {
     ledger->magic = LSB_CHILD_STATUS_MAGIC;
     ledger->version = LSB_CHILD_STATUS_VERSION;
     ledger->capacity = LSB_CHILD_STATUS_CAPACITY;
-    ledger->reserved = 0;
+    atomic_init(&ledger->suppressJobSignal, 0);
+    atomic_init(&ledger->terminalSessionAndGroup, 0);
+    atomic_init(&ledger->terminalStop, 0);
+    ledger->nativeStopEvent = (struct kevent64_s){0};
     atomic_init(&ledger->nextGeneration, 1);
     atomic_init(&ledger->discardExited, 0);
     atomic_init(&ledger->parentPID, -1);
@@ -36,7 +43,7 @@ void LSBChildStatusInitialize(LSBChildStatus *ledger) {
 
 int LSBChildStatusValidate(const LSBChildStatus *ledger) {
     if (!ledger || (uintptr_t)ledger % _Alignof(LSBChildStatus) || ledger->magic != LSB_CHILD_STATUS_MAGIC ||
-        ledger->version != LSB_CHILD_STATUS_VERSION || ledger->capacity != LSB_CHILD_STATUS_CAPACITY || ledger->reserved) return EPROTO;
+        ledger->version != LSB_CHILD_STATUS_VERSION || ledger->capacity != LSB_CHILD_STATUS_CAPACITY) return EPROTO;
     return 0;
 }
 
@@ -98,6 +105,27 @@ int LSBChildStatusPublishRunning(LSBChildStatus *ledger, LSBChildTicket ticket, 
     return 0;
 }
 
+int LSBChildStatusSetGroup(LSBChildStatus *ledger, LSBChildTicket ticket, pid_t group) {
+    if (LSBChildStatusValidate(ledger) || !validTicket(ticket) || group <= 0) return EINVAL;
+    LSBChildSlot *slot = &ledger->slots[ticket.index];
+    uint64_t state = atomic_load_explicit(&slot->state, memory_order_acquire);
+    if (!ticketMatches(state, ticket) || (state & PhaseMask) != Running) return ESTALE;
+    atomic_store_explicit(&slot->group, group, memory_order_release);
+    return 0;
+}
+
+int LSBChildStatusPublishJobEvent(LSBChildStatus *ledger, LSBChildTicket ticket, int signalNumber) {
+    if (LSBChildStatusValidate(ledger) || !validTicket(ticket) ||
+        (signalNumber != SIGCONT && signalNumber != SIGSTOP && signalNumber != SIGTSTP && signalNumber != SIGTTIN && signalNumber != SIGTTOU)) return EINVAL;
+    LSBChildSlot *slot = &ledger->slots[ticket.index];
+    uint64_t state = atomic_load_explicit(&slot->state, memory_order_acquire);
+    do {
+        if (!ticketMatches(state, ticket) || (state & PhaseMask) != Running) return ESTALE;
+    } while (!atomic_compare_exchange_weak_explicit(&slot->state, &state, (state & ~JOB_MASK) | ((uint64_t)signalNumber << JobShift),
+                                                   memory_order_acq_rel, memory_order_acquire));
+    return 0;
+}
+
 int LSBChildStatusPrepareExec(LSBChildStatus *ledger, LSBChildTicket ticket, pid_t nativePID, LSBChildExecUpdate *update) {
     if (LSBChildStatusValidate(ledger) || !validTicket(ticket) || nativePID <= 0 || !update) return EINVAL;
     LSBChildSlot *slot = &ledger->slots[ticket.index];
@@ -109,7 +137,7 @@ int LSBChildStatusPrepareExec(LSBChildStatus *ledger, LSBChildTicket ticket, pid
         (void)transition(slot, ticket, Replacing, Running, memory_order_acq_rel);
         return EOVERFLOW;
     }
-    *update = (LSBChildExecUpdate){ticket, execution, ((uint64_t)(generation + 1) << 32) | (uint32_t)nativePID};
+    *update = (LSBChildExecUpdate){ticket, execution, ((uint64_t)(generation + 1) << 32) | (uint32_t)nativePID, 0};
     return 0;
 }
 
@@ -121,7 +149,10 @@ static int finishExec(LSBChildStatus *ledger, const LSBChildExecUpdate *update, 
     uint64_t state = atomic_load_explicit(&slot->state, memory_order_acquire);
     if (!ticketMatches(state, update->ticket) || (state & PhaseMask) != Replacing ||
         atomic_load_explicit(&slot->execution, memory_order_relaxed) != update->previousExecution) return ESTALE;
-    if (commit) atomic_store_explicit(&slot->execution, update->replacementExecution, memory_order_release);
+    if (commit) {
+        if (update->replacementGroup > 0) atomic_store_explicit(&slot->group, update->replacementGroup, memory_order_relaxed);
+        atomic_store_explicit(&slot->execution, update->replacementExecution, memory_order_release);
+    }
     return transition(slot, update->ticket, Replacing, Running, memory_order_acq_rel);
 }
 
@@ -262,7 +293,7 @@ static int matches(pid_t selector, pid_t currentGroup, pid_t pid, pid_t group) {
     return group == (selector == 0 ? (int64_t)currentGroup : -(int64_t)selector);
 }
 
-int LSBChildStatusTryWait(LSBChildStatus *ledger, pid_t selector, pid_t currentGroup, pid_t *pid, int *status) {
+int LSBChildStatusTryWaitOptions(LSBChildStatus *ledger, pid_t selector, pid_t currentGroup, int options, pid_t *pid, int *status) {
     if (!ledger || !pid) return EINVAL;
     int live = 0;
     for (unsigned i = 0; i < LSB_CHILD_STATUS_CAPACITY; ++i) {
@@ -279,7 +310,15 @@ int LSBChildStatusTryWait(LSBChildStatus *ledger, pid_t selector, pid_t currentG
             uint64_t confirmed = atomic_load_explicit(&slot->state, memory_order_acquire);
             if (confirmed != state) { state = confirmed; continue; }
             if (!matches(selector, currentGroup, child, group)) break;
-            if (phase != Exited) { live = 1; break; }
+            if (phase != Exited) {
+                live = 1;
+                unsigned signalNumber = (unsigned)((state & JOB_MASK) >> JobShift);
+                if (phase != Running || !signalNumber || !(options & (signalNumber == SIGCONT ? WCONTINUED : WUNTRACED))) break;
+                if (!atomic_compare_exchange_weak_explicit(&slot->state, &state, state & ~JOB_MASK, memory_order_acq_rel, memory_order_acquire)) continue;
+                *pid = child;
+                if (status) *status = W_STOPCODE(signalNumber);
+                return 0;
+            }
             uint64_t reaped = (state & ~(uint64_t)PhaseMask) | Reaped;
             int discard = atomic_load_explicit(&ledger->discardExited, memory_order_seq_cst) != 0;
             if (!atomic_compare_exchange_weak_explicit(&slot->state, &state, reaped, memory_order_acq_rel, memory_order_acquire)) continue;
@@ -290,6 +329,10 @@ int LSBChildStatusTryWait(LSBChildStatus *ledger, pid_t selector, pid_t currentG
         }
     }
     return live ? EAGAIN : ECHILD;
+}
+
+int LSBChildStatusTryWait(LSBChildStatus *ledger, pid_t selector, pid_t currentGroup, pid_t *pid, int *status) {
+    return LSBChildStatusTryWaitOptions(ledger, selector, currentGroup, 0, pid, status);
 }
 
 void LSBChildStatusSetDiscard(LSBChildStatus *ledger, int discard) {

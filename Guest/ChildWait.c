@@ -1,4 +1,6 @@
 #include "ChildWait.h"
+#include "CreationMask.h"
+#include "TerminalStopWitness.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -16,9 +18,42 @@ static _Atomic(int) configurationError = ENOTSUP;
 static _Atomic(bool) wait4StatusOnly;
 _Static_assert(ATOMIC_POINTER_LOCK_FREE == 2, "Child wait lookup must remain signal-safe");
 
+// XNU drops default-action tty stops for orphaned native process groups. Guest terminal groups have a logical parent
+// even though their extension processes were launched independently. Preserve blocked, ignored and caught dispositions.
+int LSBTerminalStopSelf(int reason) {
+    LSBChildStatus *ledger = atomic_load_explicit(&childStatus, memory_order_acquire);
+    if (!ledger || !atomic_load_explicit(&ledger->terminalSessionAndGroup, memory_order_acquire)) return kill(getpid(), SIGSTOP);
+    uint32_t old = atomic_load_explicit(&ledger->terminalStop, memory_order_relaxed), token;
+    do {
+        token = ((old + 32u) & ~31u) | (unsigned)reason;
+    } while (!atomic_compare_exchange_weak_explicit(&ledger->terminalStop, &old, token, memory_order_release, memory_order_relaxed));
+    int result = kill(getpid(), SIGSTOP);
+    uint32_t cleared = token & ~31u;
+    atomic_compare_exchange_strong_explicit(&ledger->terminalStop, &token, cleared, memory_order_release, memory_order_relaxed);
+    return result;
+}
+
+static void defaultTerminalStop(int number) {
+    int savedErrno = errno;
+    (void)LSBTerminalStopSelf(number);
+    errno = savedErrno;
+}
+
+static int terminalStopSignal(int number) {
+    return number == SIGTSTP || number == SIGTTIN || number == SIGTTOU;
+}
+
+static int attachedTerminal(void) {
+    LSBChildStatus *ledger = atomic_load_explicit(&childStatus, memory_order_acquire);
+    return ledger && atomic_load_explicit(&ledger->terminalSessionAndGroup, memory_order_acquire);
+}
+
 static void updateDiscard(const struct sigaction *action) {
     LSBChildStatus *ledger = atomic_load_explicit(&childStatus, memory_order_acquire);
-    if (ledger) LSBChildStatusSetDiscard(ledger, action->sa_handler == SIG_IGN || (action->sa_flags & SA_NOCLDWAIT));
+    if (ledger) {
+        atomic_store_explicit(&ledger->suppressJobSignal, (action->sa_flags & SA_NOCLDSTOP) != 0, memory_order_release);
+        LSBChildStatusSetDiscard(ledger, action->sa_handler == SIG_IGN || (action->sa_flags & SA_NOCLDWAIT));
+    }
 }
 
 int LSBChildWaitConfigure(LSBChildStatus *ledger, int wakeFD) {
@@ -35,6 +70,16 @@ int LSBChildWaitConfigure(LSBChildStatus *ledger, int wakeFD) {
     atomic_store_explicit(&childStatus, ledger, memory_order_release);
     atomic_store_explicit(&configurationError, 0, memory_order_relaxed);
     updateDiscard(&action);
+    if (attachedTerminal()) {
+        const int stops[] = {SIGTSTP, SIGTTIN, SIGTTOU};
+        for (unsigned i = 0; i < sizeof(stops) / sizeof(stops[0]); ++i) {
+            if (sigaction(stops[i], NULL, &action)) return errno;
+            if (action.sa_handler == SIG_DFL) {
+                action.sa_handler = defaultTerminalStop;
+                if (sigaction(stops[i], &action, NULL)) return errno;
+            }
+        }
+    }
     return 0;
 }
 
@@ -56,10 +101,19 @@ __attribute__((constructor)) static void initializeChildWait(void) {
         }
     }
     atomic_store_explicit(&configurationError, error, memory_order_relaxed);
+    if (!error && attachedTerminal()) {
+        // Hosts without getumask need a single thread for their first mask snapshot; constructor ordering is not an ABI.
+        uint32_t mask;
+        if (!LSBReadCreationMask(&mask)) (void)LSBStartTerminalStopWitness(&LSBGuestChildStatus()->nativeStopEvent);
+    }
 }
 #endif
 
 static pid_t finishWait(pid_t child, int value, int *status, int savedErrno) {
+#if defined(LSB_FORK_SNAPSHOT_TRIAL)
+    extern void LSBForkTrialDidWait(pid_t child, int status);
+    LSBForkTrialDidWait(child, value);
+#endif
     if (status) *status = value;
     errno = savedErrno;
     return child;
@@ -68,15 +122,18 @@ static pid_t finishWait(pid_t child, int value, int *status, int savedErrno) {
 pid_t LSBWaitPID(pid_t selector, int *status, int options) {
     int savedErrno = errno;
     if (options & ~(WNOHANG | WUNTRACED | WCONTINUED)) { errno = EINVAL; return -1; }
-    // The ledger reports terminal states only. Accept standard options without fabricating stopped or continued events.
     LSBChildStatus *ledger = atomic_load_explicit(&childStatus, memory_order_acquire);
     if (!ledger) { errno = atomic_load_explicit(&configurationError, memory_order_relaxed); return -1; }
-    pid_t group = selector == 0 ? getpgrp() : 0;
+    pid_t group = 0;
+    if (!selector) {
+        group = (pid_t)(uint32_t)atomic_load_explicit(&ledger->terminalSessionAndGroup, memory_order_acquire);
+        if (!group) group = getpgrp();
+    }
     int wakeFD = LSBGuestChildWakeFD();
     for (;;) {
         pid_t child;
         int value;
-        int error = LSBChildStatusTryWait(ledger, selector, group, &child, &value);
+        int error = LSBChildStatusTryWaitOptions(ledger, selector, group, options, &child, &value);
         if (!error) return finishWait(child, value, status, savedErrno);
         if (error != EAGAIN) { errno = error; return -1; }
         if (options & WNOHANG) { errno = savedErrno; return 0; }
@@ -85,7 +142,7 @@ pid_t LSBWaitPID(pid_t selector, int *status, int options) {
         int result = poll(&descriptor, 1, 100);
         if (result < 0) {
             error = errno;
-            if (error == EINTR && !LSBChildStatusTryWait(ledger, selector, group, &child, &value))
+            if (error == EINTR && !LSBChildStatusTryWaitOptions(ledger, selector, group, options, &child, &value))
                 return finishWait(child, value, status, savedErrno);
             errno = error;
             return -1;
@@ -96,7 +153,7 @@ pid_t LSBWaitPID(pid_t selector, int *status, int options) {
             ssize_t count = read(wakeFD, hints, sizeof(hints));
             if (count > 0 || (count < 0 && (errno == EAGAIN || errno == EINTR))) continue;
             error = count == 0 ? EPIPE : errno;
-            if (!LSBChildStatusTryWait(ledger, selector, group, &child, &value)) return finishWait(child, value, status, savedErrno);
+            if (!LSBChildStatusTryWaitOptions(ledger, selector, group, options, &child, &value)) return finishWait(child, value, status, savedErrno);
             errno = error;
             return -1;
         }
@@ -118,14 +175,21 @@ pid_t LSBWait4(pid_t selector, int *status, int options, struct rusage *usage) {
 int LSBSigaction(int number, const struct sigaction *action, struct sigaction *oldAction) {
     // action and oldAction may alias; the kernel can overwrite the caller's input with the previous disposition.
     struct sigaction requested;
-    if (number == SIGCHLD && action) requested = *action;
+    if (action && (number == SIGCHLD || terminalStopSignal(number))) {
+        requested = *action;
+        if (terminalStopSignal(number) && requested.sa_handler == SIG_DFL && attachedTerminal()) requested.sa_handler = defaultTerminalStop;
+        action = &requested;
+    }
     int result = sigaction(number, action, oldAction);
+    if (!result && oldAction && terminalStopSignal(number) && oldAction->sa_handler == defaultTerminalStop) oldAction->sa_handler = SIG_DFL;
     if (!result && number == SIGCHLD && action) updateDiscard(&requested);
     return result;
 }
 
 sig_t LSBSignal(int number, sig_t handler) {
+    if (terminalStopSignal(number) && handler == SIG_DFL && attachedTerminal()) handler = defaultTerminalStop;
     sig_t result = signal(number, handler);
+    if (terminalStopSignal(number) && result == defaultTerminalStop) result = SIG_DFL;
     int savedErrno = errno;
     if (result != SIG_ERR && number == SIGCHLD) {
         struct sigaction action;

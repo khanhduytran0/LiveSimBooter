@@ -204,6 +204,36 @@ static void testInterruptedWait(void) {
     }
 }
 
+static void testTerminalStopDisposition(void) {
+    reset();
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        // With a new native session the kernel ignores the original default TSTP. The guest foreground group still has a parent.
+        assert(setsid() == getpid());
+        atomic_store(&ledger.terminalSessionAndGroup, ((uint64_t)(uint32_t)getpid() << 32) | (uint32_t)getpid());
+        assert(!LSBChildWaitConfigure(&ledger, wakeFDs[0]));
+        assert(LSBSignal(SIGTSTP, SIG_IGN) == SIG_DFL && !raise(SIGTSTP) && !atomic_load(&ledger.terminalStop));
+        sigset_t mask;
+        sigemptyset(&mask);
+        sigaddset(&mask, SIGTSTP);
+        assert(!sigprocmask(SIG_BLOCK, &mask, NULL));
+        assert(LSBSignal(SIGTSTP, SIG_DFL) == SIG_IGN && !raise(SIGTSTP) && !atomic_load(&ledger.terminalStop));
+        struct sigaction current;
+        assert(!LSBSigaction(SIGTSTP, NULL, &current) && current.sa_handler == SIG_DFL);
+        assert(!sigprocmask(SIG_UNBLOCK, &mask, NULL));
+        assert(atomic_load(&ledger.terminalStop) == 32);
+        assert(!LSBTerminalStopSelf(SIGSTOP));
+        _exit(atomic_load(&ledger.terminalStop) == 64 ? 37 : 100);
+    }
+    int status;
+    assert(waitpid(child, &status, WUNTRACED) == child && WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP);
+    assert(!kill(child, SIGCONT));
+    assert(waitpid(child, &status, WUNTRACED) == child && WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP);
+    assert(!kill(child, SIGCONT));
+    assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 37);
+}
+
 int main(void) {
     alarm(15);
     assert(!unsetenv("LSB_WAIT4_STATUS_ONLY"));
@@ -214,6 +244,7 @@ int main(void) {
     testBlockingWait();
     testSignalHandlerReapAndDiscard();
     testInterruptedWait();
+    testTerminalStopDisposition();
     close(wakeFDs[0]); close(wakeFDs[1]);
     puts("ChildWait: waitpid/wait4, groups, status, strict/opt-in rusage, blocking/lost wakes, signal reaping, discard and EINTR passed");
     return 0;

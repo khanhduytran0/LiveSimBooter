@@ -8,6 +8,15 @@
 
 static pid_t guestIdentity = 12345;
 pid_t LSBGuestPID(void) { return guestIdentity; }
+static LSBChildStatus terminalLedger;
+static bool attached;
+LSBChildStatus *LSBGuestChildStatus(void) { return attached ? &terminalLedger : NULL; }
+int LSBTransportSetProcessGroup(pid_t pid, pid_t group) {
+    if (pid) return ESRCH;
+    if (group < 0) return EINVAL;
+    atomic_store(&terminalLedger.terminalSessionAndGroup, packSession(123, group ?: guestIdentity));
+    return 0;
+}
 
 static void configure(const char *enabled, const char *session, const char *group) {
     if (enabled) setenv(LSB_SESSION_ENABLE_ENV, enabled, 1); else unsetenv(LSB_SESSION_ENABLE_ENV);
@@ -101,6 +110,16 @@ int main(void) {
     testVirtualSession();
     testInitialAndInvalidState();
     testConcurrentSetSID();
-    puts("ProcessSession: opt-in SID/PGID, native fallback, exec inheritance, unsupported groups and concurrent setsid passed");
+    LSBChildStatusInitialize(&terminalLedger);
+    atomic_store(&terminalLedger.terminalSessionAndGroup, packSession(123, 124));
+    attached = true;
+    assert(LSBGuestGetSID(0) == 123 && LSBGuestGetPGID(0) == 124);
+    assert(!LSBGuestSetPGID(0, 0) && LSBGuestProcessGroup() == guestIdentity);
+    assert(LSBGuestSetPGID(500, 500) == -1 && errno == ESRCH);
+    LSBChildTicket child;
+    assert(!LSBChildStatusReserve(&terminalLedger, &child));
+    assert(!LSBChildStatusPublishRunning(&terminalLedger, child, 51, 52));
+    assert(LSBGuestGetPGID(51) == 52 && LSBGuestGetPGID(53) == -1 && errno == ESRCH);
+    puts("ProcessSession: native fallback, exec inheritance, concurrent setsid, terminal groups and child queries passed");
     return 0;
 }

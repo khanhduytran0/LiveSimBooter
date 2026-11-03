@@ -109,6 +109,40 @@ Replacing all of libSystem would remove required simulator behavior. Even native
 `_ccapsic_client_*` imports required by this guest's CryptoKitPrivate. Keep guest libc, malloc, dispatch, XPC, libdyld and
 the simulator adapters for an initial narrow experiment.
 
+## Static compatibility of the current handoff
+
+The 2026-11-03 audit compiled the five decoders from `NativeSupportState.cpp` and ran them on instruction bytes from
+each extracted arm64 DeviceSupport image, using the entry's original virtual address. Every passing decoder returned
+the addresses named by the image's local symbol table. All nine state cells had local symbols even on the builds
+where instruction matching failed. For example, 15.4.1 branches from `__libkernel_init` to a separate `mach_init`
+function containing the once guard. The current decoder expects that guard inside the initializer. In all eight arm64
+samples the static-key code stores complemented destructors and the native pthread size is consistent with a 224-byte
+prefix and 512 TSD slots.
+
+| Native build | Pthread init | Static keys, workqueue, workgroup, kernel guard | Missing signed-cache patch targets (strong / weak-only) |
+| --- | --- | --- | --- |
+| 15.4.1 / 19E258 | Pass | All four reject | 5 / 14 |
+| 16.5 / 20F66 and 17.0 / 21A327 | Pass | All four reject | 0 / 14 |
+| 18.5 / 22F76 and beta 23A239d | Pass | All four pass | 0 / 5 |
+| 26.1 / 23B50, 26.7.2 / 23H128 and 27.0 / 24A435 | Pass | All four pass | 0 / 0 |
+
+The counts come from the signed guest cache `9a2fb463-a774-53ed-a661-ff3f3fcac717`. Its patch table contains 16,074
+pointer locations. [NativeSupportBindings](../LiveSimBooter/NativeSupportBindings.cpp) rejects an unresolved target
+at any such location. On 18.5 and 23A239d this includes three weak security-config functions and the two weak file-action
+functions `posix_spawn_file_actions_addchdir` and `posix_spawn_file_actions_addfchdir`. Their stock simulator wrappers
+have fallbacks, but binding fails before those wrappers can select one. The earlier six-strong count for 15.4.1 includes
+one additional import in loose `xpcproxy_sim`; the five here count only cache targets.
+
+Guest spawning has separate constraints. The native 18.5 and 23A239d setters match the 23B50 probe offsets, but store
+the dataless I/O policy as 1 or 2 where the current shim accepts 5 or 6. Requests from `xpcproxy_sim` that set this
+policy return `ENOTSUP`. On 18.5 the shim also compares four uninitialized bytes at offsets `0xbc..0xbf`, which can
+reject otherwise identical attributes. On 16.5 and 17.0 the port-action pointer is at `0xb8`, outside the recognized
+layouts. On 15.4.1 the shim's strongly imported `posix_spawnattr_set_crash_count_np` is absent.
+
+The 10.3.3 extraction is armv7s. Both signed native executables specify minimum iOS 26.0. These older-host results
+are static only. Device runs cover 23B50 and 24A435. Local receipts are under ignored
+`tmp/older-native-static-20261103/`, `tmp/older-binding-audit/` and `tmp/older-spawn-static/`.
+
 ## Ownership requirements identified during the audit
 
 1. **Preserve one pthread owner.** The default `MainThreadBootstrap.cpp` path creates fresh storage with a 224-byte prefix and

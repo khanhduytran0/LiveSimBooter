@@ -91,11 +91,11 @@ static void testCapacityAndDiscard(void) {
 
 static void testLedgerABI(void) {
     LSBChildStatusInitialize(&ledger);
-    assert(sizeof(ledger) == 3872 && sizeof(ledger) <= LSB_CHILD_STATUS_MAP_SIZE && ledger.capacity == 120);
-    // Both former layouts and either mismatched version/capacity must fail before any slot is scanned.
-    for (unsigned version = 3; version <= 4; ++version) {
+    assert(sizeof(ledger) == 3936 && sizeof(ledger) <= LSB_CHILD_STATUS_MAP_SIZE && ledger.capacity == 120 && !ledger.nativeStopEvent.udata);
+    // Reject previous layouts before scanning a slot at its new offset.
+    for (unsigned version = 3; version < LSB_CHILD_STATUS_VERSION; ++version) {
         ledger.version = version;
-        ledger.capacity = version == 3 ? 16 : 64;
+        ledger.capacity = version == 3 ? 16 : version == 4 ? 64 : 120;
         assert(LSBChildStatusValidate(&ledger) == EPROTO);
         LSBChildTicket ticket = {.index = UINT32_MAX, .generation = UINT64_MAX};
         assert(LSBChildStatusReserve(&ledger, &ticket) == EINVAL);
@@ -419,8 +419,8 @@ static void testObserverBounds(void) {
     assert(LSBChildStatusAcquireObservation(&ledger, 2000, &observation) == EOVERFLOW);
     for (unsigned i = 0; i < UINT16_MAX; ++i) assert(!LSBChildStatusReleaseObservation(&ledger, ticket));
     assert(LSBChildStatusReleaseObservation(&ledger, ticket) == ESTALE);
-    atomic_store(&ledger.nextGeneration, UINT64_MAX >> 20);
-    assert(!LSBChildStatusReserve(&ledger, &extra) && extra.generation == (UINT64_MAX >> 20));
+    atomic_store(&ledger.nextGeneration, UINT64_MAX >> 25);
+    assert(!LSBChildStatusReserve(&ledger, &extra) && extra.generation == (UINT64_MAX >> 25));
     assert(LSBChildStatusReserve(&ledger, &extra) == EOVERFLOW);
 }
 
@@ -454,6 +454,25 @@ static void testParentAndImport(void) {
     assert(LSBChildStatusTryWait(&destination, 3000, 0, &pid, &status) == ECHILD);
     observation.status = -1;
     assert(LSBChildStatusImport(&destination, &observation, &newTicket) == EINVAL);
+}
+
+static void testJobEvents(void) {
+    LSBChildStatusInitialize(&ledger);
+    LSBChildTicket ticket = running(100, 8);
+    pid_t pid = 0;
+    int status = -1;
+    assert(!LSBChildStatusSetGroup(&ledger, ticket, 100));
+    assert(!LSBChildStatusPublishJobEvent(&ledger, ticket, SIGTSTP));
+    assert(LSBChildStatusTryWaitOptions(&ledger, -8, 0, WUNTRACED, &pid, &status) == ECHILD);
+    assert(LSBChildStatusTryWaitOptions(&ledger, -100, 0, WCONTINUED, &pid, &status) == EAGAIN);
+    assert(!LSBChildStatusTryWaitOptions(&ledger, -100, 0, WUNTRACED, &pid, &status) && WIFSTOPPED(status) && WSTOPSIG(status) == SIGTSTP);
+    assert(LSBChildStatusTryWaitOptions(&ledger, 100, 0, WUNTRACED, &pid, &status) == EAGAIN);
+    assert(!LSBChildStatusPublishJobEvent(&ledger, ticket, SIGCONT));
+    assert(!LSBChildStatusTryWaitOptions(&ledger, 0, 100, WCONTINUED, &pid, &status) && WIFCONTINUED(status));
+    assert(!LSBChildStatusPublishJobEvent(&ledger, ticket, SIGTSTP));
+    assert(!LSBChildStatusPublishExit(&ledger, ticket, 23 << 8));
+    assert(!LSBChildStatusTryWaitOptions(&ledger, 100, 0, WUNTRACED, &pid, &status) && WIFEXITED(status) && WEXITSTATUS(status) == 23);
+    assert(LSBChildStatusPublishJobEvent(&ledger, ticket, SIGCONT) == ESTALE);
 }
 
 static void testSharedAcrossProcesses(void) {
@@ -493,6 +512,7 @@ int main(void) {
     testObserverBounds();
     testParentAndImport();
     testSharedAcrossProcesses();
+    testJobEvents();
     puts("ChildStatus: 120-child capacity, ABI rejection, exec observations, pinned/reaped EXIT, adoption, discard races, concurrent reuse and shared mapping passed");
     return 0;
 }

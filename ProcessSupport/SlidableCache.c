@@ -131,15 +131,19 @@ int LSBSelectSlidableCacheBaseWithProfile(const LSBSlidableCacheInfo *info, uint
     const LSBSlidableCacheLayout *layout = LSBSlidableCacheLayoutForProfile(kind);
     if (!layout || !info || !actualBase || info->preferredBase != LSB_SLIDABLE_CACHE_PREFERRED_BASE || info->span != layout->span) return EINVAL;
 #if defined(__APPLE__)
+    // For native support, use the start of the executable window as the guest slide. This keeps the main image
+    // below the DSC, in the same order as their preferred Mach-O addresses. Probe through the last cache page.
+    uint64_t cacheOffset = kind == LSBSlidableCacheNativeSupport ? info->preferredBase : 0;
+    mach_vm_size_t probeSize = cacheOffset ? cacheOffset + info->span : LSB_SLIDABLE_CACHE_RESERVATION_SIZE;
     mach_vm_address_t address = info->preferredBase;
-    kern_return_t result = mach_vm_map(mach_task_self(), &address, LSB_SLIDABLE_CACHE_RESERVATION_SIZE, 0, VM_FLAGS_ANYWHERE,
+    kern_return_t result = mach_vm_map(mach_task_self(), &address, probeSize, 0, VM_FLAGS_ANYWHERE,
                                       MACH_PORT_NULL, 0, FALSE, VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_READ | VM_PROT_EXECUTE, VM_INHERIT_NONE);
     if (result != KERN_SUCCESS) return result == KERN_NO_SPACE ? ENOMEM : result == KERN_PROTECTION_FAILURE ? EACCES : EIO;
     // No loads, stores or instruction fetches occur in this anonymous reservation.
-    kern_return_t release = mach_vm_deallocate(mach_task_self(), address, LSB_SLIDABLE_CACHE_RESERVATION_SIZE);
+    kern_return_t release = mach_vm_deallocate(mach_task_self(), address, probeSize);
     if (release != KERN_SUCCESS) return EIO;
-    if (!validBase(address, info->span)) return ERANGE;
-    *actualBase = address;
+    if (address < info->preferredBase || address > UINT64_MAX - cacheOffset || !validBase(address + cacheOffset, info->span)) return ERANGE;
+    *actualBase = address + cacheOffset;
     return 0;
 #else
     return ENOTSUP;

@@ -18,6 +18,10 @@ extern NSString *const LSBTerminalSessionDidCloseNotification;
 // On failure the caller's message and all existing FD ownership remain unchanged.
 - (int)attachToMessageReplacingStandardIO:(LSBReceivedMessage *)message;
 - (void)start;
+// Consume all output already enqueued on the master under the current output flags before acknowledging TCSADRAIN.
+- (int)drainOutput;
+- (int)checkAccess:(LSBTerminalAccess)access forGroup:(pid_t)group background:(BOOL *)background;
+- (int)setForegroundGroup:(pid_t)group;
 - (int)sendInput:(NSData *)data;
 - (void)resizeRows:(unsigned short)rows columns:(unsigned short)columns;
 - (void)close;

@@ -3,7 +3,20 @@ set -eu
 cd "$(dirname "$0")/.."
 test_directory=$(mktemp -d /tmp/LiveSimBooter-tests.XXXXXX)
 trap 'rm -rf "$test_directory"' EXIT HUP INT TERM
-for test_name in HostStartupPolicy UserspaceReboot NativeRuntimePolicy NativeCacheLayout SlidableCache InsertedLibraries; do
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 Tests/ForkHook.c -o "$test_directory/ForkHook"
+"$test_directory/ForkHook"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/ForkMapPlan.c ProcessSupport/ForkMapPlan.c -o "$test_directory/ForkMapPlan"
+"$test_directory/ForkMapPlan"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/ForkSnapshotBroker.c Host/ForkSnapshotBroker.c -o "$test_directory/ForkSnapshotBroker"
+"$test_directory/ForkSnapshotBroker"
+for test_name in ForkBashCommand ForkBashRedirect ForkBashTraps ForkBashEarlyHeap ForkBashPipeline ForkBashSubshell ForkBashSubstitution; do
+    xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -Wl,-dead_strip "Tests/${test_name}Tests.c" -o "$test_directory/$test_name"
+    "$test_directory/$test_name"
+done
+for test_name in HostStartupPolicy UserspaceReboot NativeRuntimePolicy NativeCacheLayout SlidableCache GuestImagePlacement ForkImageGuard ForkStackPreflight \
+                 InsertedLibraries; do
     xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 "Tests/${test_name}Tests.c" -o "$test_directory/$test_name"
     "$test_directory/$test_name"
 done
@@ -83,6 +96,7 @@ xcrun --sdk macosx clang++ -std=c++17 -Wall -Wextra -Werror -arch arm64 -fno-bui
 "$test_directory/DebuggerNotification"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/SpawnPlanTests.c Guest/SpawnAttributes.c Guest/ProcessSession.c Guest/ProcessIdentity.c ProcessSupport/SpawnPlan.c ProcessSupport/ChildStatus.c \
+    Guest/ExecutableAccess.c LiveProcess/ExecutablePath.c -DLSB_EXECUTABLE_ACCESS_TESTING \
     -DLSB_PROCESS_IDENTITY_TESTING -DLSB_PROCESS_SESSION_TESTING -o "$test_directory/SpawnPlan"
 "$test_directory/SpawnPlan"
 LSB_SIMULATE_SESSIONS=1 LSB_TEST_SESSION_GROUP=1 "$test_directory/SpawnPlan"
@@ -126,6 +140,9 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ChildMonitorTests.c Host/ChildMonitor.c -o "$test_directory/ChildMonitor"
 "$test_directory/ChildMonitor"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/TerminalStopWitnessTests.c -o "$test_directory/TerminalStopWitness"
+"$test_directory/TerminalStopWitness"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ChildStatusTests.c ProcessSupport/ChildStatus.c -o "$test_directory/ChildStatus"
 "$test_directory/ChildStatus"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_CHILD_WAIT_TESTING \
@@ -168,7 +185,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -O1 \
     Tests/PeerProcessCompatibilityTests.c -o "$test_directory/PeerProcessCompatibility"
 "$test_directory/PeerProcessCompatibility"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/ProcessSessionTests.c -o "$test_directory/ProcessSession"
+    Tests/ProcessSessionTests.c ProcessSupport/ChildStatus.c -o "$test_directory/ProcessSession"
 "$test_directory/ProcessSession"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -fblocks -DLSB_CHILD_WAIT_TESTING \
     Tests/ProcessEventsTests.c Guest/ChildWait.c ProcessSupport/ChildStatus.c -o "$test_directory/ProcessEvents"

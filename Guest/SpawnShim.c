@@ -2,8 +2,11 @@
 #include "../ProcessSupport/SpawnTransport.h"
 #include "ChildWait.h"
 #include "CreationMask.h"
+#include "ExecutableAccess.h"
+#include "FakePTY.h"
 #include "SpawnAttributes.h"
 #include "ProcessSession.h"
+#include "../LiveProcess/ExecutablePath.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -248,10 +251,11 @@ static int snapshotSession(LSBSpawnPlan *plan) {
 static int snapshotFDs(LSBSpawnPlan *plan, int descriptors[LSB_MAX_FDS]) {
     int limit = getdtablesize();
     int wakeFD = LSBGuestChildWakeFD();
+    int terminalWatchFD = LSBGuestFakePTYWatchFD();
     int highest = 2;
     bool omittedClose[LSB_MAX_ACTIONS] = {0};
     for (int fd = 0; fd < limit; ++fd) {
-        if (fd == wakeFD) continue;
+        if (fd == wakeFD || fd == terminalWatchFD) continue;
         int flags = fcntl(fd, F_GETFD);
         if (flags < 0) { if (errno == EBADF) continue; return errno; }
         if ((flags & FD_CLOEXEC) || (plan->spawnFlags & POSIX_SPAWN_CLOEXEC_DEFAULT)) {
@@ -290,7 +294,7 @@ static int snapshotFDs(LSBSpawnPlan *plan, int descriptors[LSB_MAX_FDS]) {
 }
 
 static int spawnOne(pid_t *pid, const char *path, const posix_spawn_file_actions_t *actions, const posix_spawnattr_t *attributes,
-                    char *const argv[], char *const envp[]) {
+                    char *const argv[], char *const envp[], bool replace) {
     if (!path || !*path || !argv || !argv[0] || !envp) return EINVAL;
     if (strnlen(path, LSB_PATH_BYTES) == LSB_PATH_BYTES) return ENAMETOOLONG;
     LSBSpawnPlan *plan = calloc(1, sizeof(*plan));
@@ -318,7 +322,7 @@ static int spawnOne(pid_t *pid, const char *path, const posix_spawn_file_actions
     SPAWN_STAGE("session", snapshotSession(plan));
     SPAWN_STAGE("attributes", readAttributes(plan, attributes, &additional));
     SPAWN_STAGE("ports", snapshotPorts(&additional.ports, &ports));
-    bool replace = (plan->spawnFlags & POSIX_SPAWN_SETEXEC) != 0;
+    replace |= (plan->spawnFlags & POSIX_SPAWN_SETEXEC) != 0;
     plan->spawnFlags &= ~POSIX_SPAWN_SETEXEC;
     SPAWN_STAGE("actions", readActions(plan, actions, temporaryFDs));
     SPAWN_STAGE("fds", snapshotFDs(plan, descriptors));
@@ -344,7 +348,7 @@ static int spawnOne(pid_t *pid, const char *path, const posix_spawn_file_actions
 int LSBPosixSpawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *actions, const posix_spawnattr_t *attributes,
                   char *const argv[], char *const envp[]) {
     int saved = errno;
-    int result = spawnOne(pid, path, actions, attributes, argv, envp);
+    int result = spawnOne(pid, path, actions, attributes, argv, envp, false);
     errno = saved;
     return result;
 }
@@ -353,7 +357,7 @@ int LSBPosixSpawnP(pid_t *pid, const char *file, const posix_spawn_file_actions_
                    char *const argv[], char *const envp[]) {
     int saved = errno, result = ENOENT;
     if (!file || !*file) result = EINVAL;
-    else if (strchr(file, '/')) result = spawnOne(pid, file, actions, attributes, argv, envp);
+    else if (strchr(file, '/')) result = spawnOne(pid, file, actions, attributes, argv, envp, false);
     else {
         const char *search = getenv("PATH");
         if (!search) search = "/usr/bin:/bin";
@@ -368,7 +372,7 @@ int LSBPosixSpawnP(pid_t *pid, const char *file, const posix_spawn_file_actions_
                 size_t offset = 0;
                 if (length) { memcpy(candidate, search, length); candidate[length] = '/'; offset = length + 1; }
                 memcpy(candidate + offset, file, fileLength + 1);
-                result = spawnOne(pid, candidate, actions, attributes, argv, envp);
+                result = spawnOne(pid, candidate, actions, attributes, argv, envp, false);
             }
             if (!result) break;
             if (result == EACCES) denied = true;
@@ -381,8 +385,24 @@ int LSBPosixSpawnP(pid_t *pid, const char *file, const posix_spawn_file_actions_
     return result;
 }
 
+static int LSBExecve(const char *path, char *const argv[], char *const envp[]) {
+    if (!path) { errno = EFAULT; return -1; }
+    if (!path[0]) { errno = ENOENT; return -1; }
+    // The guest launch ABI needs argv[0]. Darwin accepts a null envp as an empty environment.
+    if (!argv || !argv[0]) { errno = EINVAL; return -1; }
+    char executable[PATH_MAX];
+    int error = LSBResolveGuestExecutable(getenv("DYLD_ROOT_PATH"), path, executable);
+    if (!error && LSBFAccessAt(AT_FDCWD, executable, X_OK, AT_EACCESS)) error = errno;
+    char *const emptyEnvironment[] = {NULL};
+    if (!error) error = spawnOne(NULL, executable, NULL, NULL, argv, envp ? envp : emptyEnvironment, true);
+    // A successful replacement never returns. The original process is still usable after a rejected request.
+    errno = error;
+    return -1;
+}
+
 #ifndef LSB_SPAWN_SHIM_TESTING
 __attribute__((used, section("__DATA,__interpose"))) static const struct { const void *replacement, *original; } interpositions[] = {
-    {(const void *)&LSBPosixSpawn, (const void *)&posix_spawn}, {(const void *)&LSBPosixSpawnP, (const void *)&posix_spawnp}
+    {(const void *)&LSBPosixSpawn, (const void *)&posix_spawn}, {(const void *)&LSBPosixSpawnP, (const void *)&posix_spawnp},
+    {(const void *)&LSBExecve, (const void *)&execve}
 };
 #endif

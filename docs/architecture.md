@@ -93,9 +93,14 @@ before handoff for the pinned query; unsupported query flags return `ENOSYS`. Si
 Simulator `posix_spawn`/`posix_spawnp` requests return to the broker. Supported attributes and ordered descriptor actions are
 replayed in a new LiveProcess. `POSIX_SPAWN_SETEXEC` prepares a replacement native process while keeping a stable guest PID
 for parent wait/signal and launchd events. Shared child-status tables report actual terminal exits and support SIGCHLD.
-Signals target direct simulated children, with positive self signaling handled natively. Cross-process signaling uses
-synchronous IPC and is not async-signal-safe. Generic fork/execve, stopped/continued wait events and full job control are
-not implemented. See [process semantics](multiprocess.md) and [launchd identity](launchd.md).
+Signals target direct simulated children or process groups in the caller’s fake terminal session. Positive self signaling is handled natively. Cross-process signaling uses
+synchronous IPC and is not async-signal-safe. Direct guest `execve` uses the same replacement transaction for supported
+Mach-O executables. The public `fork` hook can resume an arm64 caller on its copied stack. The opt-in Bash trial uses this for foreground fork and exec. Its early fork path also copies a private Bash heap
+at the same address and restores pipe descriptors. A resumed Bash can fork again so the parent receives the captured
+output and wait status of a command substitution. Parenthesized shells get a child-local top-level exit context.
+Interactive Bash uses the fake terminal’s foreground group and the parent’s wait ledger for Ctrl-Z, `bg` and `fg`.
+General fork remains unsupported. See [Bash device results](bash.md),
+[process semantics](multiprocess.md) and [launchd identity](launchd.md).
 
 Graphical mode starts stock simulator launchd, selected matching jobs and stock xpcproxy_sim. The host registers the native
 services into that isolated bootstrap namespace. Metal runs in separate native helpers: public, backboardd, and optionally
@@ -109,8 +114,9 @@ are delivered through Indigo. See [framebuffer](framebuffer.md), [IOSurface](ios
 
 Icon launches wait for **Start** on IOSurface; explicit guest arguments preserve automatic test launches. The persistent
 Fish tab attaches to launchd's fixed terminal-fish job, which replaces itself with Fish. Its socket-backed terminal supports
-selected termios/ioctl behavior, not a native PTY. Settings uses a fixed guest worker for HUD/touch preferences; background
-audio is an explicit opt-in. See [terminal](fake-pty.md), [display settings](display-settings.md) and [guest control](guest-control.md).
+foreground process groups, selected termios/ioctl operations, and job-control signals on background reads and writes.
+Settings uses a fixed guest worker for HUD/touch preferences. Background audio is an explicit opt-in.
+See [terminal](fake-pty.md), [display settings](display-settings.md) and [guest control](guest-control.md).
 An accepted guest userspace reboot drains the old processes and creates new services in the same host while preserving
 the data root and tabs; an ordinary exit or crash does not request a restart.
 

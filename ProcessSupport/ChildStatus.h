@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/event.h>
 #include <sys/types.h>
 
 #define LSB_CHILD_STATUS_MAP_SIZE 4096
@@ -11,13 +12,13 @@
 #define LSB_CHILD_STATUS_ENV "LSB_CHILD_STATUS"
 #define LSB_CHILD_WAKE_FD_ENV "LSB_CHILD_WAKE_FD"
 #define LSB_CHILD_STATUS_MAGIC 0x4c534243u
-#define LSB_CHILD_STATUS_VERSION 5u
+#define LSB_CHILD_STATUS_VERSION 8u
 // Widget providers need headroom beyond 64 live launchd children. Keep the ledger within its existing 4096-byte mapping
-// and the derived broker job limit within its 256-record process list. Version 5 rejects the former 64-slot layout.
+// and the derived broker job limit within its 256-record process list.
 #define LSB_CHILD_STATUS_CAPACITY 120u
 
 typedef struct {
-    // High 44 bits: ticket generation; next 16: observer pins; low 4: phase. One CAS protects reuse against new pins.
+    // High 39 bits: ticket generation; next 5: pending job signal; next 16: observer pins; low 4: phase. One CAS protects reuse against new pins.
     _Atomic(uint64_t) state;
     // Low 32 bits: native PID. High 32 bits: executable generation. One atomic prevents mixed replacement observations.
     _Atomic(uint64_t) execution;
@@ -25,14 +26,23 @@ typedef struct {
 } LSBChildSlot;
 
 typedef struct {
-    uint32_t magic, version, capacity, reserved;
+    uint32_t magic, version, capacity;
+    _Atomic(uint32_t) suppressJobSignal;
     _Atomic(uint64_t) nextGeneration;
     _Atomic(uint32_t) discardExited;
     _Atomic(int32_t) parentPID;
+    _Atomic(uint64_t) terminalSessionAndGroup;
+    // Upper bits identify a default tty-stop handler invocation. Low 5 bits hold its signal while it is in kill(self, SIGSTOP).
+    _Atomic(uint32_t) terminalStop;
+    // The terminal guest waits for EVFILT_SIGNAL(SIGSTOP) with its event list in this shared mapping.
+    // XNU copies udata here while the guest is stopped. The high word is the native audit PID version; the low bit is one for STOP, zero for CONT.
+    struct kevent64_s nativeStopEvent;
     LSBChildSlot slots[LSB_CHILD_STATUS_CAPACITY];
 } LSBChildStatus;
 
-_Static_assert(sizeof(LSBChildSlot) == 32 && offsetof(LSBChildStatus, slots) == 32, "Child status wire layout changed");
+_Static_assert(sizeof(struct kevent64_s) == 48 && offsetof(struct kevent64_s, udata) == 24, "Darwin 64-bit kevent ABI changed");
+_Static_assert(sizeof(LSBChildSlot) == 32 && offsetof(LSBChildStatus, nativeStopEvent) == 48 && offsetof(LSBChildStatus, slots) == 96,
+               "Child status wire layout changed");
 _Static_assert(sizeof(LSBChildStatus) <= LSB_CHILD_STATUS_MAP_SIZE, "Child status mapping is too small");
 
 typedef struct { uint32_t index; uint64_t generation; } LSBChildTicket;
@@ -46,6 +56,7 @@ typedef struct {
 typedef struct {
     LSBChildTicket ticket;
     uint64_t previousExecution, replacementExecution;
+    pid_t replacementGroup; // Zero preserves the existing group. The broker sets this when exec attaches the terminal helper.
 } LSBChildExecUpdate;
 
 void LSBChildStatusInitialize(LSBChildStatus *ledger);
@@ -57,6 +68,8 @@ pid_t LSBChildStatusGetParentPID(const LSBChildStatus *ledger);
 // No pointers cross a process boundary.
 int LSBChildStatusReserve(LSBChildStatus *ledger, LSBChildTicket *ticket);
 int LSBChildStatusPublishRunning(LSBChildStatus *ledger, LSBChildTicket ticket, pid_t pid, pid_t group);
+int LSBChildStatusSetGroup(LSBChildStatus *ledger, LSBChildTicket ticket, pid_t group);
+int LSBChildStatusPublishJobEvent(LSBChildStatus *ledger, LSBChildTicket ticket, int signalNumber);
 // Publishers serialize updates per ticket. Replacement preserves the logical PID/group and increments execGeneration from zero.
 int LSBChildStatusPublishExec(LSBChildStatus *ledger, LSBChildTicket ticket, pid_t nativePID);
 // Prepare excludes exit/other replacement publication. The owning publisher must serialize and finish exactly once.
@@ -79,6 +92,7 @@ int LSBChildStatusPublishExit(LSBChildStatus *ledger, LSBChildTicket ticket, int
 int LSBChildStatusAbandon(LSBChildStatus *ledger, LSBChildTicket ticket);
 // 0: one child reaped; EAGAIN: matching live child; ECHILD: none. Outputs change only on success.
 int LSBChildStatusTryWait(LSBChildStatus *ledger, pid_t selector, pid_t currentGroup, pid_t *pid, int *status);
+int LSBChildStatusTryWaitOptions(LSBChildStatus *ledger, pid_t selector, pid_t currentGroup, int options, pid_t *pid, int *status);
 // SIG_IGN and SA_NOCLDWAIT discard both pending and future statuses. Uses only lock-free atomics.
 void LSBChildStatusSetDiscard(LSBChildStatus *ledger, int discard);
 

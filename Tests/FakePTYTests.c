@@ -1,4 +1,5 @@
 #include "../Guest/FakePTY.h"
+#include "../ProcessSupport/SpawnTransport.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -14,8 +15,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-static pid_t guestGroup = 789123;
-pid_t LSBGuestProcessGroup(void) { if (guestGroup < 0) errno = EIO; return guestGroup; }
+static LSBFakePTYState *hostState;
+pid_t LSBGuestProcessGroup(void) { return atomic_load(&hostState->foreground); }
+int LSBSigaction(int sig, const struct sigaction *act, struct sigaction *old) { return sigaction(sig, act, old); }
+int LSBTransportCheckTerminalIO(LSBTerminalAccess access, bool *signalCaller) { (void)access; (void)signalCaller; return EIO; }
+int LSBTransportSetForegroundGroup(pid_t group) { return LSBFakePTYSetForeground(hostState, group); }
+static int drainError;
+int LSBTransportDrainTerminal(void) { return drainError; }
 
 typedef struct {
     unsigned char input[16384], output[16384];
@@ -64,6 +70,7 @@ int main(void) {
     assert(state != MAP_FAILED);
     assert(LSBFakePTYValidate(state, LSB_FAKE_PTY_MAP_SIZE) == EPROTO);
     assert(!LSBFakePTYInitialize(state, sockets[1], 24, 80));
+    hostState = state;
     assert(LSBFakePTYValidate(state, sizeof(*state) - 1) == EINVAL);
     assert(!LSBFakePTYValidate(state, LSB_FAKE_PTY_MAP_SIZE));
     assert(!LSBGuestFakePTYConfigure(state, LSB_FAKE_PTY_MAP_SIZE));
@@ -94,12 +101,10 @@ int main(void) {
     assert(!LSBPTYNameR(duplicate, name, sizeof(name)) && !strcmp(name, "/dev/lsbtty"));
     assert(LSBPTYNameR(duplicate, name, 2) == ERANGE);
     assert(!strcmp(LSBPTYName(duplicate), name));
-    assert(guestGroup != getpgrp());
-    guestGroup = -1;
-    assert(LSBPTYGetForeground(duplicate) == -1 && errno == EIO);
-    guestGroup = 789123;
+    assert(LSBPTYGetForeground(duplicate) == -1 && errno == ENOTTY);
+    assert(!LSBFakePTYSetForeground(hostState, 789123));
     errno = E2BIG;
-    assert(LSBPTYGetForeground(duplicate) == guestGroup && errno == E2BIG);
+    assert(LSBPTYGetForeground(duplicate) == 789123 && errno == E2BIG);
     assert(!LSBPTYSetForeground(duplicate, 1234));
     assert(LSBPTYGetForeground(duplicate) == 1234);
     assert(LSBPTYSetForeground(duplicate, -1) == -1 && errno == EINVAL);
@@ -115,7 +120,7 @@ int main(void) {
     assert(!LSBFakePTYGetWindow(state, &window) && window.ws_row == 40 && window.ws_col == 120);
     assert(LSBPTYIOCtl(duplicate, TIOCGWINSZ, NULL) == -1 && errno == EFAULT);
     assert(LSBPTYIOCtl(duplicate, TIOCSBRK) == -1 && errno == ENOTSUP);
-    assert(LSBPTYDrain(duplicate) == -1 && errno == ENOTSUP);
+    assert(!LSBPTYDrain(duplicate));
     assert(LSBPTYFlush(duplicate, TCOFLUSH) == -1 && errno == ENOTSUP);
     assert(LSBPTYFlow(duplicate, TCOOFF) == -1 && errno == ENOTSUP);
     assert(LSBPTYSendBreak(duplicate, 0) == -1 && errno == ENOTSUP);
@@ -155,7 +160,8 @@ int main(void) {
     assert(capture.signals == 1 && capture.foreground == 5678 && capture.signalNumber == SIGINT);
     assert(!capture.inputLength && !discipline.length);
     assert(LSBFakePTYInput(state, &discipline, "\004", 1, &callbacks) == ENOTSUP);
-    assert(LSBFakePTYInput(state, &discipline, "\032", 1, &callbacks) == ENOTSUP);
+    assert(!LSBFakePTYInput(state, &discipline, "stale\032", 6, &callbacks));
+    assert(capture.signals == 2 && capture.foreground == 5678 && capture.signalNumber == SIGTSTP && !discipline.length);
     assert(!LSBFakePTYInput(state, &discipline, "abc\004", 4, &callbacks));
     expectBytes(capture.input, capture.inputLength, "abc");
     memset(&capture, 0, sizeof(capture));
@@ -192,7 +198,10 @@ int main(void) {
     attributes.c_cflag = (attributes.c_cflag & ~CSIZE) | CS7;
     assert(LSBPTYSetAttributes(duplicate, TCSANOW, &attributes) == -1 && errno == ENOTSUP);
     attributes = initial;
-    assert(LSBPTYSetAttributes(duplicate, TCSADRAIN, &attributes) == -1 && errno == ENOTSUP);
+    drainError = EPIPE;
+    assert(LSBPTYSetAttributes(duplicate, TCSADRAIN, &attributes) == -1 && errno == EPIPE);
+    drainError = 0;
+    assert(!LSBPTYSetAttributes(duplicate, TCSADRAIN, &attributes));
     assert(LSBPTYSetAttributes(duplicate, -1, &attributes) == -1 && errno == EINVAL);
     assert(LSBPTYIOCtl(duplicate, TIOCSETAF, &attributes) == -1 && errno == ENOTSUP);
     assert(!LSBPTYIOCtl(duplicate, TIOCSETA, &attributes));

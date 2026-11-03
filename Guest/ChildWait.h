@@ -7,6 +7,7 @@
 
 int LSBChildWaitConfigure(LSBChildStatus *ledger, int wakeFD);
 int LSBGuestChildWakeFD(void);
+int LSBTerminalStopSelf(int reason);
 LSBChildStatus *LSBGuestChildStatus(void);
 pid_t LSBWaitPID(pid_t pid, int *status, int options);
 // Resource usage is not collected. By default non-NULL usage is rejected without consuming a terminal status.

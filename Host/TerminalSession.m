@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -151,6 +152,47 @@ static int terminalSignal(void *context, pid_t group, int number) {
     return error;
 }
 
+- (int)readOutputUpTo:(size_t)remaining maxReads:(NSUInteger)maxReads {
+    unsigned char buffer[8192];
+    LSBFakePTYCallbacks callbacks = {(__bridge void *)self, terminalInput, terminalOutput, terminalSignal};
+    while (remaining && maxReads--) {
+        ssize_t count = read(_master, buffer, MIN(sizeof(buffer), remaining));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+        if (count <= 0) { [self close]; return EIO; }
+        int error = LSBFakePTYOutput(_state, buffer, (size_t)count, &callbacks);
+        if (error) return error;
+        remaining -= (size_t)count;
+    }
+    return 0;
+}
+
+- (int)drainOutput {
+    if (_closed) return EIO;
+    int bytes = 0;
+    if (ioctl(_master, FIONREAD, &bytes)) return errno;
+    return [self readOutputUpTo:(size_t)bytes maxReads:NSUIntegerMax];
+}
+
+- (int)checkAccess:(LSBTerminalAccess)access forGroup:(pid_t)group background:(BOOL *)background {
+    if (_closed) return ENOTTY;
+    *background = LSBFakePTYRequiresForeground(_state, group, access == LSB_TERMINAL_WRITE);
+    return 0;
+}
+
+- (int)setForegroundGroup:(pid_t)group {
+    if (_closed) return ENOTTY;
+    if (group <= 0) return EINVAL;
+    pid_t previous;
+    int error = LSBFakePTYGetForeground(_state, &previous);
+    if (error || group == previous) return error;
+    error = LSBFakePTYSetForeground(_state, group);
+    // XNU posts NOTE_FUNLOCK on successful VNOP_ADVLOCK(F_UNLCK). Our private state fd holds no lock.
+    // This wakes sleeping guest readers to recheck the group without writing to the state file.
+    if (!error) (void)flock(_stateFD, LOCK_UN);
+    return error;
+}
+
 - (void)start {
     if (_started || _closed) return;
     _started = YES;
@@ -162,20 +204,9 @@ static int terminalSignal(void *context, pid_t group, int number) {
     dispatch_source_set_event_handler(_reader, ^{
         LSBTerminalSession *session = weakSelf;
         if (!session || session->_closed) return;
-        unsigned char buffer[8192];
         // A continuously writing guest must yield to keyboard, signal and broker events on this same queue.
-        for (unsigned reads = 0; reads < 8; ++reads) {
-            ssize_t count = read(session->_master, buffer, sizeof(buffer));
-            if (count > 0) {
-                LSBFakePTYCallbacks callbacks = {(__bridge void *)session, terminalInput, terminalOutput, terminalSignal};
-                int error = LSBFakePTYOutput(session->_state, buffer, (size_t)count, &callbacks);
-                if (error) fprintf(stderr, "[terminal] output: %s\n", strerror(error));
-            } else if (count < 0 && errno == EINTR) continue;
-            else {
-                if (!count || (errno != EAGAIN && errno != EWOULDBLOCK)) [session close];
-                break;
-            }
-        }
+        int error = [session readOutputUpTo:65536 maxReads:8];
+        if (error && !session->_closed) fprintf(stderr, "[terminal] output: %s\n", strerror(error));
     });
     dispatch_resume(_reader);
     // devicectl --console can supply a pipe or terminal on stdin. A regular file or /dev/null is not an input event source.

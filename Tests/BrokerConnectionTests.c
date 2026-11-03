@@ -19,7 +19,12 @@
 // No Mach-message interposer is linked into either executable.
 extern char **environ;
 extern int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *, mach_port_t *, uint32_t);
-enum { ConcurrentRequests = 8, DescriptorCount = 16, MalformedRequests = 8 };
+enum { ConcurrentRequests = 8, DescriptorCount = 16, MalformedRequests = 8, MalformedForkRequests = 13 };
+static const audit_token_t forkPeer = {{1, 2, 3, 4, 5, 42, 7, 9}};
+static LSBForkWireRange forkRange(unsigned i) {
+    const uint64_t size = LSB_MAX_FORK_BYTES / LSB_MAX_FORK_RANGES;
+    return (LSBForkWireRange){0x120000000ull + i * size, size};
+}
 #ifndef LSB_GUEST_RUNTIME
 static audit_token_t selfAudit(void) {
     audit_token_t audit = {{0}};
@@ -43,6 +48,8 @@ __attribute__((constructor(100))) static void earlyBrokerCall(void) {
     size_t size = 1;
     assert(LSBTransportListProcesses(&list, &size) == ENOTSUP && !list && !size);
     audit_token_t target = {{1, 2, 3, 4, 5, 42, 7, 9}};
+    LSBForkWireRange range = forkRange(0);
+    assert(LSBTransportOfferFork(&target, &range, 1) == ENOTSUP && LSBTransportAcceptFork(&target) == ENOTSUP);
     unsigned char *entitlements = (unsigned char *)(uintptr_t)1;
     size = 1;
     assert(LSBTransportCopyEntitlements(&target, 16, &entitlements, &size) == ENOTSUP && !entitlements && !size);
@@ -133,6 +140,48 @@ static void malformedRequests(void) {
         xpc_release(reply); xpc_release(request);
     }
 }
+
+static void forkTransport(void) {
+    LSBForkWireRange ranges[LSB_MAX_FORK_RANGES + 1];
+    for (unsigned i = 0; i <= LSB_MAX_FORK_RANGES; ++i) ranges[i] = forkRange(i);
+    assert(LSBTransportOfferFork(&forkPeer, NULL, 1) == EINVAL && LSBTransportOfferFork(&forkPeer, ranges, 0) == EINVAL);
+    assert(LSBTransportOfferFork(&forkPeer, ranges, LSB_MAX_FORK_RANGES + 1) == EINVAL && LSBTransportAcceptFork(NULL) == EINVAL);
+    assert(!LSBTransportOfferFork(&forkPeer, ranges, LSB_MAX_FORK_RANGES));
+    assert(LSBTransportAcceptFork(&forkPeer) == ESTALE);
+    for (unsigned i = 0; i < MalformedForkRequests; ++i) {
+        xpc_object_t request = xpc_dictionary_create(NULL, NULL, 0), reply = NULL;
+        audit_token_t audit = forkPeer;
+        LSBForkWireRange pair[] = {forkRange(0), forkRange(1)};
+        size_t length = sizeof(pair);
+        uint64_t kind = LSB_REQUEST_FORK_OFFER;
+        xpc_dictionary_set_uint64(request, "version", LSB_TRANSPORT_VERSION);
+        xpc_dictionary_set_uint64(request, "request-id", 0);
+        xpc_dictionary_set_int64(request, "error", 0);
+        switch (i) {
+            case 0: audit.val[7] = 0; break;
+            case 1: audit.val[5] = 0; break;
+            case 2: length--; break;
+            case 3: length = 0; break;
+            case 4: pair[1].start = pair[0].start; break;
+            case 5: pair[1].size = LSB_MAX_FORK_BYTES; break;
+            case 6: pair[1].start = UINT64_MAX - 0x3fff; break;
+            case 7: pair[0].size = 0; break;
+            case 8: ++pair[0].start; break;
+            case 9: kind = LSB_REQUEST_FORK_ACCEPT; break; // ranges on accept
+            case 10: xpc_dictionary_set_mach_send(request, "extra-right", argumentPort); break;
+            case 11: break; // oversized array
+            case 12: break; // wrong type for a required field
+        }
+        xpc_dictionary_set_uint64(request, "kind", kind);
+        xpc_dictionary_set_data(request, "target-audit", &audit, sizeof(audit));
+        if (i == 11) xpc_dictionary_set_data(request, "fork-ranges", ranges, sizeof(ranges));
+        else if (i == 12) xpc_dictionary_set_string(request, "fork-ranges", "address");
+        else xpc_dictionary_set_data(request, "fork-ranges", pair, length);
+        assert(!LSBBrokerConnectionCall(broker, request, &reply) && reply);
+        assert(xpc_dictionary_get_count(reply) == 4 && xpc_dictionary_get_int64(reply, "error") == EPROTO);
+        xpc_release(reply); xpc_release(request);
+    }
+}
 int main(void) {
     alarm(30);
     assert(!LSBRequireSingleThread()); // Native pre-handoff IPC is covered separately; guest construction has not started workers yet.
@@ -166,6 +215,12 @@ int main(void) {
     assert(!task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&returned, &count));
     assert(!memcmp(&returned, &brokerAudit, sizeof(returned)) && !mach_port_deallocate(mach_task_self(), task));
     malformedRequests();
+    forkTransport();
+    bool signalCaller = true;
+    assert(LSBTransportCheckTerminalIO(0, &signalCaller) == EINVAL && !signalCaller);
+    assert(!LSBTransportCheckTerminalIO(LSB_TERMINAL_READ, &signalCaller) && signalCaller);
+    assert(!LSBTransportCheckTerminalIO(LSB_TERMINAL_WRITE, &signalCaller) && !signalCaller);
+    assert(LSBTransportCheckTerminalIO(LSB_TERMINAL_CONTROL, &signalCaller) == EIO && !signalCaller);
     assert(descriptorCount() == descriptors && sendReferences(argumentPort) == 1);
     // The server disconnects this request without a reply. Never reconnect/replay a possibly mutating request.
     assert(LSBTransportRebootUserspace() == EPIPE);
@@ -226,12 +281,25 @@ static void receiveRequest(xpc_object_t event, xpc_connection_t peer, dispatch_q
     if (message->kind == LSB_REQUEST_KILL) {
         assert(message->targetPID == 42 && !message->signalNumber);
         assert(!LSBTransportReply(message, 0, 42, 0, NULL, NULL, NULL));
+    } else if (message->kind == LSB_REQUEST_CHECK_TERMINAL_IO) {
+        int error = message->terminalAccess == LSB_TERMINAL_CONTROL ? EIO : 0;
+        pid_t local = message->terminalAccess == LSB_TERMINAL_READ ? 42 : 0;
+        assert(!LSBTransportReply(message, error, local, 0, NULL, NULL, NULL));
     } else if (message->kind == LSB_REQUEST_REGISTER_DEBUGGER_PORT) {
         assert(MACH_PORT_VALID(message->processDebuggerPort));
         assert(!LSBTransportReply(message, 0, 0, 0, NULL, NULL, NULL));
     } else if (message->kind == LSB_REQUEST_COPY_PROCESS_TASK) {
         audit_token_t audit = selfAudit();
         assert(!LSBTransportReplyProcessTask(message, 0, taskName, &audit));
+    } else if (message->kind == LSB_REQUEST_FORK_OFFER || message->kind == LSB_REQUEST_FORK_ACCEPT) {
+        bool offer = message->kind == LSB_REQUEST_FORK_OFFER;
+        assert(!memcmp(&message->targetAudit, &forkPeer, sizeof(forkPeer)));
+        assert(message->forkRangeCount == (offer ? LSB_MAX_FORK_RANGES : 0));
+        for (unsigned i = 0; i < message->forkRangeCount; ++i) {
+            LSBForkWireRange expected = forkRange(i);
+            assert(!memcmp(&expected, &message->forkRanges[i], sizeof(expected)));
+        }
+        assert(!LSBTransportReply(message, offer ? 0 : ESTALE, 0, 0, NULL, NULL, NULL));
     } else {
         assert(message->kind == LSB_REQUEST_REBOOT_USERSPACE && atomic_load(&completed) == ConcurrentRequests);
         xpc_connection_cancel(peer);
@@ -266,7 +334,7 @@ int main(int argc, char **argv) {
     posix_spawnattr_destroy(&attributes);
     int status = 0; assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
     dispatch_sync(queue, ^{ assert(atomic_load(&accepted) == 1 && atomic_load(&spawns) == ConcurrentRequests && !atomic_load(&outstanding)); });
-    assert(atomic_load(&malformed) == MalformedRequests);
+    assert(atomic_load(&malformed) == MalformedRequests + MalformedForkRequests);
     xpc_connection_cancel(listener); xpc_release(endpoint); xpc_release(listener);
     mach_port_deallocate(mach_task_self(), port); mach_port_deallocate(mach_task_self(), taskName); dispatch_release(queue);
     puts("BrokerConnection server: sim2host endpoint, authenticated decoding, asynchronous ownership and forbidden startup requests passed");

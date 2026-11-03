@@ -10,15 +10,19 @@ static unsigned transportCalls;
 static int transportFailure;
 static int pathSearch;
 static int internalWakeFD = -1;
+static int internalTerminalFD = -1;
 static int creationMaskError;
 static uint32_t capturedCreationMask = 027;
 static unsigned execCalls;
+static const char *expectedExecvePath;
 static mach_port_t expectedRegisteredPort;
 static bool inspectPorts;
 static uint32_t capturedSpawnFlags;
 extern int posix_spawn_file_actions_add_fileportdup2_np(posix_spawn_file_actions_t *, mach_port_t, int);
 int LSBGuestChildWakeFD(void) { return internalWakeFD; }
+int LSBGuestFakePTYWatchFD(void) { return internalTerminalFD; }
 LSBChildStatus *LSBGuestChildStatus(void) { return NULL; }
+int LSBTransportSetProcessGroup(pid_t pid, pid_t group) { (void)pid; (void)group; return ENOTSUP; }
 // CreationMaskTests exercises the kernel-aware snapshot; this suite verifies serialization and error propagation.
 int LSBReadCreationMask(uint32_t *mask) {
     if (creationMaskError) return creationMaskError;
@@ -45,6 +49,11 @@ int LSBTransportSpawnWithPorts(const LSBSpawnPlan *plan, const int fds[LSB_MAX_F
 
 int LSBTransportExecWithPorts(const LSBSpawnPlan *plan, const int fds[LSB_MAX_FDS], const LSBSpawnPorts *ports) {
     ++execCalls;
+    if (expectedExecvePath) {
+        assert(!strcmp(plan->strings + plan->path, expectedExecvePath));
+        assert(plan->argc == 2 && !strcmp(plan->strings + plan->argv[0], "custom-name") && !strcmp(plan->strings + plan->argv[1], "two words"));
+        assert(plan->envc == 0 && plan->spawnFlags == 0 && plan->actionCount == 0);
+    }
     pid_t ignored;
     return LSBTransportSpawnWithPorts(plan, fds, ports, &ignored);
 }
@@ -292,9 +301,15 @@ static void preservedInternalDescriptor(void) {
     CHECK(fcntl(internalWakeFD, F_GETFD) == FD_CLOEXEC);
     CHECK(fcntl(60, F_GETFD) == -1 && errno == EBADF);
     LSBSpawnPlan *snapshot = newPlan();
+    internalTerminalFD = fcntl(internalWakeFD, F_DUPFD_CLOEXEC, 91);
+    CHECK(internalTerminalFD >= 91);
+    snapshot->actions[0] = (LSBFileAction){ .kind = LSB_ACTION_INHERIT, .fd = internalTerminalFD };
+    snapshot->actionCount = 1;
     emptyFDs(received);
     CHECK(snapshotFDs(snapshot, received) == 0 && snapshot->fdCount == 0);
     CHECK(close(internalWakeFD) == 0);
+    CHECK(close(internalTerminalFD) == 0);
+    internalWakeFD = internalTerminalFD = -1;
 }
 
 static char workingDirectory[LSB_PATH_BYTES];
@@ -599,6 +614,24 @@ static void execNeverReturns(void) {
     _exit(99);
 }
 
+static void directExecve(void) {
+    CHECK(!setenv("DYLD_ROOT_PATH", workingDirectory, 1) && !chdir(workingDirectory));
+    char *argv[] = {"custom-name", "two words", NULL};
+    CHECK(LSBExecve("", argv, NULL) == -1 && errno == ENOENT);
+    CHECK(LSBExecve("/missing", argv, NULL) == -1 && errno == ENOENT);
+    CHECK(!chmod("tool", 0600));
+    CHECK(LSBExecve("./tool", argv, NULL) == -1 && (errno == EACCES || errno == EPERM));
+    CHECK(execCalls == 0 && !chmod("tool", 0700));
+    char path[PATH_MAX];
+    CHECK(realpath("tool", path));
+    expectedExecvePath = path;
+    transportFailure = ENOEXEC;
+    CHECK(LSBExecve("./tool", argv, NULL) == -1 && errno == ENOEXEC && execCalls == 1);
+    transportFailure = 0;
+    (void)LSBExecve("/tool", argv, NULL);
+    _exit(99);
+}
+
 static void fileportActionOrdering(void) {
     int a[2], b[2];
     CHECK(!pipe(a) && !pipe(b));
@@ -719,6 +752,11 @@ int main(void) {
     snprintf(childPath, sizeof(childPath), "%s/nested", workingDirectory);
     assert(!mkdir(childPath, 0700));
     runChild(opensAndDirectories, "open, chdir and fchdir ordering");
+    snprintf(childPath, sizeof(childPath), "%s/tool", workingDirectory);
+    int tool = open(childPath, O_CREAT | O_EXCL | O_WRONLY, 0700);
+    assert(tool >= 0 && !close(tool));
+    runChild(directExecve, "execve validates paths, preserves arguments and reports replacement errors through errno");
+    assert(!unlink(childPath));
     snprintf(childPath, sizeof(childPath), "%s/nested/made", workingDirectory);
     assert(!unlink(childPath));
     snprintf(childPath, sizeof(childPath), "%s/nested", workingDirectory);

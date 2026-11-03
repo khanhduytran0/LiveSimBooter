@@ -12,7 +12,7 @@ dyld_sim and the guest executable. They read the cache reservation before mappin
 whole-file parse view before reserving image memory. The layout keeps owned copies of its segment commands; the file
 descriptor remains open for signature registration and segment mapping.
 
-With a cache present, the allocator scans occupied VM regions between the native main-image/preferred-image lower bound
+For dyld_sim and the original cache profile, the allocator scans occupied VM regions between the native main-image/preferred-image lower bound
 and `min(cache base, 0x180000000)`. It requests fixed reservations **without `VM_FLAGS_OVERWRITE`**, skips insufficient gaps,
 and bounds retries if another mapping wins a race. Segment `MAP_FIXED` operations replace only pages inside the reservation
 it owns. No fitting gap is an explicit failure; executable images are not moved into the high shared-region interval.
@@ -1085,12 +1085,17 @@ was restarted. The deployed loader still uses its existing fixed base; this expe
 
 ### Automatic base selection and shared DATA preparation
 
-The tracked implementation now extends the fixed-`0x7000000000` prototype above. Before queuing a new simulator session,
-the native broker inspects the supported slidable cache, obtains a 3 GiB RX `mach_vm_map` ANYWHERE reservation using
-`0x180000000` as the hint, and releases it without touching pages. The returned address is the session's common cache base;
-it is not hardcoded by phone model. A previously selected base can be reused for the same cache UUID across a userspace reboot.
-The authenticated bootstrap carries this value to guests (transport ABI 9, bootstrap ABI 7); native helper roles receive zero.
-Rebuild the host, extension and guest transport consumers together.
+Before queuing the first guest, the native broker asks `mach_vm_map` for an anonymous RX window with
+`VM_FLAGS_ANYWHERE` and an address hint of `0x180000000`. It releases the reservation without touching any page.
+The original cache profile requests 3 GiB and places the DSC at the returned address. For the native-support profile,
+the returned address is the **slide**. The DSC starts at slide + `0x180000000`, while the guest's main executable
+starts at slide + `0x100000000`. The broker probes `0x1fe14c000` bytes to cover both addresses through the last byte
+of the supported cache. The loader reserves each executable's exact range in its own process and checks that TEXT has
+execute permission. It continues to place dyld_sim in the low range.
+
+The host can reuse a selected base for the same cache UUID across a userspace reboot. The authenticated bootstrap carries
+the actual DSC address to all simulator guests. Native helpers receive zero. See [the Bash fork trial](bash.md#guest-executables-below-the-slid-cache)
+for the separate fork-observer slot and device results.
 
 The host decodes the exact v2 chains once into an immutable `lsb-slide-<cache UUID>-<base>.data` file beside the cache.
 It publishes completed output atomically and validates its header before reuse. Each guest compares the selected base,

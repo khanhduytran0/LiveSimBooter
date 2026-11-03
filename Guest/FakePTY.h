@@ -5,6 +5,8 @@
 
 // The mapping remains owned by the caller. Production initializes it from the host's per-session state-file environment variable.
 int LSBGuestFakePTYConfigure(LSBFakePTYState *state, size_t mappedBytes);
+// Owned close-on-exec state descriptor for group-change wakeups. The spawn shim excludes it from guest descriptor handoff.
+int LSBGuestFakePTYWatchFD(void);
 int LSBPTYIsATTY(int fd);
 int LSBPTYGetAttributes(int fd, struct termios *attributes);
 int LSBPTYSetAttributes(int fd, int action, const struct termios *attributes);

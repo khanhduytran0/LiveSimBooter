@@ -24,9 +24,8 @@ static void selfSignal(int number) { if (number == SIGUSR1) ++selfSignals; }
 int main(void) {
     assert(LSBKill(42, -1) == -1 && errno == EINVAL);
     assert(LSBKill(42, NSIG) == -1 && errno == EINVAL);
-    assert(LSBKill(0, SIGTERM) == -1 && errno == ENOTSUP);
+    assert(LSBKillPG(-123, 0) == -1 && errno == EINVAL);
     assert(LSBKill(-1, SIGTERM) == -1 && errno == ENOTSUP);
-    assert(LSBKill(-123, 0) == -1 && errno == ENOTSUP);
     assert(!transportCalls);
 
     errno = EDOM;
@@ -34,6 +33,8 @@ int main(void) {
     assert(transportCalls == 1 && requestedPID == 42 && requestedSignal == 0);
     assert(!LSBKill(42, SIGTERM) && errno == EDOM);
     assert(transportCalls == 2 && requestedSignal == SIGTERM);
+    assert(!LSBKill(0, SIGTERM) && requestedPID == 0);
+    assert(!LSBKillPG(123, SIGCONT) && requestedPID == -123 && requestedSignal == SIGCONT);
     transportError = ESRCH;
     assert(LSBKill(42, SIGTERM) == -1 && errno == ESRCH);
     transportError = EPERM;

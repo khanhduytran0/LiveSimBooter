@@ -1,5 +1,7 @@
 #include "ProcessSession.h"
 #include "ProcessIdentity.h"
+#include "ChildWait.h"
+#include "../ProcessSupport/SpawnTransport.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -51,11 +53,19 @@ __attribute__((constructor)) static void initializeSession(void) {
     errno = savedErrno;
 }
 
+static uint64_t terminalIdentity(void) {
+    LSBChildStatus *ledger = LSBGuestChildStatus();
+    return ledger ? atomic_load_explicit(&ledger->terminalSessionAndGroup, memory_order_acquire) : 0;
+}
+
 int LSBProcessSessionSnapshot(pid_t *session, pid_t *group) {
     if (!session || !group) return EINVAL;
-    int error = atomic_load_explicit(&sessionError, memory_order_acquire);
-    if (error) return error;
-    uint64_t value = atomic_load_explicit(&sessionAndGroup, memory_order_acquire);
+    uint64_t value = terminalIdentity();
+    if (!value) {
+        int error = atomic_load_explicit(&sessionError, memory_order_acquire);
+        if (error) return error;
+        value = atomic_load_explicit(&sessionAndGroup, memory_order_acquire);
+    }
     *session = (pid_t)(uint32_t)(value >> 32);
     *group = (pid_t)(uint32_t)value;
     return 0;
@@ -75,8 +85,13 @@ static pid_t sessionQuery(pid_t pid, int wantSession) {
     if (error == ENOTSUP) return wantSession ? getsid(pid) : getpgid(pid);
     if (error) { errno = error; return -1; }
     if (pid < 0) { errno = EINVAL; return -1; }
-    // No cross-process session ledger exists yet. Never substitute a native PID lookup for a logical guest PID.
-    if (pid && pid != LSBGuestPID()) { errno = ENOTSUP; return -1; }
+    if (pid && pid != LSBGuestPID()) {
+        if (!terminalIdentity() || wantSession) { errno = ENOTSUP; return -1; }
+        LSBChildObservation child;
+        error = LSBChildStatusObserve(LSBGuestChildStatus(), pid, &child);
+        if (error) { errno = error == ECHILD ? ESRCH : error; return -1; }
+        return child.group;
+    }
     return wantSession ? session : group;
 }
 
@@ -84,6 +99,12 @@ pid_t LSBGuestGetPGID(pid_t pid) { return sessionQuery(pid, 0); }
 pid_t LSBGuestGetSID(pid_t pid) { return sessionQuery(pid, 1); }
 
 pid_t LSBGuestSetSID(void) {
+    uint64_t terminal = terminalIdentity();
+    if (terminal) {
+        // Leaving the fake controlling terminal needs a separate broker detach operation.
+        errno = (pid_t)(uint32_t)terminal == LSBGuestPID() ? EPERM : ENOTSUP;
+        return -1;
+    }
     int error = atomic_load_explicit(&sessionError, memory_order_acquire);
     if (error == ENOTSUP) return setsid();
     if (error) { errno = error; return -1; }
@@ -98,6 +119,12 @@ pid_t LSBGuestSetSID(void) {
 }
 
 int LSBGuestSetPGID(pid_t pid, pid_t group) {
+    if (terminalIdentity()) {
+        int saved = errno;
+        int error = LSBTransportSetProcessGroup(pid, group);
+        errno = error ?: saved;
+        return error ? -1 : 0;
+    }
     int error = atomic_load_explicit(&sessionError, memory_order_acquire);
     if (error == ENOTSUP) return setpgid(pid, group);
     // Changing groups needs broker metadata and group signaling support. Fail explicitly instead of changing only the native process.
@@ -106,6 +133,7 @@ int LSBGuestSetPGID(pid_t pid, pid_t group) {
 }
 
 pid_t LSBGuestSetPGrp(void) {
+    if (terminalIdentity()) return LSBGuestSetPGID(0, 0);
     int error = atomic_load_explicit(&sessionError, memory_order_acquire);
     if (error == ENOTSUP) return setpgrp();
     errno = error ? error : ENOTSUP;

@@ -4,6 +4,8 @@
 #include "Broker.h"
 #include "ExtensionLauncher.h"
 #include "ChildMonitor.h"
+#include "TerminalJobState.h"
+#include <sys/event.h>
 #include "RunningBoardMonitor.h"
 #include "SessionControlQueue.h"
 #import "DeviceConfiguration.h"
@@ -16,6 +18,7 @@
 #include "StoreAppGroups.h"
 #include "ChildStatus.h"
 #include "SpawnTransport.h"
+#include "ForkSnapshotBroker.h"
 #include "SlidableCache.h"
 #include "PrivateXPC.h"
 #include "LaunchdHandshake.h"
@@ -58,11 +61,17 @@ enum { JobQueued, JobStarting, JobDispatched, JobRunning };
 @property (nonatomic, strong) LSBRunningBoardMonitor *runningBoardMonitor;
 @property audit_token_t audit;
 @property uint64_t parentIdentifier;
+@property (nonatomic, copy) NSData *forkOffer;
+@property uint64_t forkOfferParent;
 @property LSBChildTicket parentTicket;
 @property BOOL parentStatusPublished, parentStatusPending, retiredForExec;
 @property LSBChildStatus *childStatus;
 @property int statusFD, wakeReadFD, wakeWriteFD;
 @property BOOL terminalSession;
+@property pid_t terminalSID, terminalGroup;
+@property dispatch_source_t terminalSignalMonitor;
+@property BOOL terminalSignalCheckPending, terminalBSDInfoDenied, stopRequested, terminalStopped;
+@property uint64_t consumedStopReceipt;
 @property BOOL simulatorLaunchd;
 @property BOOL rebootRequested;
 @property LSBLaunchdHandshake *launchdHandshake;
@@ -578,6 +587,7 @@ static void stopGuestTaskCapture(LSBJob *job) {
 }
 
 static void releaseGuestProcessIdentity(LSBJob *job) {
+    job.forkOffer = nil;
     LSBPeerProcessIdentity snapshot = job.peerIdentity;
     job.peerIdentity = (LSBPeerProcessIdentity){0};
     job.peerIdentityError = ESRCH;
@@ -746,7 +756,7 @@ static void wakeParent(LSBJob *parent) {
     if (written < 0 && errno != EAGAIN) fprintf(stderr, "[broker] Child wake failed: %s\n", strerror(errno));
 }
 
-static void signalChildExit(LSBJob *parent) {
+static void notifyChildStatus(LSBJob *parent) {
     wakeParent(parent);
     audit_token_t identity = parent.audit;
     int error = LSBChildSignal(&identity, SIGCHLD);
@@ -784,7 +794,7 @@ static void retryAdoptions(void) {
         }
         if (child) { child.parentTicket = ticket; child.parentStatusPending = NO; }
         [pendingAdoptions removeObject:pending];
-        if (observation.exited) signalChildExit(parent);
+        if (observation.exited) notifyChildStatus(parent);
         else wakeParent(parent);
         fprintf(stderr, "[broker] adopted guest=%d by guest=%d native=%d exited=%d\n",
                 observation.guestPID, parent.guestPID, observation.nativePID, observation.exited);
@@ -871,6 +881,7 @@ static void finishJob(LSBJob *job, int error) {
         finishDeviceChange(error ? error : EIO);
     }
     job.finishing = YES;
+    if (job.terminalSignalMonitor) { dispatch_source_cancel(job.terminalSignalMonitor); job.terminalSignalMonitor = nil; }
     if (job.executionRole == LSB_EXECUTION_NATIVE_SIGNER && job.identifier == signerJobIdentifier) {
         [lazySigning invalidate];
         signerJobIdentifier = 0;
@@ -973,6 +984,11 @@ static void finishJob(LSBJob *job, int error) {
     if (pending) [pendingAdoptions removeObject:pending]; // Unknown monitor failure must not invent a successful exit.
     LSBJob *adopter = job.retiredForExec ? nil : adoptiveLaunchd(job);
     for (LSBJob *child in [jobs copy]) {
+        // Exec can reparent the child before retiring the native instance that made its offer.
+        if (child.forkOfferParent == job.identifier) {
+            child.forkOffer = nil;
+            child.forkOfferParent = 0;
+        }
         if (child.parentIdentifier != job.identifier) continue;
         if (child.phase != JobRunning) {
             child.parentIdentifier = 0;
@@ -1037,7 +1053,7 @@ static void recordChildExit(uint64_t identifier, int waitStatus) {
         } else {
             int error = LSBChildStatusPublishExit(parent.childStatus, job.parentTicket, waitStatus);
             if (error) fprintf(stderr, "[broker] Could not publish child status: %s\n", strerror(error));
-            else { job.parentStatusPublished = YES; signalChildExit(parent); }
+            else { job.parentStatusPublished = YES; notifyChildStatus(parent); }
         }
     }
     if (job.rebootRequested && job.simulatorLaunchd && job.phase == JobRunning && WIFEXITED(waitStatus) && !WEXITSTATUS(waitStatus)) {
@@ -1302,6 +1318,105 @@ static void enqueueExec(LSBReceivedMessage *message, LSBJob *old) {
     startNextJob();
 }
 
+static int taskSuspendCount(LSBJob *job) {
+    mach_port_t task = job.taskPort ?: job.peerIdentity.taskName;
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (!MACH_PORT_VALID(task) || task_info(task, MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) || count != MACH_TASK_BASIC_INFO_COUNT) return -1;
+    return info.suspend_count;
+}
+
+static void observeTerminalJob(LSBJob *child) {
+    if (!child || child.finishing || child.retiredForExec || child.phase != JobRunning || !child.parentIdentifier || child.parentStatusPending) return;
+    int stop = 0;
+    uint64_t observedReceipt = 0;
+    unsigned ttySignal = atomic_load_explicit(&child.childStatus->terminalStop, memory_order_acquire) & 31u;
+    if (ttySignal != SIGSTOP && ttySignal != SIGTSTP && ttySignal != SIGTTIN && ttySignal != SIGTTOU) ttySignal = 0;
+    if (!child.terminalBSDInfoDenied) {
+        audit_token_t identity = child.audit;
+        int error = LSBReadTerminalJobState(&identity, &stop);
+        if (error == EPERM || error == EACCES) child.terminalBSDInfoDenied = YES;
+        else if (error) return;
+    }
+    if (child.terminalBSDInfoDenied) {
+        // The old and replacement images briefly share the ledger during exec. Only this native process can supply its receipt.
+        uint64_t receipt = __atomic_load_n(&child.childStatus->nativeStopEvent.udata, __ATOMIC_ACQUIRE);
+        bool freshStop = (uint32_t)(receipt >> 32) == child.pidVersion && (receipt & 1) && receipt != child.consumedStopReceipt;
+        if (freshStop && !LSBTerminalTaskHasNoSoftwareHandler(child.taskPort)) {
+            // PT_ATTACHEXC sends a genuine SIGSTOP. Consume it even if the debugger has not suspended the whole task yet.
+            child.consumedStopReceipt = receipt;
+            freshStop = false;
+        }
+        if (!child.terminalStopped && !ttySignal && !child.stopRequested && !freshStop) return;
+        int count = taskSuspendCount(child);
+        if (count < 0) return;
+        if (count > 0) {
+            stop = SIGSTOP;
+            if (freshStop) observedReceipt = receipt;
+        }
+        if (child.terminalStopped && freshStop) {
+            // The prior stop was published from the broker or tty handler before the kernel copied its receipt.
+            child.consumedStopReceipt = receipt;
+        }
+    }
+    if (!!stop == child.terminalStopped) return;
+    LSBJob *parent = findJob(child.parentIdentifier);
+    if (!parent) return;
+    int number = stop ? (stop == SIGSTOP && ttySignal ? (int)ttySignal : stop) : SIGCONT;
+    if (LSBChildStatusPublishJobEvent(parent.childStatus, child.parentTicket, number)) return;
+    if (observedReceipt) child.consumedStopReceipt = observedReceipt;
+    child.terminalStopped = !!stop;
+    child.stopRequested = NO;
+    if (atomic_load_explicit(&parent.childStatus->suppressJobSignal, memory_order_acquire)) wakeParent(parent);
+    else notifyChildStatus(parent);
+}
+
+static void checkAfterSignal(LSBJob *job) {
+    observeTerminalJob(job);
+    // XNU posts NOTE_SIGNAL before it changes the BSD state. Recheck after delivery, coalescing bursts.
+    // When a blocked default tty stop is unmasked, its self-SIGSTOP produces a fresh kernel notification.
+    if (job.terminalSignalCheckPending) return;
+    job.terminalSignalCheckPending = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        job.terminalSignalCheckPending = NO;
+        observeTerminalJob(job);
+    });
+}
+
+static void monitorTerminalJob(LSBJob *job) {
+    if (!job.terminalSession || !job.childStatus || (!job.parentIdentifier && !job.replacesIdentifier) || job.terminalSignalMonitor) return;
+    // NOTE_SIGNAL (without NOTE_EXITSTATUS) does not require permission to signal the peer in XNU's filt_procattach.
+    // Synchronous registration avoids missing a stop between guest READY and libdispatch installing a process filter.
+    int queue = kqueue();
+    if (queue >= 0) {
+        struct kevent change;
+        EV_SET(&change, (uintptr_t)job.pid, EVFILT_PROC, EV_ADD | EV_CLEAR, NOTE_SIGNAL, 0, NULL);
+        if (!fcntl(queue, F_SETFD, FD_CLOEXEC) && !kevent(queue, &change, 1, NULL, 0, NULL))
+            job.terminalSignalMonitor = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, queue, 0, dispatch_get_main_queue());
+        if (!job.terminalSignalMonitor) { close(queue); queue = -1; }
+    }
+    __weak LSBJob *weakJob = job;
+    if (queue >= 0) {
+        dispatch_source_set_event_handler(job.terminalSignalMonitor, ^{
+            struct kevent event;
+            struct timespec now = {};
+            LSBJob *current = weakJob;
+            if (kevent(queue, NULL, 0, &event, 1, &now) != 1 || !current || current.finishing) return;
+            if (event.flags & EV_EOF) { dispatch_source_cancel(current.terminalSignalMonitor); return; }
+            if (event.fflags & NOTE_SIGNAL) checkAfterSignal(current);
+        });
+        dispatch_source_set_cancel_handler(job.terminalSignalMonitor, ^{ close(queue); });
+    } else {
+        // Some sandboxes deny EVFILT_PROC. Observe only the attached terminal lineage in this fallback.
+        job.terminalSignalMonitor = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+        if (!job.terminalSignalMonitor) return;
+        dispatch_source_set_timer(job.terminalSignalMonitor, DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC, 50 * NSEC_PER_MSEC);
+        dispatch_source_set_event_handler(job.terminalSignalMonitor, ^{ observeTerminalJob(weakJob); });
+    }
+    dispatch_resume(job.terminalSignalMonitor);
+    observeTerminalJob(job);
+}
+
 static int signalJob(LSBJob *child, int signalNumber) {
     audit_token_t identity = child.audit;
     // A retained job can outlive the process until its queued exit notification runs. Validate the full PID generation.
@@ -1314,6 +1429,10 @@ static int signalJob(LSBJob *child, int signalNumber) {
         if (!error) fprintf(stderr, "[broker] signal=%d submitted through launchd for request=%llu pid=%d\n",
                             signalNumber, child.identifier, child.pid);
     }
+    if (!error && child.terminalSession && (signalNumber == SIGSTOP || signalNumber == SIGCONT)) {
+        child.stopRequested = signalNumber == SIGSTOP;
+        checkAfterSignal(child);
+    }
     return error;
 }
 
@@ -1322,9 +1441,29 @@ static BOOL launchdOwnsChildIdentity(LSBJob *job) {
     return job.simulatorLaunchd && !job.peerIdentityError && !strcmp(identity.executablePath, "/sbin/launchd_sim");
 }
 
+static BOOL terminalMember(LSBJob *job, pid_t sid, pid_t group) {
+    return job.terminalSession && job.executionRole == LSB_EXECUTION_SIMULATOR && job.phase == JobRunning && !job.finishing && !job.retiredForExec &&
+           (!sid || sid == job.terminalSID) && job.terminalGroup == (group ?: job.terminalSID);
+}
+
+static int signalTerminalGroup(pid_t sid, pid_t group, int signalNumber, LSBJob *signalsItself) {
+    int firstError = ESRCH;
+    BOOL delivered = NO;
+    for (LSBJob *job in jobs) {
+        if (!terminalMember(job, sid, group)) continue;
+        int error = job == signalsItself ? 0 : signalJob(job, signalNumber);
+        if (!error) delivered = YES;
+        else if (firstError == ESRCH) firstError = error;
+    }
+    return delivered ? 0 : firstError;
+}
+
 static int signalChild(LSBJob *parent, pid_t targetPID, int signalNumber) {
     if (signalNumber < 0 || signalNumber >= NSIG) return EINVAL;
-    if (targetPID <= 0) return ENOTSUP;
+    if (targetPID <= 0) {
+        if (!parent.terminalSession || !parent.terminalSID || targetPID == -1 || targetPID == INT_MIN) return ENOTSUP;
+        return signalTerminalGroup(parent.terminalSID, targetPID ? -targetPID : parent.terminalGroup, signalNumber, nil);
+    }
     BOOL nativeAlias = launchdOwnsChildIdentity(parent);
     LSBJob *target = nil;
     for (LSBJob *job in jobs) {
@@ -1341,19 +1480,65 @@ static int signalChild(LSBJob *parent, pid_t targetPID, int signalNumber) {
 }
 
 static int signalTerminal(pid_t foreground, int signalNumber) {
-    (void)foreground;
-    // This first terminal runs with job control disabled: the shell and its descendants share terminal signals.
-    // It does not implement kernel process groups or stopped/continued job notifications.
-    if (signalNumber != SIGINT && signalNumber != SIGQUIT && signalNumber != SIGWINCH) return ENOTSUP;
-    int firstError = 0;
-    BOOL found = NO;
-    for (LSBJob *job in jobs) {
-        if (!job.terminalSession || job.phase != JobRunning) continue;
-        found = YES;
-        int error = signalJob(job, signalNumber);
-        if (error && error != ESRCH && !firstError) firstError = error;
+    if (signalNumber != SIGINT && signalNumber != SIGQUIT && signalNumber != SIGWINCH && signalNumber != SIGTSTP) return ENOTSUP;
+    return signalTerminalGroup(0, foreground, signalNumber, nil);
+}
+
+static void publishTerminalGroup(LSBJob *job, pid_t sid, pid_t group) {
+    job.terminalSID = sid;
+    job.terminalGroup = group;
+    uint64_t identity = ((uint64_t)(uint32_t)sid << 32) | (uint32_t)group;
+    atomic_store_explicit(&job.childStatus->terminalSessionAndGroup, identity, memory_order_release);
+}
+
+static BOOL terminalGroupExists(pid_t sid, pid_t group) {
+    for (LSBJob *job in jobs) if (terminalMember(job, sid, group)) return YES;
+    return NO;
+}
+
+static int checkTerminalIO(LSBJob *sender, LSBTerminalAccess access, pid_t *localSignalPID) {
+    BOOL background = NO;
+    int error = hostTerminal ? [hostTerminal checkAccess:access forGroup:sender.terminalGroup background:&background] : ENOTTY;
+    if (error || !background) return error;
+
+    // XNU's ttyread/ttywrite/ttioctl consult pg_jobc. A group is orphaned when no member has a live parent in another group of this session.
+    for (LSBJob *member in jobs) {
+        if (!terminalMember(member, sender.terminalSID, sender.terminalGroup)) continue;
+        LSBJob *parent = findJob(member.parentIdentifier);
+        if (!parent || !parent.terminalSession || parent.terminalSID != sender.terminalSID || parent.terminalGroup == sender.terminalGroup ||
+            parent.phase != JobRunning || parent.finishing || parent.retiredForExec) continue;
+        int number = access == LSB_TERMINAL_READ ? SIGTTIN : SIGTTOU;
+        error = signalTerminalGroup(sender.terminalSID, sender.terminalGroup, number, sender);
+        if (!error) *localSignalPID = sender.guestPID;
+        return error;
     }
-    return found ? firstError : ESRCH;
+    return EIO;
+}
+
+static int setTerminalProcessGroup(LSBJob *sender, pid_t pid, pid_t group) {
+    if (!sender.terminalSession) return ENOTSUP;
+    LSBJob *target = sender;
+    if (pid && pid != sender.guestPID) {
+        target = nil;
+        for (LSBJob *job in jobs) {
+            if (job.parentIdentifier == sender.identifier && job.guestPID == pid && job.phase == JobRunning &&
+                !job.retiredForExec && !job.finishing) { target = job; break; }
+        }
+        if (!target) return ESRCH;
+        if (target.executed || target.replacementIdentifier) return EACCES;
+    }
+    if (!target.terminalSession || target.terminalSID != sender.terminalSID || target.guestPID == target.terminalSID) return EPERM;
+    if (!group) group = target.guestPID;
+    if (target.terminalGroup == group) return 0;
+    if (group != target.guestPID && !terminalGroupExists(sender.terminalSID, group)) return EPERM;
+    LSBJob *parent = findJob(target.parentIdentifier);
+    if (target.parentStatusPending) return EAGAIN;
+    if (parent) {
+        int error = LSBChildStatusSetGroup(parent.childStatus, target.parentTicket, group);
+        if (error) return error;
+    }
+    publishTerminalGroup(target, target.terminalSID, group);
+    return 0;
 }
 
 static int registerDisplayEndpoint(mach_port_t service, const audit_token_t *audit, const char *name,
@@ -1716,7 +1901,7 @@ static void acceptGuestBrokerConnection(xpc_connection_t peer) {
                 return;
             }
             if (xpc_get_type(event) != XPC_TYPE_DICTIONARY) { xpc_connection_cancel(connection); return; }
-            LSBReceivedMessage *message = calloc(1, sizeof(*message));
+            LSBReceivedMessage *message = malloc(sizeof(*message));
             if (!message) { xpc_connection_cancel(connection); return; }
             int error = LSBTransportReceiveConnection((__bridge void *)event, (__bridge void *)connection, message);
             if (error) { free(message); return; }
@@ -1764,6 +1949,33 @@ static BOOL capturedTaskCurrent(LSBJob *job, const audit_token_t *expected) {
     // Control capability provenance comes only from the kernel exception receiver, never from CHECKIN's name-only right.
     return !task_info(job.taskPort, TASK_AUDIT_TOKEN, (task_info_t)&actual, &count) && count == TASK_AUDIT_TOKEN_COUNT &&
         !memcmp(&actual, expected, sizeof(actual));
+}
+
+static int handleForkRequest(LSBJob *sender, const LSBReceivedMessage *message) {
+    if (!message->replyConnection || message->replyConnection != (__bridge void *)sender.brokerConnection ||
+        !capturedTaskCurrent(sender, &message->audit)) return EACCES;
+    LSBJob *peer = nil;
+    for (LSBJob *job in jobs) if (authenticatedSimulatorJob(job, &message->targetAudit)) { peer = job; break; }
+    if (!peer || !capturedTaskCurrent(peer, &message->targetAudit)) return ESRCH;
+    BOOL offering = message->kind == LSB_REQUEST_FORK_OFFER;
+    LSBJob *parent = offering ? sender : peer;
+    LSBJob *child = offering ? peer : sender;
+    if (child == parent || child.parentIdentifier != parent.identifier) return EACCES;
+    if (parent.replacementIdentifier || child.replacementIdentifier) return EBUSY;
+    if (offering) {
+        if (child.forkOffer) return EBUSY;
+        if (!message->forkRangeCount || message->forkRangeCount > LSB_MAX_FORK_RANGES) return EINVAL;
+        child.forkOffer = [NSData dataWithBytes:message->forkRanges length:message->forkRangeCount * sizeof(*message->forkRanges)];
+        if (!child.forkOffer) return ENOMEM;
+        child.forkOfferParent = parent.identifier;
+        return 0;
+    }
+    if (!child.forkOffer || child.forkOfferParent != parent.identifier) return ENOENT;
+    // Accept consumes the offer even when preflight or a later mapping fails. A replacement process must agree to a new offer.
+    NSData *ranges = child.forkOffer;
+    child.forkOffer = nil;
+    child.forkOfferParent = 0;
+    return LSBCopyOfferedForkRanges(parent.taskPort, child.taskPort, ranges.bytes, ranges.length / sizeof(LSBForkWireRange));
 }
 
 static BOOL traceCooperativeDebugger(void) {
@@ -1839,6 +2051,10 @@ static void handleMessage(LSBReceivedMessage *message) {
     for (LSBJob *job in jobs) if (job.pid == pid && job.pidVersion == generation) { sender = job; break; }
     if (sessionDraining) { replyError(message, ECANCELED); return; }
     switch (message->kind) {
+        case LSB_REQUEST_FORK_OFFER:
+        case LSB_REQUEST_FORK_ACCEPT:
+            replyError(message, handleForkRequest(sender, message));
+            return;
         case LSB_REQUEST_OPEN_AUDIO_OUTPUT: {
             if (!authenticatedSimulatorJob(sender, &message->audit)) { replyError(message, EACCES); return; }
             if (!sessionAudioEnabled) { replyError(message, EPERM); return; }
@@ -1930,7 +2146,26 @@ static void handleMessage(LSBReceivedMessage *message) {
                 replyError(message, EACCES); return;
             }
             int error = signalChild(sender, message->targetPID, message->signalNumber);
-            LSBTransportReply(message, error, error ? 0 : message->targetPID, 0, NULL, NULL, NULL);
+            LSBTransportReply(message, error, error || message->targetPID <= 0 ? 0 : message->targetPID, 0, NULL, NULL, NULL);
+            disposeMessage(message);
+            return;
+        }
+        case LSB_REQUEST_SET_PROCESS_GROUP:
+        case LSB_REQUEST_SET_FOREGROUND_GROUP:
+        case LSB_REQUEST_CHECK_TERMINAL_IO:
+        case LSB_REQUEST_DRAIN_TERMINAL: {
+            if (!message->replyConnection || !authenticatedSimulatorJob(sender, &message->audit) || !sender.terminalSession) {
+                replyError(message, EACCES); return;
+            }
+            int error;
+            pid_t localSignalPID = 0;
+            if (message->kind == LSB_REQUEST_SET_PROCESS_GROUP) error = setTerminalProcessGroup(sender, message->targetPID, message->processGroup);
+            else if (message->kind == LSB_REQUEST_CHECK_TERMINAL_IO) error = checkTerminalIO(sender, message->terminalAccess, &localSignalPID);
+            else if (!hostTerminal) error = ENOTTY;
+            else if (message->kind == LSB_REQUEST_DRAIN_TERMINAL) error = [hostTerminal drainOutput];
+            else if (!terminalGroupExists(sender.terminalSID, message->processGroup)) error = EPERM;
+            else error = [hostTerminal setForegroundGroup:message->processGroup];
+            LSBTransportReply(message, error, localSignalPID, 0, NULL, NULL, NULL);
             disposeMessage(message);
             return;
         }
@@ -2130,6 +2365,7 @@ static void handleMessage(LSBReceivedMessage *message) {
             LSBChildStatusSetParentPID(job.childStatus, parent ? parent.guestPID : old ? LSBChildStatusGetParentPID(old.childStatus) : getpid());
             error = prepareGuestTaskCapture(job);
             if (error) { replyError(message, error); finishJob(job, error); return; }
+            monitorTerminalJob(job);
             LSBBootstrapMetadata metadata = { .guestPID = job.guestPID, .parentPID = LSBChildStatusGetParentPID(job.childStatus),
                 .guestBrokerPort = job.executionRole == LSB_EXECUTION_SIMULATOR ? guestBrokerPort : MACH_PORT_NULL,
                 .lazySigningPort = job.executionRole == LSB_EXECUTION_SIMULATOR ? lazySigning.endpoint : MACH_PORT_NULL,
@@ -2194,14 +2430,26 @@ static void handleMessage(LSBReceivedMessage *message) {
                     else if (pending.observation.execGeneration == UINT32_MAX) error = EOVERFLOW;
                 }
             }
-            // The child is still blocked in READY: capture its real group before it can run and exit.
+            // Publish the group while the guest is blocked in READY. The terminal helper leads its session; children inherit across spawn and exec.
+            if (!error && sender.terminalSession) {
+                LSBJob *source = old ?: parent;
+                pid_t sid = source.terminalSID ?: sender.guestPID;
+                pid_t group = source.terminalGroup ?: sender.guestPID;
+                if (!source.terminalSID && hostTerminal) error = [hostTerminal setForegroundGroup:group];
+                if (!error) {
+                    publishTerminalGroup(sender, sid, group);
+                    execution.replacementGroup = group;
+                }
+            }
             if (!error && parent && !old) {
-                pid_t group = getpgid(pid);
+                pid_t group = sender.terminalGroup ?: getpgid(pid);
                 error = group < 0 ? errno : LSBChildStatusPublishRunning(parent.childStatus, sender.parentTicket, sender.guestPID, group);
             }
             int replyError = LSBTransportReply(message, message->error ? 0 : error, pid, sender.identifier, NULL, NULL, NULL);
             disposeMessage(message);
             if (error || replyError) {
+                // Exec candidates share the old job's control page. Roll back a first terminal attachment if READY failed.
+                if (old && sender.terminalGroup && !old.terminalGroup) publishTerminalGroup(old, 0, 0);
                 if (preparedExec) LSBChildStatusCancelExec(parent.childStatus, &execution);
                 finishJob(sender, error ? error : replyError);
                 return;
@@ -2225,6 +2473,7 @@ static void handleMessage(LSBReceivedMessage *message) {
                     LSBPendingAdoption *pending = pendingAdoption(old.identifier);
                     LSBChildObservation observation = pending.observation;
                     observation.nativePID = pid;
+                    if (sender.terminalGroup) observation.group = sender.terminalGroup;
                     ++observation.execGeneration;
                     pending.observation = observation;
                     pending.childIdentifier = sender.identifier;
@@ -2250,6 +2499,7 @@ static void handleMessage(LSBReceivedMessage *message) {
                 if (retireError && retireError != ESRCH) fprintf(stderr, "[broker] retire old exec instance pid=%d: %s\n", old.pid, strerror(retireError));
                 finishJob(old, 0);
             }
+            if (sender.terminalSession) observeTerminalJob(sender);
             fprintf(stderr, "[broker] spawn ready guest=%d native=%d request=%llu\n", sender.guestPID, pid, sender.identifier);
             startingJob = nil;
             if (nativeService) for (LSBJob *owner in jobs) {
@@ -2778,7 +3028,7 @@ int LSBStartHost(int argc, const char *argv[], const char *envp[]) {
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                 unsigned receiveFailures = 0;
                 for (;;) {
-                    LSBReceivedMessage *message = calloc(1, sizeof(*message));
+                    LSBReceivedMessage *message = malloc(sizeof(*message));
                     if (!message) abort();
                     int receiveError = LSBTransportReceive(service, message);
                     if (receiveError) {

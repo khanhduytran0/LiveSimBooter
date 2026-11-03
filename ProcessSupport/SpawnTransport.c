@@ -572,7 +572,7 @@ int LSBTransportReady(uint64_t requestID, int childError) {
 
 int LSBTransportKill(pid_t targetPID, int signalNumber) {
     if (signalNumber < 0 || signalNumber >= NSIG) return EINVAL;
-    if (targetPID <= 0) return ENOTSUP;
+    if (targetPID == -1 || targetPID == INT_MIN) return ENOTSUP;
     xpc_object_t request = NULL;
     int requestError = createRequest(LSB_REQUEST_KILL, 0, 0, &request);
     if (requestError) return requestError;
@@ -586,17 +586,15 @@ int LSBTransportKill(pid_t targetPID, int signalNumber) {
         pid_t pid = 0;
         uint64_t requestID = 0;
         error = decodeReplyHeader(reply, &remoteError, &pid, &requestID);
-        if (!error && (requestID || (!remoteError && pid != targetPID))) error = EPROTO;
+        if (!error && (requestID || (!remoteError && pid != (targetPID > 0 ? targetPID : 0)))) error = EPROTO;
         if (!error) error = remoteError;
     }
     if (reply) xpc_release(reply);
     return error;
 }
 
-int LSBTransportRebootUserspace(void) {
-    xpc_object_t request = NULL;
-    int requestError = createRequest(LSB_REQUEST_REBOOT_USERSPACE, 0, 0, &request);
-    if (requestError) return requestError;
+// Consumes a request with a four-field reply. Only the terminal access check can return a PID.
+static int callStatusRequest(xpc_object_t request, pid_t *resultPID) {
     xpc_object_t reply = NULL;
     int error = callBroker(request, &reply);
     xpc_release(request);
@@ -605,11 +603,89 @@ int LSBTransportRebootUserspace(void) {
         pid_t pid = 0;
         uint64_t requestID = 0;
         error = decodeReplyHeader(reply, &remoteError, &pid, &requestID);
-        if (!error && (pid || requestID || xpc_dictionary_get_count(reply) != 4)) error = EPROTO;
+        if (!error && (requestID || xpc_dictionary_get_count(reply) != 4 || (pid && (!resultPID || remoteError)))) error = EPROTO;
+        if (!error && resultPID) *resultPID = pid;
         if (!error) error = remoteError;
     }
     if (reply) xpc_release(reply);
     return error;
+}
+
+int LSBTransportCheckTerminalIO(LSBTerminalAccess access, bool *signalCaller) {
+    if (!signalCaller) return EINVAL;
+    *signalCaller = false;
+    if (access < LSB_TERMINAL_READ || access > LSB_TERMINAL_CONTROL) return EINVAL;
+    xpc_object_t request = NULL;
+    int error = createRequest(LSB_REQUEST_CHECK_TERMINAL_IO, 0, 0, &request);
+    if (error) return error;
+    xpc_dictionary_set_uint64(request, "terminal-access", access);
+    pid_t pid = 0;
+    error = callStatusRequest(request, &pid);
+    if (!error) *signalCaller = pid > 0;
+    return error;
+}
+
+int LSBTransportSetProcessGroup(pid_t targetPID, pid_t group) {
+    if (targetPID < 0 || group < 0) return EINVAL;
+    xpc_object_t request = NULL;
+    int error = createRequest(LSB_REQUEST_SET_PROCESS_GROUP, 0, 0, &request);
+    if (error) return error;
+    xpc_dictionary_set_int64(request, "target-pid", targetPID);
+    xpc_dictionary_set_int64(request, "process-group", group);
+    return callStatusRequest(request, NULL);
+}
+
+int LSBTransportSetForegroundGroup(pid_t group) {
+    if (group <= 0) return EINVAL;
+    xpc_object_t request = NULL;
+    int error = createRequest(LSB_REQUEST_SET_FOREGROUND_GROUP, 0, 0, &request);
+    if (error) return error;
+    xpc_dictionary_set_int64(request, "process-group", group);
+    return callStatusRequest(request, NULL);
+}
+
+int LSBTransportDrainTerminal(void) {
+    xpc_object_t request = NULL;
+    int error = createRequest(LSB_REQUEST_DRAIN_TERMINAL, 0, 0, &request);
+    return error ? error : callStatusRequest(request, NULL);
+}
+
+int LSBTransportRebootUserspace(void) {
+    xpc_object_t request = NULL;
+    int error = createRequest(LSB_REQUEST_REBOOT_USERSPACE, 0, 0, &request);
+    return error ? error : callStatusRequest(request, NULL);
+}
+
+static bool validForkRanges(const LSBForkWireRange *ranges, size_t count) {
+    if (!ranges || !count || count > LSB_MAX_FORK_RANGES) return false;
+    uint64_t end = 0, bytes = 0;
+    for (size_t i = 0; i < count; ++i) {
+        uint64_t start = ranges[i].start, size = ranges[i].size;
+        // Guests run with the 16 KiB arm64 iOS page size. Reject unaligned intervals before any broker work.
+        if (!start || !size || ((start | size) & 0x3fff) || start < end || size > UINT64_MAX - start || size > LSB_MAX_FORK_BYTES - bytes) return false;
+        end = start + size;
+        bytes += size;
+    }
+    return true;
+}
+
+static int forkRequest(uint32_t kind, const audit_token_t *peer, const LSBForkWireRange *ranges, size_t count) {
+    if (!peer || !peer->val[5] || peer->val[5] > INT_MAX || !peer->val[7]) return EINVAL;
+    if (kind == LSB_REQUEST_FORK_OFFER && !validForkRanges(ranges, count)) return EINVAL;
+    xpc_object_t request = NULL;
+    int error = createRequest(kind, 0, 0, &request);
+    if (error) return error;
+    xpc_dictionary_set_data(request, "target-audit", peer, sizeof(*peer));
+    if (ranges) xpc_dictionary_set_data(request, "fork-ranges", ranges, count * sizeof(*ranges));
+    return callStatusRequest(request, NULL);
+}
+
+int LSBTransportOfferFork(const audit_token_t *child, const LSBForkWireRange *ranges, size_t count) {
+    return forkRequest(LSB_REQUEST_FORK_OFFER, child, ranges, count);
+}
+
+int LSBTransportAcceptFork(const audit_token_t *parent) {
+    return forkRequest(LSB_REQUEST_FORK_ACCEPT, parent, NULL, 0);
 }
 
 int LSBTransportListProcesses(LSBProcessList **list, size_t *size) {
@@ -767,21 +843,9 @@ int LSBTransportOpenAudioOutput(void **mapping, size_t *size) {
 }
 
 int LSBTransportCloseAudioOutput(void) {
-    xpc_object_t request = NULL, reply = NULL;
-    int requestError = createRequest(LSB_REQUEST_CLOSE_AUDIO_OUTPUT, 0, 0, &request);
-    if (requestError) return requestError;
-    int error = callBroker(request, &reply);
-    xpc_release(request);
-    if (!error) {
-        int remoteError = 0;
-        pid_t pid = 0;
-        uint64_t requestID = 0;
-        error = decodeReplyHeader(reply, &remoteError, &pid, &requestID);
-        if (!error && (requestID || pid || xpc_dictionary_get_count(reply) != 4)) error = EPROTO;
-        if (!error) error = remoteError;
-    }
-    if (reply) xpc_release(reply);
-    return error;
+    xpc_object_t request = NULL;
+    int error = createRequest(LSB_REQUEST_CLOSE_AUDIO_OUTPUT, 0, 0, &request);
+    return error ? error : callStatusRequest(request, NULL);
 }
 
 int LSBTransportCopyProcessTask(pid_t guestPID, mach_port_t *task) {
@@ -1219,7 +1283,7 @@ static int decodeRequest(LSBReceivedMessage *message) {
     uint64_t version = 0, kind = 0;
     int64_t childError = 0;
     if (!error && (!unsignedValue(request, "version", &version) || version != LSB_TRANSPORT_VERSION ||
-        !unsignedValue(request, "kind", &kind) || kind < LSB_REQUEST_SPAWN || kind > LSB_REQUEST_CLOSE_AUDIO_OUTPUT ||
+        !unsignedValue(request, "kind", &kind) || kind < LSB_REQUEST_SPAWN || kind > LSB_REQUEST_CHECK_TERMINAL_IO ||
         !unsignedValue(request, "request-id", &message->requestID) || !signedValue(request, "error", &childError) ||
         childError < 0 || childError > INT_MAX)) error = EPROTO;
     if (!error) {
@@ -1233,7 +1297,7 @@ static int decodeRequest(LSBReceivedMessage *message) {
             xpc_dictionary_get_value(request, "guest-broker-port") || xpc_dictionary_get_value(request, "lazy-signing-port")) error = EPROTO;
         // This control request must carry only its four-field envelope, including no capabilities under unknown keys.
         if ((kind == LSB_REQUEST_REBOOT_USERSPACE || kind == LSB_REQUEST_LIST_PROCESSES || kind == LSB_REQUEST_OPEN_AUDIO_OUTPUT ||
-             kind == LSB_REQUEST_CLOSE_AUDIO_OUTPUT) && xpc_dictionary_get_count(request) != 4) error = EPROTO;
+             kind == LSB_REQUEST_CLOSE_AUDIO_OUTPUT || kind == LSB_REQUEST_DRAIN_TERMINAL) && xpc_dictionary_get_count(request) != 4) error = EPROTO;
     }
     if (!error) {
         if (kind == LSB_REQUEST_READY) {
@@ -1272,15 +1336,44 @@ static int decodeRequest(LSBReceivedMessage *message) {
                 !signedValue(request, "signal", &signal) || signal < INT_MIN || signal > INT_MAX) error = EPROTO;
             else { message->targetPID = (pid_t)target; message->signalNumber = (int)signal; }
         }
-        if (!error && (kind == LSB_REQUEST_RESOLVE_AUDIT_PID || kind == LSB_REQUEST_COPY_ENTITLEMENTS)) {
+        if (!error && kind == LSB_REQUEST_CHECK_TERMINAL_IO) {
+            uint64_t access;
+            if (!message->replyConnection || xpc_dictionary_get_count(request) != 5 || !unsignedValue(request, "terminal-access", &access) ||
+                access < LSB_TERMINAL_READ || access > LSB_TERMINAL_CONTROL) error = EPROTO;
+            else message->terminalAccess = (LSBTerminalAccess)access;
+        } else if (!error && xpc_dictionary_get_value(request, "terminal-access")) error = EPROTO;
+        if (!error && kind == LSB_REQUEST_SET_PROCESS_GROUP) {
+            int64_t target, group;
+            if (xpc_dictionary_get_count(request) != 6 || !signedValue(request, "target-pid", &target) || target < 0 || target > INT_MAX ||
+                !signedValue(request, "process-group", &group) || group < 0 || group > INT_MAX) error = EPROTO;
+            else { message->targetPID = (pid_t)target; message->processGroup = (pid_t)group; }
+        } else if (!error && kind == LSB_REQUEST_SET_FOREGROUND_GROUP) {
+            int64_t group;
+            if (xpc_dictionary_get_count(request) != 5 || !signedValue(request, "process-group", &group) || group <= 0 || group > INT_MAX) error = EPROTO;
+            else message->processGroup = (pid_t)group;
+        } else if (!error && xpc_dictionary_get_value(request, "process-group")) error = EPROTO;
+        bool forkRequest = kind == LSB_REQUEST_FORK_OFFER || kind == LSB_REQUEST_FORK_ACCEPT;
+        if (!error && (forkRequest || kind == LSB_REQUEST_RESOLVE_AUDIT_PID || kind == LSB_REQUEST_COPY_ENTITLEMENTS)) {
             xpc_object_t target = xpc_dictionary_get_value(request, "target-audit");
             if (!target || xpc_get_type(target) != XPC_TYPE_DATA || xpc_data_get_length(target) != sizeof(message->targetAudit) ||
                 xpc_dictionary_get_value(request, "target-pid") || xpc_dictionary_get_value(request, "signal")) error = EPROTO;
             else {
                 memcpy(&message->targetAudit, xpc_data_get_bytes_ptr(target), sizeof(message->targetAudit));
-                if (!message->targetAudit.val[5] || message->targetAudit.val[5] > INT_MAX) error = EPROTO;
+                if (!message->targetAudit.val[5] || message->targetAudit.val[5] > INT_MAX || (forkRequest && !message->targetAudit.val[7])) error = EPROTO;
             }
         } else if (!error && xpc_dictionary_get_value(request, "target-audit")) error = EPROTO;
+        if (!error && forkRequest && (!message->replyConnection || xpc_dictionary_get_count(request) != (kind == LSB_REQUEST_FORK_OFFER ? 6u : 5u)))
+            error = EPROTO;
+        xpc_object_t ranges = xpc_dictionary_get_value(request, "fork-ranges");
+        if (!error && kind == LSB_REQUEST_FORK_OFFER) {
+            size_t length = ranges && xpc_get_type(ranges) == XPC_TYPE_DATA ? xpc_data_get_length(ranges) : 0;
+            if (!length || length > sizeof(message->forkRanges) || length % sizeof(*message->forkRanges)) error = EPROTO;
+            else {
+                memcpy(message->forkRanges, xpc_data_get_bytes_ptr(ranges), length);
+                message->forkRangeCount = (uint32_t)(length / sizeof(*message->forkRanges));
+                if (!validForkRanges(message->forkRanges, message->forkRangeCount)) error = EPROTO;
+            }
+        } else if (!error && ranges) error = EPROTO;
         if (!error && kind == LSB_REQUEST_COPY_ENTITLEMENTS) {
             uint64_t operation = 0;
             if (!unsignedValue(request, "operation", &operation) || (operation != 5 && operation != 7 && operation != 16) ||

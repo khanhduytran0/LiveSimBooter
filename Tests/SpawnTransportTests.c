@@ -1001,13 +1001,14 @@ static int client(void) {
     sigemptyset(&action.sa_mask);
     assert(!sigaction(SIGCHLD, &action, &previousAction));
     assert(LSBTransportKill(4242, -1) == EINVAL && LSBTransportKill(4242, NSIG) == EINVAL);
-    assert(LSBTransportKill(0, 0) == ENOTSUP && LSBTransportKill(-1, SIGTERM) == ENOTSUP && LSBTransportKill(-20, SIGTERM) == ENOTSUP);
+    assert(LSBTransportKill(INT_MIN, 0) == ENOTSUP && LSBTransportKill(-1, SIGTERM) == ENOTSUP);
     assert(!LSBTransportKill(4242, 0));
     assert(!LSBTransportKill(4242, SIGTERM));
     assert(childSignals == 1);
     assert(LSBTransportKill(4242, SIGKILL) == ESRCH);
     assert(LSBTransportKill(4242, SIGTERM) == EPROTO);
     assert(LSBTransportKill(4242, SIGTERM) == EPROTO);
+    assert(!LSBTransportKill(0, 0) && !LSBTransportKill(-20, SIGCONT));
     assert(!LSBRequireSingleThread());
     assert(!sigaction(SIGCHLD, &previousAction, NULL));
     signalAcknowledgementFD = -1;
@@ -1016,6 +1017,10 @@ static int client(void) {
     entitlementClient(7);
     codeHashClient();
     rebootClient(tankAnchor);
+    // Both guest operations are forbidden on the native check-in pipe, even with well-formed data.
+    const audit_token_t forkPeer = {{1, 2, 3, 4, 5, 42, 7, 9}};
+    const LSBForkWireRange forkRange = {0x120000000, 0x4000};
+    assert(LSBTransportOfferFork(&forkPeer, &forkRange, 1) == EPROTO && LSBTransportAcceptFork(&forkPeer) == EPROTO);
     for (unsigned variant = 0; variant < MalformedRebootCount; ++variant) testMalformedReboot(variant, fd, tankAnchor);
     for (unsigned variant = 0; variant < MalformedBootstrapCount; ++variant) {
         unsigned before = openDescriptorCount();
@@ -1452,11 +1457,18 @@ static int host(const char *executable) {
         assert(!LSBTransportReply(&message, variant == 2 ? ESRCH : 0, variant == 3 ? 4243 : 4242, variant == 4 ? 77 : 0, NULL, NULL, NULL));
         LSBTransportDisposeMessage(&message);
     }
+    for (unsigned variant = 0; variant < 2; ++variant) {
+        assert(!LSBTransportReceive(port, &message) && message.kind == LSB_REQUEST_KILL && message.audit.val[5] == (unsigned)child);
+        assert(message.targetPID == (variant ? -20 : 0) && message.signalNumber == (variant ? SIGCONT : 0));
+        assert(!LSBTransportReply(&message, 0, 0, 0, NULL, NULL, NULL));
+        LSBTransportDisposeMessage(&message);
+    }
     auditResolutionHost(port, child);
     entitlementHost(port, child, 16);
     entitlementHost(port, child, 7);
     codeHashHost(port, child);
     rebootHost(port, child, pending.fds[0], tank);
+    for (unsigned i = 0; i < 2; ++i) assert(LSBTransportReceive(port, &message) == EPROTO && !message.object);
     for (unsigned variant = 0; variant < MalformedRebootCount; ++variant) {
         unsigned before = openDescriptorCount();
         assert(LSBTransportReceive(port, &message) == EPROTO && !message.object && !message.nativeServicePort && !message.peerIdentity.taskName);
@@ -1530,7 +1542,7 @@ static int host(const char *executable) {
 }
 
 int main(int argc, char **argv) {
-    _Static_assert(LSB_TRANSPORT_VERSION == 9 && LSB_BOOTSTRAP_VERSION == 7, "native cache selection requires current transport/bootstrap versions");
+    _Static_assert(LSB_TRANSPORT_VERSION == 12 && LSB_BOOTSTRAP_VERSION == 7, "terminal job control uses transport 12 and the existing native bootstrap");
     // Bound a failed regression test without adding a signal handler to the production transport.
     alarm(20);
     return argc == 2 && !strcmp(argv[1], "--client") ? client() : host(argv[0]);

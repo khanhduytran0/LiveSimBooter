@@ -23,7 +23,7 @@ The user verified **Home Screen → Edit → Edit Wallpaper** and color/gradient
 renders now; the lock-screen long-press picker and Customize editor work with the scoped scene-presentation helper on iPhone 15 and iPhone 17.
 Direct PosterBoard activation still has a malformed layout, and the older Home Screen editor's clipped Done button remains deferred;
 see [current wallpaper status](springboard-services.md#current-wallpaper-status).
-This remains an experimental partial simulator: generic fork/exec and complete job control are unsupported, and the observed
+The guest supports direct Mach-O image replacement. General fork and complete job control remain unsupported, and the observed
 Spotlight last-character crash is deferred.
 Historical sections below describe earlier cache layouts and failures; use the setup guide for current preparation commands.
 
@@ -57,7 +57,7 @@ Historical sections below describe earlier cache layouts and failures; use the s
 - [System power](system-power.md): the denied power user-client open and the tested virtual-awake subscription adapter.
 - [Metal](metal.md): isolated native service, stock guest compiler registration, and verified shader-based triangle rendering.
 - [Native Metal backend](../NativeMetal/README.md): host-selected roles, pinned metadata adaptation, signing and fixed-path packaging.
-- [Bash](bash.md): noninteractive builtin baseline, terminal-access probes, and remaining fork/exec design requirements.
+- [Bash](bash.md) covers the copied stack and heap, interactive job control, pipelines, background waits, parenthesized subshells, command substitution and the on-device tests.
 - [Fish](fish.md): unmodified-source shell results, executable-access compatibility, and interactive startup.
 - [Fake terminal](fake-pty.md): launchd-owned Fish tab, socket transport, guest terminal controls, native keyboard/display, and validation limits.
 - [Creation mask](creation-mask.md): tracked `umask` state for spawning after guest worker threads start on Darwin 25.

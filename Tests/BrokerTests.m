@@ -254,7 +254,11 @@ static int codeDirectoryHashError;
 static void (^afterCodeDirectoryRead)(int fd);
 static LSBPeerProcessIdentity identityReply;
 static audit_token_t testTaskAudit;
+static struct { mach_port_t port; audit_token_t audit; } forkTaskAudits[2];
+static unsigned forkCopies;
+static int forkCopyError;
 static BOOL useRealTaskInfo, preserveCheckInIdentity, mismatchTaskAudit;
+static int terminalSuspendCount;
 static kern_return_t taskInfoError;
 static BOOL automaticTaskCapture = YES;
 static int taskCaptureCreateError, taskCaptureReceiveError, taskReplySendError;
@@ -306,9 +310,15 @@ static int testReadMachOCodeDirectoryHash(int fd, unsigned char output[20]) {
 
 static kern_return_t testTaskInfo(task_name_t port, task_flavor_t flavor, task_info_t output, mach_msg_type_number_t *count) {
     if (useRealTaskInfo) return task_info(port, flavor, output, count);
+    if (flavor == MACH_TASK_BASIC_INFO) {
+        assert(port == mach_task_self() && *count == MACH_TASK_BASIC_INFO_COUNT);
+        ((mach_task_basic_info_t)output)->suspend_count = terminalSuspendCount;
+        return KERN_SUCCESS;
+    }
     assert(flavor == TASK_AUDIT_TOKEN && *count == TASK_AUDIT_TOKEN_COUNT);
     if (taskInfoError) return taskInfoError;
     audit_token_t audit = testTaskAudit;
+    for (unsigned i = 0; i < 2; ++i) if (MACH_PORT_VALID(port) && forkTaskAudits[i].port == port) audit = forkTaskAudits[i].audit;
     if (mismatchTaskAudit) ++audit.val[7];
     memcpy(output, &audit, sizeof(audit));
     *count = TASK_AUDIT_TOKEN_COUNT;
@@ -1353,6 +1363,8 @@ static void testExecReplacement(void) {
     LSBJob *parent = runTestJob(nil, 100);
     LSBJob *old = runTestJob(parent, 101);
     LSBJob *grandchild = runTestJob(old, 102);
+    old.forkOffer = [NSData data]; old.forkOfferParent = parent.identifier;
+    grandchild.forkOffer = [NSData data]; grandchild.forkOfferParent = old.identifier;
     pid_t guestPID = old.guestPID;
     LSBChildTicket ticket = old.parentTicket;
     int fd;
@@ -1373,6 +1385,7 @@ static void testExecReplacement(void) {
     handleMessage(messageFor(LSB_REQUEST_READY, reportedPID, 103, replacement.identifier));
     assert(!findJob(old.identifier) && findJob(replacement.identifier) && !startingJob);
     assert(replacement.parentIdentifier == parent.identifier && grandchild.parentIdentifier == replacement.identifier);
+    assert(!old.forkOffer && !replacement.forkOffer && !grandchild.forkOffer && !grandchild.forkOfferParent);
     assert(replacement.parentTicket.index == ticket.index && replacement.parentTicket.generation == ticket.generation);
     assert(replyFor(object) && !replyFor(object)->error && replyFor(object)->pid == guestPID);
     assert(lastSignal == SIGKILL && signaledAudit.val[7] == 101);
@@ -1713,6 +1726,77 @@ static LSBJob *terminalLaunchd(void) {
     return launchd;
 }
 
+static void testTerminalStopReceipts(void) {
+    resetBroker();
+    LSBJob *parent = managedJob(nil, 7101), *child = managedJob(parent, 7102);
+    atomic_store(&parent.childStatus->suppressJobSignal, 1);
+    child.terminalBSDInfoDenied = YES;
+    child.taskPort = mach_task_self();
+    assert(!mach_port_mod_refs(mach_task_self(), child.taskPort, MACH_PORT_RIGHT_SEND, 1));
+    uint64_t owner = (uint64_t)child.pidVersion << 32;
+    terminalSuspendCount = 1;
+    child.childStatus->nativeStopEvent.udata = ((uint64_t)parent.pidVersion << 32) | 3; // Pre-exec image.
+    observeTerminalJob(child);
+    assert(!child.terminalStopped);
+    child.childStatus->nativeStopEvent.udata = owner | 4; // Continued, followed by an unrelated Mach hold.
+    observeTerminalJob(child);
+    assert(!child.terminalStopped);
+
+    terminalSuspendCount = 0;
+    child.childStatus->nativeStopEvent.udata = owner | 5;
+    observeTerminalJob(child); // Signal copyout before suspension.
+    assert(!child.terminalStopped && !child.consumedStopReceipt);
+    terminalSuspendCount = 1;
+    observeTerminalJob(child);
+    pid_t pid;
+    int status;
+    assert(child.terminalStopped && child.consumedStopReceipt == (owner | 5));
+    assert(!LSBChildStatusTryWaitOptions(parent.childStatus, child.pid, 0, WUNTRACED, &pid, &status) && WSTOPSIG(status) == SIGSTOP);
+    observeTerminalJob(child);
+    assert(LSBChildStatusTryWaitOptions(parent.childStatus, child.pid, 0, WUNTRACED, &pid, &status) == EAGAIN);
+    terminalSuspendCount = 0;
+    observeTerminalJob(child);
+    assert(!LSBChildStatusTryWaitOptions(parent.childStatus, child.pid, 0, WCONTINUED, &pid, &status) && WIFCONTINUED(status));
+    terminalSuspendCount = 1;
+    observeTerminalJob(child); // Same receipt cannot turn a later Mach hold into another BSD stop.
+    assert(!child.terminalStopped);
+    child.childStatus->nativeStopEvent.udata = owner | 7;
+    atomic_store(&child.childStatus->terminalStop, 32 | SIGTTIN);
+    observeTerminalJob(child);
+    assert(!LSBChildStatusTryWaitOptions(parent.childStatus, child.pid, 0, WUNTRACED, &pid, &status) && WSTOPSIG(status) == SIGTTIN);
+    terminalSuspendCount = 0;
+    [jobs removeObjectIdenticalTo:parent];
+    observeTerminalJob(child); // A delayed SIGCONT sample must not publish to a retired parent.
+    assert(child.terminalStopped);
+    assert(LSBChildStatusTryWaitOptions(parent.childStatus, child.pid, 0, WCONTINUED, &pid, &status) == EAGAIN);
+    [jobs addObject:parent];
+    assert(!LSBChildStatusPublishExit(parent.childStatus, child.parentTicket, 37 << 8));
+    observeTerminalJob(child);
+    assert(!LSBChildStatusTryWaitOptions(parent.childStatus, child.pid, 0, WCONTINUED, &pid, &status) && WIFEXITED(status) && WEXITSTATUS(status) == 37);
+}
+
+static void testTerminalProcessGroups(void) {
+    resetBroker();
+    LSBJob *shell = managedJob(nil, 120);
+    LSBJob *leader = managedJob(shell, 121), *sibling = managedJob(shell, 122), *unrelated = managedJob(nil, 123);
+    for (LSBJob *job in @[shell, leader, sibling]) {
+        job.terminalSession = YES;
+        publishTerminalGroup(job, shell.guestPID, shell.guestPID);
+    }
+    assert(setTerminalProcessGroup(shell, 0, 0) == EPERM);
+    assert(setTerminalProcessGroup(shell, unrelated.guestPID, 0) == ESRCH);
+    assert(setTerminalProcessGroup(shell, leader.guestPID, unrelated.guestPID) == EPERM);
+    assert(!terminalGroupExists(shell.terminalSID, leader.guestPID));
+    assert(!setTerminalProcessGroup(shell, leader.guestPID, 0));
+    assert(terminalGroupExists(shell.terminalSID, leader.guestPID) && !terminalGroupExists(unrelated.guestPID, leader.guestPID));
+    assert(!setTerminalProcessGroup(sibling, 0, leader.guestPID));
+    LSBChildObservation observed;
+    assert(!LSBChildStatusObserve(shell.childStatus, sibling.guestPID, &observed) && observed.group == leader.guestPID);
+    assert((pid_t)atomic_load(&sibling.childStatus->terminalSessionAndGroup) == leader.guestPID);
+    leader.executed = YES;
+    assert(setTerminalProcessGroup(shell, leader.guestPID, 0) == EACCES);
+}
+
 static void testLaunchdTerminalLineage(void) {
     char temporary[] = "/tmp/LSBLaunchdTerminal.XXXXXX";
     assert(mkdtemp(temporary));
@@ -1724,6 +1808,7 @@ static void testLaunchdTerminalLineage(void) {
         LSBJob *launchd = terminalLaunchd(), *sender = launchd;
         if (replacing) {
             sender = managedJob(launchd, 6601);
+            assert(!LSBChildStatusSetGroup(launchd.childStatus, sender.parentTicket, 6599));
             sender.peerIdentityError = 0;
             LSBPeerProcessIdentity identity = sender.peerIdentity;
             strlcpy(identity.executablePath, "/usr/libexec/xpcproxy_sim", sizeof(identity.executablePath));
@@ -1749,6 +1834,8 @@ static void testLaunchdTerminalLineage(void) {
         handleMessage(messageFor(LSB_REQUEST_CHECKIN, reportedPID, 501, 0));
         handleMessage(messageFor(LSB_REQUEST_READY, reportedPID, 501, terminal.identifier));
         assert(terminal.phase == JobRunning && terminal.parentIdentifier == launchd.identifier);
+        LSBChildObservation initial;
+        assert(!LSBChildStatusObserve(launchd.childStatus, terminal.guestPID, &initial) && initial.group == terminal.guestPID);
         assertClosed(fd);
         // The helper's replacement retains terminal ownership; launchd's other children never inherit it.
         request = spawnRequest(&fd, &object);
@@ -2053,6 +2140,57 @@ static void testKillAuthenticationAndExit(void) {
     assert(!LSBChildStatusTryWait(parent.childStatus, child.pid, getpgrp(), &waited, &status));
     assert(waited == child.pid && WIFSIGNALED(status) && WTERMSIG(status) == SIGTERM);
     assert(requestKill(parent, child.pid, 0)->error == ESRCH && requestKill(parent, child.pid, SIGTERM)->error == ESRCH);
+}
+
+static void testBackgroundTerminalIO(void) {
+    resetBroker();
+    char directory[] = "/tmp/LSBBackgroundIO.XXXXXX";
+    assert(mkdtemp(directory));
+    int error = 0;
+    hostTerminal = [[LSBTerminalSession alloc] initWithDirectory:[NSString stringWithUTF8String:directory] error:&error];
+    assert(hostTerminal && !error);
+    LSBJob *shell = managedJob(nil, 21100), *reader = managedJob(shell, 21101);
+    shell.terminalSession = reader.terminalSession = YES;
+    publishTerminalGroup(shell, shell.guestPID, shell.guestPID);
+    publishTerminalGroup(reader, shell.guestPID, reader.guestPID);
+    assert(![hostTerminal setForegroundGroup:shell.guestPID]);
+    pid_t local = 0;
+    assert(!checkTerminalIO(reader, LSB_TERMINAL_WRITE, &local) && !local); // TOSTOP starts clear.
+    assert(!checkTerminalIO(reader, LSB_TERMINAL_READ, &local) && local == reader.guestPID && !deliveredSignals);
+    local = 0;
+    assert(![hostTerminal setForegroundGroup:reader.guestPID]);
+    assert(!checkTerminalIO(reader, LSB_TERMINAL_READ, &local) && !local);
+    assert(checkTerminalIO(shell, LSB_TERMINAL_READ, &local) == EIO && !local); // Session leader's group is orphaned.
+    reader.parentIdentifier = 0;
+    assert(![hostTerminal setForegroundGroup:shell.guestPID]);
+    assert(checkTerminalIO(reader, LSB_TERMINAL_READ, &local) == EIO && !local);
+    // The reader itself is parentless, but another member with a same-session parent keeps the group from being orphaned.
+    LSBJob *peer = managedJob(shell, 21102);
+    peer.terminalSession = YES;
+    publishTerminalGroup(peer, shell.guestPID, reader.guestPID);
+    assert(!checkTerminalIO(reader, LSB_TERMINAL_CONTROL, &local) && local == reader.guestPID);
+    [hostTerminal close]; hostTerminal = nil;
+    assert(!rmdir(directory));
+}
+
+static void testJobGroupSignals(void) {
+    resetBroker();
+    LSBJob *shell = managedJob(nil, 21000);
+    shell.terminalSession = YES;
+    publishTerminalGroup(shell, shell.guestPID, shell.guestPID);
+    for (pid_t pid = 21001; pid <= 21005; ++pid) {
+        LSBJob *member = managedJob(shell, pid);
+        member.terminalSession = pid != 21005;
+        publishTerminalGroup(member, pid == 21003 ? 21003 : shell.guestPID, 21001);
+        member.retiredForExec = pid == 21004;
+    }
+    assert(!requestKill(shell, -21001, SIGCONT)->error && deliveredSignals == 2);
+    assert(!requestKill(shell, 0, SIGWINCH)->error && deliveredSignals == 3 && signaledAudit.val[5] == (unsigned)shell.guestPID);
+    assert(requestKill(shell, -21002, SIGTERM)->error == ESRCH && deliveredSignals == 3);
+    assert(!signalTerminal(shell.guestPID, SIGINT) && deliveredSignals == 4 && signaledAudit.val[5] == (unsigned)shell.guestPID);
+    pid_t pid;
+    int status;
+    assert(LSBChildStatusTryWaitOptions(shell.childStatus, -1, 0, WCONTINUED, &pid, &status) == EAGAIN);
 }
 
 static void testKillFallbackErrors(void) {
@@ -3823,6 +3961,88 @@ static void giveTestTaskPort(LSBJob *job) {
     job.taskPort = mach_task_self();
     assert(!mach_port_mod_refs(mach_task_self(), job.taskPort, MACH_PORT_RIGHT_SEND, 1));
     job.taskCaptureError = 0;
+}
+
+int LSBCopyOfferedForkRanges(mach_port_t parent, mach_port_t child, const LSBForkWireRange *ranges, size_t count) {
+    assert(parent == forkTaskAudits[0].port && child == forkTaskAudits[1].port && parent != child);
+    assert(count == 1 && ranges[0].start == 0x120000000 && ranges[0].size == 0x4000);
+    ++forkCopies;
+    return forkCopyError;
+}
+
+static LSBJob *forkTestJob(unsigned index, mach_port_t ownedPort) {
+    LSBJob *job = auditJob(9990 + index, 8000 + index, 2000 + index, NO);
+    LSBPeerProcessIdentity identity = {.audit = job.audit, .taskName = ownedPort};
+    pid_t pid = job.pid;
+    memcpy(identity.shortInfo, &pid, sizeof(pid));
+    assert(!mach_port_mod_refs(mach_task_self(), ownedPort, MACH_PORT_RIGHT_SEND, 1));
+    job.peerIdentity = identity;
+    job.peerIdentityError = 0;
+    job.taskPort = ownedPort;
+    job.taskCaptureError = 0;
+    forkTaskAudits[index].port = ownedPort;
+    forkTaskAudits[index].audit = job.audit;
+    assert(!connectionForAudit(job.audit).canceled && job.brokerConnection);
+    return job;
+}
+
+static int requestFork(unsigned kind, audit_token_t sender, audit_token_t peer, xpc_connection_t connection) {
+    LSBReceivedMessage *req = messageFor(kind, sender.val[5], sender.val[7], 0);
+    req->audit = sender;
+    req->targetAudit = peer;
+    req->replyConnection = (__bridge void *)connection;
+    if (kind == LSB_REQUEST_FORK_OFFER) {
+        req->forkRanges[0] = (LSBForkWireRange){0x120000000, 0x4000};
+        req->forkRangeCount = 1;
+    }
+    unsigned object = ((TestMessageObject *)req->object)->identifier;
+    handleMessage(req);
+    RecordedReply *reply = replyFor(object);
+    assert(reply);
+    return reply->error;
+}
+
+static void testForkOfferConsent(void) {
+    resetBroker();
+    unsigned offer = LSB_REQUEST_FORK_OFFER, accept = LSB_REQUEST_FORK_ACCEPT;
+    LSBJob *parent = forkTestJob(0, mach_host_self()), *child = forkTestJob(1, mach_thread_self());
+    xpc_connection_t fromParent = parent.brokerConnection, fromChild = child.brokerConnection;
+    assert(requestFork(offer, parent.audit, child.audit, fromParent) == EACCES); // Unrelated simulator peers.
+    child.parentIdentifier = parent.identifier;
+    assert(requestFork(accept, child.audit, parent.audit, fromChild) == ENOENT);
+    assert(requestFork(offer, parent.audit, child.audit, NULL) == EACCES);
+    assert(requestFork(offer, parent.audit, child.audit, fromChild) == EACCES);
+    assert(requestFork(offer, child.audit, parent.audit, fromChild) == EACCES);
+    for (unsigned word = 0; word < 8; ++word) {
+        audit_token_t stale = child.audit;
+        ++stale.val[word];
+        assert(requestFork(offer, parent.audit, stale, fromParent) == ESRCH);
+        assert(requestFork(accept, stale, parent.audit, fromChild) == EACCES);
+    }
+    assert(!requestFork(offer, parent.audit, child.audit, fromParent) && !forkCopies);
+    assert(requestFork(offer, parent.audit, child.audit, fromParent) == EBUSY);
+    child.taskCaptureError = ENOENT;
+    assert(requestFork(accept, child.audit, parent.audit, fromChild) == EACCES);
+    child.taskCaptureError = 0;
+    parent.replacementIdentifier = 123;
+    assert(requestFork(accept, child.audit, parent.audit, fromChild) == EBUSY);
+    parent.replacementIdentifier = 0;
+    parent.retiredForExec = YES;
+    assert(requestFork(accept, child.audit, parent.audit, fromChild) == ESRCH && !forkCopies);
+    parent.retiredForExec = NO;
+    assert(!requestFork(accept, child.audit, parent.audit, fromChild) && forkCopies == 1);
+    assert(requestFork(accept, child.audit, parent.audit, fromChild) == ENOENT);
+    assert(!requestFork(offer, parent.audit, child.audit, fromParent));
+    forkCopyError = EADDRINUSE;
+    assert(requestFork(accept, child.audit, parent.audit, fromChild) == EADDRINUSE && forkCopies == 2);
+    assert(requestFork(accept, child.audit, parent.audit, fromChild) == ENOENT && forkCopies == 2);
+    assert(!requestFork(offer, parent.audit, child.audit, fromParent));
+    finishJob(parent, 0);
+    assert(!child.forkOffer && !child.forkOfferParent);
+    assert(requestFork(accept, child.audit, parent.audit, fromChild) == ESRCH && forkCopies == 2);
+    memset(forkTaskAudits, 0, sizeof(forkTaskAudits));
+    forkCopies = 0; forkCopyError = 0;
+    resetBroker();
 }
 
 static RecordedReply *requestProcessTask(audit_token_t caller, pid_t target) {
@@ -5689,6 +5909,8 @@ int main(void) {
         testUnboundFailureStopsQueue();
         testSubmissionFailureAndSpawnAuthentication();
         testInitialGuestArguments();
+        testTerminalProcessGroups();
+        testTerminalStopReceipts();
         testLaunchdTerminalLineage();
         testNativeHelperPlansPreserveSessionFlags();
         testNativeProbeRoleIsHostOnly();
@@ -5749,6 +5971,7 @@ int main(void) {
         testTaskCaptureStartupAndCleanup();
         testTaskEntitlementSnapshot();
         testProcessTaskAuthenticationAndOwnership();
+        testForkOfferConsent();
         testCooperativeDebuggerAuthentication();
         testLaunchdChildIdentityAndSignals();
         testLaunchdNativeChildPIDResolution();
@@ -5763,6 +5986,8 @@ int main(void) {
         testLaunchdDeathAndCyclesDoNotAdopt();
         testKillAuthenticationAndExit();
         testKillFallbackErrors();
+        testJobGroupSignals();
+        testBackgroundTerminalIO();
         testLaunchdModeRequiresInitialPathAndMarker();
         testLaunchdHandshakeDispatchAndRights();
         testLaunchdCancellationAndFailedBootstrap();

@@ -28,11 +28,13 @@
 // Modified 2026-10-25: replace consumed main_stack metadata with validated native stack bounds for simulator pthread teardown.
 // Modified 2026-10-25: own startup vectors and writable strings in bounded app-image storage that cache mappings cannot replace.
 // Modified 2026-10-26: reject resident-image collisions and relocate the main stack when the cache overlaps its native range.
+// Modified 2026-11-03: reserve guest executables in the selected high address window and verify their executable mappings.
 // Mapping sequence based on Apple's prepareSim(), dyldMain.cpp:300-469 at fd8d0c4d52320ebf64db34f3cb280310d905c5ae.
 // https://github.com/apple-oss-distributions/dyld/blob/fd8d0c4d52320ebf64db34f3cb280310d905c5ae/dyld/dyldMain.cpp
 
 #include "DyldSimLoader.h"
 #include "../LiveProcess/StackReservation.h"
+#include "../ProcessSupport/GuestImagePlacement.h"
 #include "HostPreparation.h"
 #include "SharedCacheHandoff.h"
 #include "SimSyscallHelpers.h"
@@ -334,6 +336,53 @@ bool reserveImage(const Layout &layout, const CacheReservation &cache, vm_addres
     snprintf(detail, sizeof(detail), "No free low image range of 0x%llx bytes in 0x%llx-0x%llx below the simulator cache",
              static_cast<unsigned long long>(layout.mappedSize), static_cast<unsigned long long>(begin), static_cast<unsigned long long>(end));
     return fail(error, detail);
+}
+
+bool reserveHighImage(const Layout &layout, const CacheReservation &cache, LSBGuestImageSlot slot, vm_address_t &base, std::string &error) {
+    task_vm_info_data_t vm = {};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm), &count) != KERN_SUCCESS || count < TASK_VM_INFO_REV2_COUNT)
+        return fail(error, "Cannot determine the guest executable address limit");
+    uint64_t address;
+    int status = LSBGuestImageAddress(cache.address, cache.size, layout.preferredAddress, layout.mappedSize, vm.page_size, vm.max_address, slot, &address);
+    if (status) {
+        error = std::string("Guest executable does not fit its high address range: ") + strerror(status);
+        return false;
+    }
+    vm_address_t reservation = address;
+    kern_return_t result = vm_allocate(mach_task_self(), &reservation, layout.mappedSize, VM_FLAGS_FIXED);
+    if (result != KERN_SUCCESS) {
+        char detail[192];
+        snprintf(detail, sizeof(detail), "Cannot reserve guest executable at 0x%llx: %s", (unsigned long long)address, mach_error_string(result));
+        return fail(error, detail);
+    }
+    if (reservation != address) {
+        vm_deallocate(mach_task_self(), reservation, layout.mappedSize);
+        return fail(error, "Guest executable reservation moved from its requested address");
+    }
+    base = reservation;
+    return true;
+}
+
+bool checkExecutableMapping(vm_address_t start, vm_size_t size, vm_prot_t protection, std::string &error) {
+    const vm_address_t end = start + size;
+    for (vm_address_t cursor = start; cursor < end;) {
+        vm_address_t region = cursor;
+        vm_size_t length = 0;
+        natural_t depth = UINT32_MAX;
+        vm_region_submap_info_data_64_t info = {};
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        kern_return_t result = vm_region_recurse_64(mach_task_self(), &region, &length, &depth, reinterpret_cast<vm_region_recurse_info_t>(&info), &count);
+        if (result != KERN_SUCCESS || count < VM_REGION_SUBMAP_INFO_V0_COUNT_64 || info.is_submap || region > cursor ||
+            length > UINTPTR_MAX - region || region + length <= cursor || (info.protection & protection) != protection || !(info.max_protection & VM_PROT_EXECUTE)) {
+            char detail[192];
+            snprintf(detail, sizeof(detail), "Guest executable at 0x%llx requires protection %d, got %d (max %d, VM query %d)",
+                     (unsigned long long)cursor, protection, info.protection, info.max_protection, result);
+            return fail(error, detail);
+        }
+        cursor = region + length;
+    }
+    return true;
 }
 
 struct GuardedMainStack {
@@ -772,7 +821,7 @@ bool parseLayout(const FileMapping &file, Layout &layout, std::string &error, ui
     return true;
 }
 
-bool mapImage(const char *path, LSBMappedImage &image, std::string &error, uint32_t expectedType, const CacheReservation &cache) {
+bool mapImage(const char *path, LSBMappedImage &image, std::string &error, uint32_t expectedType, const CacheReservation &cache, LSBGuestImageSlot slot) {
     FileMapping file;
     file.fd = open(path, O_RDONLY | O_CLOEXEC);
     if (file.fd == -1) return systemFailure(error, "open(image)");
@@ -798,7 +847,9 @@ bool mapImage(const char *path, LSBMappedImage &image, std::string &error, uint3
     // Layout owns its commands; retaining this whole-file view can consume the last contiguous low gap for a large executable.
     if (!file.releaseBytes()) return systemFailure(error, "munmap(image parse view)");
     vm_address_t base = 0;
-    if (!reserveImage(layout, cache, base, error)) return false;
+    bool highExecutable = expectedType == MH_EXECUTE && configuredNativeSupport && cache.size;
+    bool reserved = highExecutable ? reserveHighImage(layout, cache, slot, base, error) : reserveImage(layout, cache, base, error);
+    if (!reserved) return false;
     image.header = reinterpret_cast<const mach_header *>(base);
     image.mappedSize = static_cast<size_t>(layout.mappedSize);
     // Keep unused gaps inaccessible; file mappings replace only pages inside this reservation.
@@ -806,7 +857,8 @@ bool mapImage(const char *path, LSBMappedImage &image, std::string &error, uint3
     const size_t pageSize = static_cast<size_t>(getpagesize());
     for (const auto &segment : layout.segments) {
         if (segment.vmaddr < layout.preferredAddress) continue;
-        auto *address = reinterpret_cast<void *>(base + segment.vmaddr - layout.preferredAddress);
+        vm_address_t segmentAddress = base + (segment.vmaddr - layout.preferredAddress);
+        auto *address = reinterpret_cast<void *>(segmentAddress);
         if (segment.filesize) {
             off_t offset = static_cast<off_t>(layout.sliceOffset + segment.fileoff);
             void *mapped = mmap(address, static_cast<size_t>(segment.filesize), segment.initprot, MAP_FIXED | MAP_PRIVATE, file.fd, offset);
@@ -830,13 +882,17 @@ bool mapImage(const char *path, LSBMappedImage &image, std::string &error, uint3
             if (mprotect(zeroFill, static_cast<size_t>(segment.vmsize - filePages), segment.initprot) == -1)
                 return systemFailure(error, "mprotect(image zero-fill)");
         }
+        // A successful file mmap can still lose execute permission in a restricted VM range.
+        if (highExecutable && (segment.initprot & VM_PROT_EXECUTE) &&
+            !checkExecutableMapping(segmentAddress, segment.vmsize, segment.initprot, error)) return false;
     }
     image.slide = base - layout.preferredAddress;
     image.entry = base + layout.entryOffset;
     return true;
 }
 
-bool mapFile(const char *path, LSBMappedImage *image, char *error, size_t errorSize, uint32_t expectedType, const char *rootPath = nullptr) {
+bool mapFile(const char *path, LSBMappedImage *image, char *error, size_t errorSize, uint32_t expectedType,
+             const char *rootPath = nullptr, LSBGuestImageSlot slot = LSBGuestMainImage) {
     if (!path || !image) {
         if (error && errorSize) snprintf(error, errorSize, "A path and output image are required");
         return false;
@@ -845,7 +901,7 @@ bool mapFile(const char *path, LSBMappedImage *image, char *error, size_t errorS
     imageMappingStarted = true;
     std::string message;
     CacheReservation cache;
-    bool success = (!rootPath || readRuntimeCacheReservation(rootPath, cache, message)) && mapImage(path, *image, message, expectedType, cache);
+    bool success = (!rootPath || readRuntimeCacheReservation(rootPath, cache, message)) && mapImage(path, *image, message, expectedType, cache, slot);
     if (!success) LSBUnloadImage(image);
     if (error && errorSize) {
         if (success) error[0] = '\0';
@@ -885,6 +941,10 @@ bool LSBMapDyldSimForRuntime(const char *path, const char *rootPath, LSBMappedIm
 
 bool LSBMapSimExecutableForRuntime(const char *path, const char *rootPath, LSBMappedImage *image, char *error, size_t errorSize) {
     return mapFile(path, image, error, errorSize, MH_EXECUTE, rootPath ? rootPath : "");
+}
+
+bool LSBMapForkBootstrapForRuntime(const char *path, const char *rootPath, LSBMappedImage *image, char *error, size_t errorSize) {
+    return mapFile(path, image, error, errorSize, MH_EXECUTE, rootPath ? rootPath : "", LSBForkBootstrapImage);
 }
 
 void LSBUnloadImage(LSBMappedImage *image) {

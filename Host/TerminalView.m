@@ -479,10 +479,10 @@
     controls.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
     controls.accessibilityLabel = NSLocalizedString(@"Terminal shortcuts", @"Accessibility label for the terminal keyboard shortcut bar");
     NSArray *labels = @[NSLocalizedString(@"Esc", @"Terminal shortcut sending the Escape key"),
-        NSLocalizedString(@"Tab", @"Terminal shortcut sending the Tab key"), @"^C", @"^D", @"←", @"↓", @"↑", @"→", @"↵",
+        NSLocalizedString(@"Tab", @"Terminal shortcut sending the Tab key"), @"^C", @"^D", @"^Z", @"←", @"↓", @"↑", @"→", @"↵",
         NSLocalizedString(@"Paste", @"Terminal shortcut that pastes clipboard text")];
     UIStackView *previous = nil;
-    for (NSArray<NSNumber *> *indices in @[@[@0, @1, @2, @3, @8, @9], @[@4, @5, @6, @7]]) {
+    for (NSArray<NSNumber *> *indices in @[@[@0, @1, @2, @3, @9, @10], @[@4, @5, @6, @7, @8]]) {
         UIStackView *page = [UIStackView new];
         page.translatesAutoresizingMaskIntoConstraints = NO;
         page.distribution = UIStackViewDistributionFillEqually;
@@ -492,7 +492,7 @@
             button.titleLabel.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightMedium];
             button.tag = index.integerValue;
             // Try Paste on demand even before UIKit has discovered clipboard text, including a remote clipboard.
-            [button addTarget:self action:index.unsignedIntegerValue == 9 ? @selector(paste:) : @selector(controlPressed:)
+            [button addTarget:self action:index.unsignedIntegerValue == 10 ? @selector(paste:) : @selector(controlPressed:)
                 forControlEvents:UIControlEventTouchUpInside];
             [page addArrangedSubview:button];
         }
@@ -584,7 +584,7 @@
 }
 
 - (void)controlPressed:(UIButton *)button {
-    NSArray *sequences = @[@"\033", @"\t", @"\003", @"\004", @"\033[D", @"\033[B", @"\033[A", @"\033[C", @"\r"];
+    NSArray *sequences = @[@"\033", @"\t", @"\003", @"\004", @"\032", @"\033[D", @"\033[B", @"\033[A", @"\033[C", @"\r"];
     if ((NSUInteger)button.tag < sequences.count) [self sendString:sequences[(NSUInteger)button.tag]];
 }
 

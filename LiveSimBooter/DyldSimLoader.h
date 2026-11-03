@@ -35,10 +35,11 @@ static inline bool LSBTraceHandoffRequested(const char *const environment[]) {
 
 bool LSBMapDyldSim(const char *path, LSBMappedImage *image, char *error, size_t errorSize);
 bool LSBMapSimExecutable(const char *path, LSBMappedImage *image, char *error, size_t errorSize);
-// With a cache present, reserve images below its declared range and below the host executable shared region.
-// The original APIs retain their unconstrained, loose-library mapping behavior.
+// The native-support profile maps guest executables in the selected high address window. dyld_sim and legacy profiles use the low image range.
 bool LSBMapDyldSimForRuntime(const char *path, const char *rootPath, LSBMappedImage *image, char *error, size_t errorSize);
 bool LSBMapSimExecutableForRuntime(const char *path, const char *rootPath, LSBMappedImage *image, char *error, size_t errorSize);
+// The fork observer uses a separate executable slot, leaving the ordinary main image address available for its parent.
+bool LSBMapForkBootstrapForRuntime(const char *path, const char *rootPath, LSBMappedImage *image, char *error, size_t errorSize);
 // Only unload before entering dyld_sim; it retains pointers into both mapped images.
 void LSBUnloadImage(LSBMappedImage *image);
 

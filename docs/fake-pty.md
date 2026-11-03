@@ -104,6 +104,7 @@ registrations before their descriptors close. Read/write callbacks process bound
 so a continuously writing guest cannot monopolize keyboard and signal handling.
 
 A 16 KiB file beside RuntimeRoot holds the shared termios, window size, foreground identifier, and slave socket identity.
+Version 2 publishes the foreground group and the `TOSTOP` bit atomically so terminal I/O can check them without taking the termios lock.
 Its path is passed in `LSB_FAKE_PTY_STATE`. The guest constructor maps it through the ordinary App Group filesystem; spawned
 descendants inherit the environment entry and socket open description. Matching the socket's device/inode identifies aliases
 after `dup`, fileport transfer, and descriptor renumbering without globally treating stdin or every socket as a terminal.
@@ -112,16 +113,34 @@ remains available until the corresponding guest exits.
 
 `ProcessSupport/FakePTY.c` implements the shared records and host line discipline. `Guest/FakePTY.c` interposes `isatty`,
 termios access, foreground-group access, window ioctls, and tty naming for matching descriptors. `TCSANOW` updates supported
-attributes; canonical input implements line editing, echo, CR conversion, and selected signal characters. Noncanonical input
+attributes immediately. For `TCSADRAIN` and `tcdrain`, the attached guest asks the host to consume the bytes already queued
+on the master endpoint before returning. Bash readline uses this when changing and restoring its input mode.
+Canonical input implements line editing, echo, CR conversion, and selected signal characters. Noncanonical input
 supports `VMIN=1, VTIME=0`. Output applies `OPOST/ONLCR` when selected. `ttyname` reports `/dev/lsbtty` as a label; that path
 is not an openable device node.
 
-The host forwards VINTR/VQUIT and resize notifications through the broker's existing audited signal path. With job control
-disabled, it targets all live jobs belonging to that terminal, not a kernel foreground process group. The stored foreground
-identifier satisfies the shell's terminal queries without creating a native foreground group or supplying stopped/continued
-job control. Initial foreground selection calls `LSBGuestProcessGroup()` directly, keeping it consistent with the existing
-logical session model across SETEXEC. Calling `getpgrp()` from inside the interposing shim bypassed its own interposition
-and seeded the native group instead; Fish then saw a different group from its own logical `getpgrp()` result.
+The broker assigns the attached shell's logical PID as its initial session and foreground group before releasing the helper.
+Children inherit the group and SETEXEC preserves it. Bash can use `setpgid` on itself or a direct child to create a job
+group or join a live group in the same session. The host publishes changes to the child's control page and the parent's
+wait ledger. `tcsetpgrp` selects a live group in the caller's terminal session. An invalid group leaves the previous selection intact.
+With `ISIG` set, VINTR, VQUIT, and VSUSP send SIGINT, SIGQUIT, and SIGTSTP to the current foreground group. Resize sends
+SIGWINCH there. With job control disabled, Fish and its ordinary children inherit the same group. See [Bash](bash.md) for
+the pinned experimental fork path and its device checks.
+Guest `read`, `readv`, `write`, `writev`, and their Darwin `$NOCANCEL` entry points enforce job control on the slave.
+A background read requests SIGTTIN. A background write requests SIGTTOU when `TOSTOP` is set. Changing supported terminal
+attributes, resizing the terminal, draining it and selecting a foreground group also check SIGTTOU. The broker verifies the
+group and whether it is orphaned, signals the other members and lets the issuing thread raise its own signal. When the
+default handler stops that thread's process, the operation checks the foreground again after continuation. A caller that
+catches the job-control signal gets `EINTR`. A blocked or ignored SIGTTIN returns `EIO`. Blocking or ignoring SIGTTOU
+allows a background write or terminal-control change. An orphaned group that would otherwise be stopped gets `EIO`.
+
+When an allowed transfer would block, its kqueue watches socket readiness and SIGCONT. It also watches the retained PTY state
+file for `NOTE_FUNLOCK`. After `tcsetpgrp`, the host calls `flock(LOCK_UN)` on that file, waking blocked readers to check
+the new foreground group without writing any data. The state descriptor is close-on-exec, excluded from spawn handoff,
+and checked for reuse. If the guest closes it or the vnode filter is unavailable, socket readiness and SIGCONT still
+trigger checks. `poll` on the kqueue preserves the original entry point's cancellation policy and socket timeout.
+The usual `TOSTOP`-off write path goes straight to the original implementation.
+
 The [creation-mask tracker](creation-mask.md) lets the existing spawn path capture a known mask after Fish starts workers.
 
 Interactive Fish also starts pthread workers. XNU retains the native pthread startup PC after cache detachment, and rejects
@@ -133,7 +152,7 @@ custom-stack pthread ABI; the separate [launchd workqueue bridge](launchd.md) ha
 ## Native display and input
 
 `Host/TerminalView.m` provides software-keyboard input, hardware arrow/control keys, and two horizontally paged shortcut groups:
-Escape, Tab, Ctrl-C, Ctrl-D, Return and Paste on the first page, and arrows on the second. The row is inside the terminal view, whose bottom stays above both the safe-area bottom
+Escape, Tab, Ctrl-C, Ctrl-D, Return and Paste on the first page, and Ctrl-Z and arrows on the second. The row is inside the terminal view, whose bottom stays above both the safe-area bottom
 and keyboard top; it no longer uses an `inputAccessoryView` that can overlap the floating tab bar. A separate lifecycle
 label changes from waiting to attached or closed without polluting the guest's output. The controller rechecks its binding
 when the tab appears, retains failure output after EOF, and disables keyboard focus without a live input handler. These
@@ -175,19 +194,22 @@ visual effect, Unicode cell widths are incomplete, and full-screen terminal appl
 ## Limits and validation
 
 - `openpty`, `posix_openpt`, `/dev/ptmx`, and `/dev/tty` are not virtualized. Only the inherited socket endpoint is a fake terminal.
-- Guest flush/drain controls, `TCSADRAIN`, `TCSAFLUSH`, flow control, breaks, and unsupported terminal ioctls return `ENOTSUP`.
-- Canonical EOF on an empty line, software flow control, suspend characters, timed reads, and nondefault minimum-length reads
+- Guest flush controls, `TCSAFLUSH`, flow control, breaks, and unsupported terminal ioctls return `ENOTSUP`.
+- Canonical EOF on an empty line, software flow control, delayed suspend, timed reads, and nondefault minimum-length reads
   are unsupported. In Fish's noncanonical mode Ctrl-D is an ordinary input byte that Fish can interpret itself.
-- Full job control, stopped/continued wait events, generic `fork`, and generic `execve` remain unsupported; the broker supports
-  the separate-process `POSIX_SPAWN_SETEXEC` replacement used by the terminal helper.
-  Pipelines, external command substitutions, background jobs, and arbitrary shell applications need separate execution tests.
+- The job-control checks apply at interposed tty API entry points. Direct syscalls and socket-specific calls such as
+  `sendmsg` and `recvmsg` can bypass them. Foreground selection and the final nonblocking transfer are separate operations.
+  A nonleader's request to detach via
+  `setsid` returns `ENOTSUP`. Ordinary Fish still uses `posix_spawn` and the terminal helper uses `POSIX_SPAWN_SETEXEC`.
 - Input and signal delivery are separate operations. Text followed immediately by Ctrl-C in the same input burst can leave
   text already queued in the slave socket when SIGINT reaches Fish; Fish may display that text afterward. A separate Ctrl-C
   after the line appears clears it. Host queue flushing cannot remove bytes already queued in the socket; an acknowledged
-  flush/control protocol or guest read interposition is not implemented.
+  guest-side flush is still needed.
 
 `Tests/FakePTYTests.c` covers shared state, alias matching, native-descriptor forwarding, termios/window controls, line editing,
-echo, output translation, signal characters, and explicit unsupported operations. Native session tests exercise inherited
+echo, output translation, signal characters, and explicit unsupported operations. The descriptor tests cover caught,
+blocked and ignored job-control signals, TOSTOP, descriptor reuse and a real stopped reader that resumes in the background
+before any input arrives. Native session tests exercise inherited
 endpoints, dispatch I/O, raw input, resize/signals, and EOF cleanup. Screen tests exercise split UTF-8/escape sequences,
 cursor movement, editing, bounded state, and parser callbacks that reenter input handling. These are host tests and do not
 replace the separate device checks below.

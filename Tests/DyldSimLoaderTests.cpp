@@ -26,6 +26,7 @@ static unsigned stackReservations = 0, stackReleases = 0;
 static void *reservedStack = MAP_FAILED;
 static bool rejectStackProtection = false, stackUsedFixedMapping = false;
 static bool sourceViewLive = false, allocatedWithParseView = false, reservationUsedOverwrite = false;
+static bool stripSegmentExecute = false;
 static std::function<kern_return_t(vm_address_t *, vm_size_t, int)> allocationHook;
 static std::function<kern_return_t(vm_address_t, vm_size_t)> deallocationHook;
 static std::function<kern_return_t(vm_address_t *, vm_size_t *, mach_msg_type_number_t *, mach_port_t *)> regionHook;
@@ -60,6 +61,7 @@ int LSBLazySignatureRetry(int fd, fsignatures_t *signature) {
 
 static void *testMmap(void *address, size_t size, int protection, int flags, int fd, off_t offset) {
     if ((flags & MAP_FIXED) && rejectSegmentMapping) { errno = EACCES; return MAP_FAILED; }
+    if ((flags & MAP_FIXED) && stripSegmentExecute) protection &= ~PROT_EXEC;
     void *result = ::mmap(address, size, protection, flags, fd, offset);
     if (address == reinterpret_cast<void *>(0x400000000ULL) && protection == PROT_NONE) {
         ++stackReservations;
@@ -915,11 +917,13 @@ static void runtimeImageMappingTests() {
     };
     writeCache();
     std::string imagePath = root + "/image";
-    for (bool isExecutable : {false, true}) {
-        auto bytes = isExecutable ? executable() : thin();
+    auto writeImage = [&](const Bytes &bytes) {
         int fd = open(imagePath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
         check(fd >= 0 && write(fd, bytes.data(), bytes.size()) == static_cast<ssize_t>(bytes.size()), "write runtime image fixture");
         close(fd);
+    };
+    for (bool isExecutable : {false, true}) {
+        writeImage(isExecutable ? executable() : thin());
         sourceMapping = MAP_FAILED; sourceFD = -1; signatureCalls = deallocations = fileUnmaps = 0;
         LSBMappedImage image = {};
         char error[512];
@@ -950,6 +954,52 @@ static void runtimeImageMappingTests() {
     check(!image.header && !image.mappedSize && fileUnmaps == 1 && !sourceViewLive && deallocations == 0,
           "low reservation failure clears image output and releases only the source view");
     check(sourceFD >= 0 && ::fcntl(sourceFD, F_GETFD) == -1 && errno == EBADF, "low reservation failure closes the image descriptor");
+
+    // Select a vacant window in this macOS process the way the broker selects a window for the device session.
+    vm_size_t windowSize = LSB_SLIDABLE_CACHE_PREFERRED_BASE + LSB_NATIVE_SUPPORT_CACHE_SPAN;
+    vm_address_t window = LSB_SLIDABLE_CACHE_PREFERRED_BASE;
+    check(vm_allocate(mach_task_self(), &window, windowSize, VM_FLAGS_ANYWHERE) == KERN_SUCCESS &&
+          window >= LSB_SLIDABLE_CACHE_PREFERRED_BASE, "locate a free window for the high mapping tests");
+    check(vm_deallocate(mach_task_self(), window, windowSize) == KERN_SUCCESS, "release the probe for the actual image reservations");
+    configuredCacheBase = window + LSB_SLIDABLE_CACHE_PREFERRED_BASE;
+    configuredNativeSupport = true;
+    header.sharedRegionStart = LSB_SLIDABLE_CACHE_PREFERRED_BASE;
+    header.sharedRegionSize = LSB_NATIVE_SUPPORT_CACHE_SPAN;
+    header.uuid[0] = 1;
+    writeCache();
+    auto mapMain = [&](LSBMappedImage &output) { return LSBMapSimExecutableForRuntime(imagePath.c_str(), root.c_str(), &output, error, sizeof(error)); };
+    uintptr_t mainAddress = window + LSB_GUEST_MAIN_IMAGE_OFFSET, bootstrapAddress = window + LSB_FORK_BOOTSTRAP_IMAGE_OFFSET;
+    stripSegmentExecute = true;
+    check(!mapMain(image) && strstr(error, "requires protection") && !image.header, "a successful high mmap without execute permission releases the reservation");
+    stripSegmentExecute = false;
+    check(mapMain(image), error);
+    check(reinterpret_cast<uintptr_t>(image.header) == mainAddress && image.slide == window && image.entry == mainAddress + entryOffset,
+          "native-support executable and cache share the window slide, including the executable entry point");
+    std::string protectionError;
+    check(!checkExecutableMapping(mainAddress, 2 * page, VM_PROT_READ | VM_PROT_EXECUTE, protectionError),
+          "the execute permission check reaches the second VM region when a request crosses the text/data boundary");
+    auto *data = reinterpret_cast<uint8_t *>(mainAddress + page);
+    data[page] = 93;
+    LSBMappedImage second = {};
+    check(!mapMain(second) && strstr(error, "Cannot reserve guest executable") && !second.header && !reservationUsedOverwrite,
+          "a second ordinary executable cannot replace the first reservation or fall back to a different address");
+    check(LSBMapForkBootstrapForRuntime(imagePath.c_str(), root.c_str(), &second, error, sizeof(error)), error);
+    check(reinterpret_cast<uintptr_t>(second.header) == bootstrapAddress && second.slide == bootstrapAddress - preferred &&
+          second.entry == bootstrapAddress + entryOffset && data[page] == 93, "the bootstrap has a separate slot and preserves the first image's data");
+    LSBUnloadImage(&second);
+    LSBUnloadImage(&image);
+    writeImage(thin());
+    check(LSBMapDyldSimForRuntime(imagePath.c_str(), root.c_str(), &image, error, sizeof(error)), error);
+    check(reinterpret_cast<uintptr_t>(image.header) + image.mappedSize <= LSB_SLIDABLE_CACHE_PREFERRED_BASE, "dyld_sim still uses its low reservation");
+    LSBUnloadImage(&image);
+    configuredNativeSupport = false;
+    header.sharedRegionSize = LSB_SLIDABLE_CACHE_SPAN;
+    writeCache();
+    writeImage(executable());
+    check(mapMain(image), error);
+    check(reinterpret_cast<uintptr_t>(image.header) + image.mappedSize <= LSB_SLIDABLE_CACHE_PREFERRED_BASE, "original slidable profile keeps low executables");
+    LSBUnloadImage(&image);
+    configuredCacheBase = 0;
     check(!unlink(cachePath.c_str()), "remove cache fixture");
     check(LSBMapSimExecutableForRuntime(imagePath.c_str(), root.c_str(), &image, error, sizeof(error)),
           "runtime without a cache retains loose-library image mapping");

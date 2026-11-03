@@ -30,12 +30,14 @@ int LSBFakePTYInitialize(LSBFakePTYState *state, int slaveFD, unsigned short row
     if (!S_ISSOCK(metadata.st_mode)) return ENOTSOCK;
     memset(state, 0, sizeof(*state));
     state->magic = LSB_FAKE_PTY_MAGIC;
-    state->version = 1;
+    state->version = 2;
     state->structureSize = sizeof(*state);
     state->device = metadata.st_dev;
     state->inode = metadata.st_ino;
     atomic_init(&state->lock, 0);
     atomic_init(&state->inputFlush, 0);
+    atomic_init(&state->foreground, 0);
+    atomic_init(&state->stopBackgroundOutput, 0);
     struct termios *attributes = &state->attributes;
     attributes->c_iflag = ICRNL;
     attributes->c_oflag = OPOST | ONLCR;
@@ -63,7 +65,7 @@ int LSBFakePTYInitialize(LSBFakePTYState *state, int slaveFD, unsigned short row
 
 int LSBFakePTYValidate(const LSBFakePTYState *state, size_t mappedBytes) {
     if (!state || mappedBytes < sizeof(*state)) return EINVAL;
-    if (state->magic != LSB_FAKE_PTY_MAGIC || state->version != 1 || state->structureSize != sizeof(*state)) return EPROTO;
+    if (state->magic != LSB_FAKE_PTY_MAGIC || state->version != 2 || state->structureSize != sizeof(*state)) return EPROTO;
     return 0;
 }
 
@@ -89,7 +91,7 @@ static int validateAttributes(const struct termios *attributes) {
     tcflag_t input = IGNBRK | BRKINT | IGNPAR | ICRNL | INLCR | IGNCR;
     tcflag_t output = OPOST | ONLCR;
     tcflag_t control = CREAD | CS8 | CLOCAL | HUPCL;
-    tcflag_t local = ICANON | ISIG | ECHO | ECHOE | ECHOK | ECHONL | ECHOCTL | IEXTEN | NOFLSH;
+    tcflag_t local = ICANON | ISIG | ECHO | ECHOE | ECHOK | ECHONL | ECHOCTL | IEXTEN | NOFLSH | TOSTOP;
     if ((attributes->c_iflag & ~input) || (attributes->c_oflag & ~output) || (attributes->c_cflag & ~control) ||
         (attributes->c_lflag & ~local) || (attributes->c_cflag & CSIZE) != CS8) return ENOTSUP;
     if (!(attributes->c_lflag & ICANON) && (attributes->c_cc[VMIN] != 1 || attributes->c_cc[VTIME])) return ENOTSUP;
@@ -102,6 +104,7 @@ int LSBFakePTYSetAttributes(LSBFakePTYState *state, const struct termios *attrib
     if (!error) error = acquire(state);
     if (error) return error;
     state->attributes = *attributes;
+    atomic_store_explicit(&state->stopBackgroundOutput, !!(attributes->c_lflag & TOSTOP), memory_order_release);
     release(state);
     return 0;
 }
@@ -126,20 +129,20 @@ int LSBFakePTYSetWindow(LSBFakePTYState *state, const struct winsize *window) {
 
 int LSBFakePTYGetForeground(LSBFakePTYState *state, pid_t *foreground) {
     if (!state || !foreground) return EINVAL;
-    int error = acquire(state);
-    if (error) return error;
-    *foreground = state->foreground;
-    release(state);
+    *foreground = atomic_load_explicit(&state->foreground, memory_order_acquire);
     return 0;
 }
 
 int LSBFakePTYSetForeground(LSBFakePTYState *state, pid_t foreground) {
     if (!state || foreground <= 0) return EINVAL;
-    int error = acquire(state);
-    if (error) return error;
-    state->foreground = foreground;
-    release(state);
+    atomic_store_explicit(&state->foreground, foreground, memory_order_release);
     return 0;
+}
+
+bool LSBFakePTYRequiresForeground(const LSBFakePTYState *state, pid_t group, bool checkTOSTOP) {
+    if (!state || group <= 0 || (checkTOSTOP && !atomic_load_explicit(&state->stopBackgroundOutput, memory_order_acquire))) return false;
+    pid_t foreground = atomic_load_explicit(&state->foreground, memory_order_acquire);
+    return foreground > 0 && foreground != group;
 }
 
 int LSBFakePTYFlush(LSBFakePTYState *state, int selector) {
@@ -221,8 +224,10 @@ int LSBFakePTYInput(LSBFakePTYState *state, LSBFakePTYDiscipline *discipline, co
         bool literal = discipline->literalNext;
         discipline->literalNext = false;
         if (!literal && (attributes.c_lflag & ISIG)) {
-            int number = controlCharacter(&attributes, VINTR, value) ? SIGINT : controlCharacter(&attributes, VQUIT, value) ? SIGQUIT : 0;
-            if (controlCharacter(&attributes, VSUSP, value)) return ENOTSUP;
+            int number = 0;
+            if (controlCharacter(&attributes, VINTR, value)) number = SIGINT;
+            else if (controlCharacter(&attributes, VQUIT, value)) number = SIGQUIT;
+            else if (controlCharacter(&attributes, VSUSP, value)) number = SIGTSTP;
             if (number) {
                 pid_t foreground;
                 error = LSBFakePTYGetForeground(state, &foreground);

@@ -262,7 +262,7 @@ int main(void) {
         session.signalHandler = ^int(pid_t group, int number) { (void)group; signalNumber = number; return 0; };
         [session start];
         assert(write(message.fds[1], "session\n", 8) == 8);
-        pumpUntil(^BOOL { return output.length >= 9; });
+        assert(![session drainOutput]); // Synchronous drain processes queued bytes with the old OPOST flags before a TCSADRAIN switch.
         assert([output isEqualToData:[@"session\r\n" dataUsingEncoding:NSUTF8StringEncoding]]);
         struct termios attributes;
         assert(!LSBFakePTYGetAttributes(state, &attributes));

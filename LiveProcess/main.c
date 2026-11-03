@@ -6,6 +6,7 @@
 #include "NativeSignerLoader.h"
 #include "LazySignatureClient.h"
 #include "ExecutablePath.h"
+#include "../ProcessSupport/ForkImageGuard.h"
 #include "ProcessDisplayName.h"
 #include "NativeRuntimePolicy.h"
 #include "InsertedLibraries.h"
@@ -199,6 +200,13 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     char workqueueStartEnvironment[80], workqueueFeaturesEnvironment[80];
     mach_port_t brokerPort = MACH_PORT_NULL;
     if (!error) error = resolveExecutable(executablePath);
+    size_t rootLength = strlen(launch.runtimeRoot);
+    bool forkBootstrap = !error && launch.nativeSupport && !strncmp(executablePath, launch.runtimeRoot, rootLength) &&
+                         !strcmp(executablePath + rootLength, LSB_FORK_BOOTSTRAP_EXECUTABLE);
+    if (forkBootstrap) {
+        error = LSBReserveForkImageGuard(launch.simulatorCacheBase);
+        if (error) snprintf(detail, sizeof(detail), "Cannot reserve the inherited guest executable's slot");
+    }
     int length = snprintf(dyldPath, sizeof(dyldPath), "%s/usr/lib/dyld_sim", launch.runtimeRoot);
     if (!error && (length < 0 || (size_t)length >= sizeof(dyldPath))) error = ENAMETOOLONG;
     if (!error) error = LSBBuildGuestInsertedLibraries(launch.runtimeRoot, executablePath, policyEnvironment, insertLibrary, sizeof(insertLibrary));
@@ -206,7 +214,11 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
                       "SIMULATOR_CAPABILITIES=%s/Library/Developer/CoreSimulator/DeviceType/capabilities.plist", launch.runtimeRoot);
     if (!error && (length < 0 || (size_t)length >= sizeof(capabilitiesEnvironment))) error = ENAMETOOLONG;
     if (!error && !LSBMapDyldSimForRuntime(dyldPath, launch.runtimeRoot, &loader, detail, sizeof(detail))) error = ENOEXEC;
-    if (!error && !LSBMapSimExecutableForRuntime(executablePath, launch.runtimeRoot, &executable, detail, sizeof(detail))) error = ENOEXEC;
+    if (!error) {
+        bool mapped = forkBootstrap ? LSBMapForkBootstrapForRuntime(executablePath, launch.runtimeRoot, &executable, detail, sizeof(detail)) :
+                                      LSBMapSimExecutableForRuntime(executablePath, launch.runtimeRoot, &executable, detail, sizeof(detail));
+        if (!mapped) error = ENOEXEC;
+    }
     // Hold the native pipe separately until READY; installing simulator bootstrap ports removes native service discovery.
     if (!error) error = LSBTransportCopyBrokerPort(&brokerPort);
     if (!error) {

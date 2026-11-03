@@ -12,7 +12,7 @@
 #include <sys/sysctl.h>
 
 #define LSB_BROKER_PORT_ENV "LSB_BROKER_PORT"
-#define LSB_TRANSPORT_VERSION 9
+#define LSB_TRANSPORT_VERSION 12
 
 // Bootstrap-only metadata is versioned independently from the outer transport envelope.
 #define LSB_BOOTSTRAP_VERSION 7
@@ -25,8 +25,18 @@ enum LSBRequestKind {
     LSB_REQUEST_RESOLVE_AUDIT_PID = 6, LSB_REQUEST_COPY_ENTITLEMENTS = 7, LSB_REQUEST_COPY_PROCESS_IDENTITY = 8,
     LSB_REQUEST_RESOLVE_NATIVE_CHILD_PID = 9, LSB_REQUEST_REBOOT_USERSPACE = 10, LSB_REQUEST_LIST_PROCESSES = 11,
     LSB_REQUEST_REGISTER_DEBUGGER_PORT = 12, LSB_REQUEST_COPY_DEBUGGER_INFO = 13, LSB_REQUEST_COPY_PROCESS_TASK = 14,
-    LSB_REQUEST_OPEN_AUDIO_OUTPUT = 15, LSB_REQUEST_CLOSE_AUDIO_OUTPUT = 16
+    LSB_REQUEST_OPEN_AUDIO_OUTPUT = 15, LSB_REQUEST_CLOSE_AUDIO_OUTPUT = 16, LSB_REQUEST_FORK_OFFER = 17, LSB_REQUEST_FORK_ACCEPT = 18,
+    LSB_REQUEST_SET_PROCESS_GROUP = 19, LSB_REQUEST_DRAIN_TERMINAL = 20, LSB_REQUEST_SET_FOREGROUND_GROUP = 21,
+    LSB_REQUEST_CHECK_TERMINAL_IO = 22
 };
+typedef enum { LSB_TERMINAL_READ = 1, LSB_TERMINAL_WRITE, LSB_TERMINAL_CONTROL } LSBTerminalAccess;
+enum { LSB_MAX_FORK_RANGES = 64, LSB_MAX_FORK_BYTES = 64 * 1024 * 1024 };
+typedef struct { uint64_t start, size; } LSBForkWireRange;
+#ifdef __cplusplus
+static_assert(sizeof(LSBForkWireRange) == 16, "fork range wire layout");
+#else
+_Static_assert(sizeof(LSBForkWireRange) == 16, "fork range wire layout");
+#endif
 typedef struct {
     uint64_t requestID;
     uint32_t executionRole;
@@ -67,9 +77,13 @@ typedef struct {
     uint64_t requestID;
     int error;
     pid_t targetPID;
+    pid_t processGroup;
     int signalNumber;
+    LSBTerminalAccess terminalAccess;
     uint32_t entitlementOperation; // COPY_ENTITLEMENTS: csops operation 5 (CDHash), 7 (generated XML) or 16 (original DER).
     audit_token_t targetAudit;
+    uint32_t forkRangeCount;
+    LSBForkWireRange forkRanges[LSB_MAX_FORK_RANGES]; // OFFER only. Server validates ownership and reads the actual VM attributes.
     LSBPeerProcessIdentity peerIdentity; // CHECKIN owns its taskName; audit comes from the kernel and path remains empty.
     mach_port_t nativeServicePort; // Owned send reference, allowed only on a native service READY request.
     mach_port_t processDebuggerPort; // Owned send reference, allowed only on REGISTER_DEBUGGER_PORT after guest initialization.
@@ -101,9 +115,18 @@ int LSBTransportReadyOnPort(mach_port_t broker, uint64_t requestID, int error);
 // Exact positive PID of a running broker-managed child. Signal 0 validates identity without sending a signal.
 // Returns an errno value. A successful launchd fallback means submitted; waitpid observes actual termination.
 int LSBTransportKill(pid_t targetPID, int signalNumber);
+// Logical job-control requests are limited to the broker-attached terminal and its descendants.
+// For a background operation, the broker signals the caller's peers and returns whether the calling thread must raise the same signal.
+int LSBTransportCheckTerminalIO(LSBTerminalAccess access, bool *signalCaller);
+int LSBTransportSetProcessGroup(pid_t targetPID, pid_t group);
+int LSBTransportSetForegroundGroup(pid_t group);
+int LSBTransportDrainTerminal(void);
 // Simulator launchd only: request a replacement userspace after an accepted guest reboot reaches its terminal exit.
 // Carries no payload or rights. Returns an errno value; success means broker acceptance, not completion of the replacement boot.
 int LSBTransportRebootUserspace(void);
+// Cooperative fork mapping. Each peer names the other's full native audit identity. Offers carry only address intervals.
+__attribute__((visibility("default"))) int LSBTransportOfferFork(const audit_token_t *child, const LSBForkWireRange *ranges, size_t count);
+__attribute__((visibility("default"))) int LSBTransportAcceptFork(const audit_token_t *parent);
 // One fixed-format PCM ring per authenticated guest. Success owns a mapping; close first, then munmap using returned size.
 // No request/reply object survives this synchronous request. There is no recording/input capability.
 __attribute__((visibility("default"))) int LSBTransportOpenAudioOutput(void **mapping, size_t *size);

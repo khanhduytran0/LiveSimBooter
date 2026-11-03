@@ -144,9 +144,9 @@ The pristine release executable, source trees, patches, recipes, dependency/tool
 The compatibility lives in the runtime, independently of Fish source:
 
 - The guest wait shim accepts `WUNTRACED` and `WCONTINUED` instead of rejecting a wait that also requests terminal status.
-  The ledger still reports only normal and signal exits. It returns 0 for a live child under `WNOHANG`, preserves exit-status
-  encoding, and reaps a terminal status once. Local tests exercise these combinations, including SIGTERM and subsequent
-  `ECHILD`. It never invents stopped/continued events; full job control remains unsupported.
+  These sequential Fish tests exercised normal and signal exits. A running child with no pending event returns 0 under
+  `WNOHANG`. A terminal status is reaped once, followed by `ECHILD`. The fake terminal now also reports observed stops
+  and continuations for broker-delivered signals. [Interactive Bash tests](bash.md#interactive-bash-on-the-fake-pty)
 - The executable-access interposer acts only after native `EPERM` on a valid mode containing `X_OK`. It requires a canonical,
   readable regular file strictly inside canonical `DYLD_ROOT_PATH`, plain arm64 `MH_EXECUTE`/`MH_PIE`, valid header bounds,
   and execute permission for the relevant real/effective UID and groups. Native read/write checks still apply. Unsupported
@@ -158,7 +158,7 @@ at every spawn. The new [creation-mask tracker](creation-mask.md) initializes be
 `umask`, so later reads no longer temporarily change the process mask or reject worker threads. Native preparation and cache
 detachment still require a single thread. Calls that bypass `umask` interposition do not update the tracked value.
 
-Accepted wait options do not add stopped/continued events. Full fork and exec emulation remain separate work, described in
+The original Fish tests did not exercise stopped or continued jobs. Full fork and exec emulation remain separate work, described in
 the [Bash notes](bash.md#process-model-questions). The guest and native host PTY probes there both rejected new PTY allocation;
 the new terminal supplies socket descriptors and guest controls instead. Shell pipelines, background jobs, substitutions,
 and other paths that may fork or start threads need separate validation; the completed device results establish sequential external commands.

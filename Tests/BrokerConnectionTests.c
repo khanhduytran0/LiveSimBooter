@@ -36,7 +36,7 @@ static audit_token_t selfAudit(void) {
 #endif
 
 #ifdef LSB_GUEST_RUNTIME
-#include "../Guest/BrokerConnection.h"
+#include "../Guest/libLiveSimSpawn/BrokerConnection.h"
 __attribute__((constructor(100))) static void earlyBrokerCall(void) {
     xpc_object_t reply = (xpc_object_t)(uintptr_t)1;
     assert(LSBBrokerConnectionCall(MACH_PORT_NULL, NULL, &reply) == ENOTSUP && !reply);

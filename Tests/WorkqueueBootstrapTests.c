@@ -208,7 +208,7 @@ uintptr_t LSBThreadSignPC(uintptr_t start, uint32_t flags) {
 #define pthread_create testCreateWorker
 #define pthread_mach_thread_np testWorkerPort
 #define pthread_detach testDetachWorker
-#include "../Guest/WorkqueueBootstrap.c"
+#include "../Guest/libLiveSimSpawn/WorkqueueBootstrap.c"
 #undef mach_msg
 #undef mach_msg_destroy
 #undef mach_reply_port

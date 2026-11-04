@@ -131,7 +131,7 @@ watchdog bounds a stalled operation; an already published valid result is reused
 
 ## Guest operations and errors
 
-[DisplaySettingsRenderServer.c](../Guest/DisplaySettingsRenderServer.c) uses the guest bootstrap's fixed
+[DisplaySettingsRenderServer.c](../Guest/display-settings/DisplaySettingsRenderServer.c) uses the guest bootstrap's fixed
 `com.apple.CARenderServer` endpoint. Its four typed MIG operations match iOS 26.0 build 23A343 QuartzCore: IDs 40259–40262,
 covering flags and the HUD float value. Each RPC has a one-second send/receive timeout, an owned reply port, and strict
 reply ID, size, NDR, port, error, and value validation. This avoids the stock convenience getters' ambiguous zero return
@@ -145,7 +145,7 @@ Unavailable instead of a guessed value. The CLI JSON separates the operation err
 
 The preference path needs both the pinned CoreFoundation native-PID preflight compatibility and the exact shared-counter
 object adapter. The stock user object is `apple.sim.cfprefs.user.daemonv`: 23A343 uses `snprintf(size=31)`, truncating its
-version digit. [NotificationSharedMemory.c](../Guest/NotificationSharedMemory.c) maps only that exact name to the owned
+version digit. [NotificationSharedMemory.c](../Guest/libLiveSimSpawn/NotificationSharedMemory.c) maps only that exact name to the owned
 `data/tmp/cfpreferences-user-v1.shm`. The real daemon creates a 16 KiB writable page; clients open it read-only.
 No additional sandbox exception is granted. XML preference files are valid: the earlier nil reads occurred before plist
 parsing because the shared counter page was missing. After replacing the shim, restart cfprefsd and its clients to discard

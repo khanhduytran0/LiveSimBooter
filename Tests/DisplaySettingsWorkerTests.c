@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <uuid/uuid.h>
-#include "../Guest/DisplaySettingsControl.h"
+#include "../Guest/display-settings/DisplaySettingsControl.h"
 
 static unsigned applies, alarms;
 unsigned dyld_get_active_platform(void) { return 7; }
@@ -20,7 +20,7 @@ void LSBDisplaySettingsApply(uint32_t operation, int32_t value, LSBDSettingsResp
 }
 static unsigned mockAlarm(unsigned seconds) { assert(seconds == 10 || seconds == 0); alarms++; return 0; }
 #define alarm mockAlarm
-#include "../Guest/DisplaySettingsWorker.c"
+#include "../Guest/display-settings/DisplaySettingsWorker.c"
 #undef alarm
 
 static LSBDSettingsRequest request(const uint8_t generation[16]) {

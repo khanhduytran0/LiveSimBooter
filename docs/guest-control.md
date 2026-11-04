@@ -1,6 +1,6 @@
 # Guest launchctl
 
-`Guest/LaunchctlControl.c` runs stock simulator `/bin/launchctl` inside the existing simulator launchd session. It inherits
+`Guest/launchctl-control/LaunchctlControl.c` runs stock simulator `/bin/launchctl` inside the existing simulator launchd session. It inherits
 the guest bootstrap port, runtime environment, and spawn shim; each command uses the broker's ordinary spawn/wait path.
 `Tools/guest-launchctl.py` submits literal arguments over native SSH and retrieves stdout, stderr, and exit status. Commands
 do not use a shell. Ordinary requests execute only `/bin/launchctl`; the reserved IPA-install request described below

@@ -165,7 +165,7 @@ Device results for this selected-service stage should be recorded separately fro
 ## Notification service on the phone
 
 The 2026-10-26 trial uses the matching 23A343 runtime on iPhone16,2 / iOS 26.1. The first notifyd startup aborted because
-`shm_open("apple.shm.notification_center", ...)` returned `EPERM`. `Guest/NotificationSharedMemory.c` adapts only that exact
+`shm_open("apple.shm.notification_center", ...)` returned `EPERM`. `Guest/libLiveSimSpawn/NotificationSharedMemory.c` adapts only that exact
 object (with or without its leading slash), and only with `LSB_SIMULATE_NOTIFICATION_SHM=1`, to an owned regular file at
 `SimulatorData/tmp/notification-center.shm` (the historical name of the current `data/tmp` location). It preserves creation/exclusion/truncation, normal file permissions, close-on-exec,
 and descriptor/mapping lifetime across unlink. It does not change unrelated POSIX shared-memory objects.
@@ -254,7 +254,7 @@ This did not terminate the seven selected daemons or framebuffer updates.
 
 ## LaunchServices identity compatibility and verified reply
 
-`Guest/CodeSigningCompatibility.c` adapts guest `csops_audittoken` reads when `LSB_SIMULATE_CODE_SIGNING=1`; the host enables
+`Guest/libLiveSimSpawn/CodeSigningCompatibility.c` adapts guest `csops_audittoken` reads when `LSB_SIMULATE_CODE_SIGNING=1`; the host enables
 this only in the selected-service simulator environment. XML and DER entitlement reads use the authenticated guest snapshot
 first, as described below. STATUS, CDHASH, IDENTITY, TEAMID and VALIDATION_CATEGORY first issue the exact original syscall
 and adapt only `EPERM`; their successful native calls and other errors pass through. Mutation and unknown operations remain
@@ -276,7 +276,7 @@ With this adapter, native lsd **85195** reached its server run loop under LLDB. 
 `runServerMainRunLoop + 12` and `_LSServerMain + 2100`, after the prior container-identity abort point. This was a debugging
 run with a temporary pre-main stop; evidence is `tmp/lsd-services/lldb-lsd-mcm-profile.txt` and `lsd-runloop-symbols.txt`.
 
-The subsequent production-shim run also completed a real LaunchServices request. `Guest/LaunchServicesProbe.m` connects
+The subsequent production-shim run also completed a real LaunchServices request. `Tests/Guest/launchservices-probe/LaunchServicesProbe.m` connects
 to the guest `com.apple.lsd.mapdb` endpoint and invokes the declared
 `getServerStatusWithCompletionHandler:` protocol method. Native probe **85314**, logical PID **85302**, received status
 **`0x00000080`** from peer **85317** and exited **0**. The status is an opaque 32-bit reply; zero would also be a valid reply,
@@ -342,7 +342,7 @@ After the earlier native SpringBoard **97287** constructor stop was resumed, it 
 SpringBoardUI.framework`. Evidence is `tmp/lsd-services/springboard-first-exception.log`. This was a distinct framework
 guard after passing the compact-image limit, not a failure to locate the framework.
 
-`Guest/SpringBoardEntitlements.c` now provides a guest-only report of the stock simulator SpringBoard entitlement
+`Guest/libLiveSimSpawn/SpringBoardEntitlements.c` now provides a guest-only report of the stock simulator SpringBoard entitlement
 `com.apple.springboard-ui.client`, verified in the original executable's `__TEXT,__entitlements` plist. It calls
 `BSSelfTaskHasEntitlement` first, preserving an existing positive answer and forwarding every other key. The fallback
 requires `LSB_SIMULATE_SPRINGBOARD_ENTITLEMENTS=1` plus the canonical regular SpringBoard executable at the expected path
@@ -383,7 +383,7 @@ from SpringBoard **97552**, because the current graphics authorization covers on
 graphics requirement remains pending. The stopped SpringBoard was later terminated during cleanup, so the broker's final
 signal 9 status is distinct from the captured impending `exit(-1)`.
 
-`Guest/ProcessIdentity.c` now preserves native `getpid()` identity for direct calls from the exact BaseBoard framework
+`Guest/libLiveSimSpawn/ProcessIdentity.c` now preserves native `getpid()` identity for direct calls from the exact BaseBoard framework
 install path or its configured RuntimeRoot path, as it already does for libxpc. The change leaves ordinary guest callers
 on the stable logical PID and does not modify audit tokens or their PID versions. Focused unit and real dylib-interposition
 tests cover the exact path, unrelated same-name images, image removal and ordinary guest callers.
@@ -444,8 +444,8 @@ This produces `core-services-probe`, `distributed-notification-probe` and `launc
 RuntimeRoot executable workflow. Run them as guest jobs under the simulator launchd bootstrap, so their lookups and IPC
 reach the selected simulator services. Merely running them under the native host bootstrap would test different daemons.
 
-`Guest/CoreServicesProbe.c` performs bootstrap lookups and the libnotify state/post round trip described above.
-`Guest/DistributedNotificationProbe.c` is pure C and separately registers with
+`Tests/Guest/core-services-probe/CoreServicesProbe.c` performs bootstrap lookups and the libnotify state/post round trip described above.
+`Tests/Guest/distributed-notification-probe/DistributedNotificationProbe.c` is pure C and separately registers with
 `CFNotificationCenterGetDistributedCenter`, posts a unique name/object with a property-list payload, and validates the
 returned nonce, 64-bit number and binary bytes. It pumps the main CFRunLoop for at most five seconds, with a 20-second
 hard process timeout. The matching simulator CoreFoundation sends this registration and post over its distnoted XPC
@@ -737,7 +737,7 @@ and no extensionkitservice launch was observed. See the
 CFBundleCreate resource adapter. The earlier [Metal compiler registration investigation](metal.md#guest-compiler-bundle-registration)
 identified the same issue with importing physical RuntimeRoot bundles from cache image paths.
 
-`Guest/ExtensionKitRegistration.c` now registers this one physical bundle using the normally declared
+`Guest/libLiveSimSpawn/ExtensionKitRegistration.c` now registers this one physical bundle using the normally declared
 `xpc_add_bundle(path, 2)` API. The host sets `LSB_REGISTER_EXTENSIONKIT=1` only on selected jobs matching both their exact label
 and effective Program: `com.apple.SpringBoard` at `/System/Library/CoreServices/SpringBoard.app/SpringBoard`, or
 `com.apple.PosterBoard` at `/Applications/PosterBoard.app/PosterBoard`. The constructor
@@ -872,7 +872,7 @@ was intentionally retained instead of the incoming signed variant. See the
 [publication log](../tmp/lsd-services/all-apps-stage/publication-wifi.log). This confirms app payload publication;
 registration completion and successful app launches remain separate checks.
 
-The simulator-only [registration tool](../Guest/ApplicationRegistration.m) uses normally declared
+The simulator-only [registration tool](../Guest/app-registration/ApplicationRegistration.m) uses normally declared
 `LSApplicationWorkspace` and `LSApplicationProxy` methods. Matching iOS 26 CoreServices implements `registerApplication:`
 by calling `LSRegisterURL`; the tool does not construct installation dictionaries or modify the database directly.
 Build it independently of the native app:
@@ -1590,7 +1590,7 @@ stock simulator or device configuration.
 The separate scene compatibility helper is selected only for canonical stock SpringBoard. It validates the pinned UIKit
 implementation and refreshes the existing root PosterBoard presentation view after a hosting-to-nonhosting transition.
 It does not use the lazy presentation-view getter, create a view, remove layers, hide windows or alter scene priorities.
-See the source and private declarations in `Guest/ScenePresentationCompatibility.m` and `Guest/Private/ScenePresentation.h`.
+See the source and private declarations in `Guest/libLiveSimScene/ScenePresentationCompatibility.m` and `Guest/libLiveSimScene/ScenePresentation.h`.
 The native package and signed `RuntimeRoot/usr/lib/libLiveSimScene.dylib` must be deployed together; the early C shim and
 other guest executable roles are unchanged.
 

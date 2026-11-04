@@ -1,4 +1,4 @@
-#include "../Guest/ChildWait.h"
+#include "../Guest/libLiveSimSpawn/ChildWait.h"
 
 #include <assert.h>
 #include <errno.h>

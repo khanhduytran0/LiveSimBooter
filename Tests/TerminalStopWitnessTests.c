@@ -1,4 +1,4 @@
-#include "../Guest/TerminalStopWitness.c"
+#include "../Guest/libLiveSimSpawn/TerminalStopWitness.c"
 
 #include <assert.h>
 #include <libproc.h>

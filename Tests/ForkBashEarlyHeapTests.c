@@ -1,4 +1,4 @@
-#include "ForkBashEarlyHeap.h"
+#include "../Guest/Shared/Fork/ForkBashEarlyHeap.h"
 #include <assert.h>
 #include <sys/mman.h>
 #include <sys/wait.h>

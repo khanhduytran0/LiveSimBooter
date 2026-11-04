@@ -3,7 +3,7 @@
 #define LSB_INSTALLATION_COMPATIBILITY_TESTING 1
 #define MIStagingManager LSBTestStagingManager
 #define MIStagingRecord LSBTestStagingRecord
-#include "../Guest/InstallationCompatibility.m"
+#include "../Guest/libLiveSimInstall/InstallationCompatibility.m"
 
 static NSUInteger originalCalls;
 static BOOL incompatibleRecord;

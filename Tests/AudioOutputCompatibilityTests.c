@@ -1,5 +1,5 @@
-#include "../Guest/AudioOutputCompatibility.h"
-#include "../Guest/AudioOutputTransport.h"
+#include "../Guest/libLiveSimAudio/AudioOutputCompatibility.h"
+#include "../Guest/libLiveSimAudio/AudioOutputTransport.h"
 #include <assert.h>
 #include <errno.h>
 #include <mach/mach_time.h>

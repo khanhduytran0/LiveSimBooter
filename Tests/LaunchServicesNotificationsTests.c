@@ -20,7 +20,7 @@ static int *testErrnoLocation(void);
 #define LSB_NOTIFICATION_SANDBOX_ORIGINAL "_LSBTestNotificationSandboxOriginal"
 #undef errno
 #define errno (*testErrnoLocation())
-#include "../Guest/LaunchServicesNotifications.c"
+#include "../Guest/libLiveSimSpawn/LaunchServicesNotifications.c"
 #undef task_info
 #undef bootstrap_look_up
 #undef mach_port_deallocate

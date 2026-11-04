@@ -1,4 +1,4 @@
-#include "../Guest/ChildKill.h"
+#include "../Guest/libLiveSimSpawn/ChildKill.h"
 
 #include <assert.h>
 #include <errno.h>

@@ -41,7 +41,7 @@ uintptr_t LSBThreadSignPC(uintptr_t start, uint32_t flags) { (void)flags; return
 #define pthread_create testCreate
 #define pthread_detach testDetach
 #define __workq_open testOpen
-#include "../Guest/WorkqueueBootstrap.c"
+#include "../Guest/libLiveSimSpawn/WorkqueueBootstrap.c"
 #undef task_swap_exception_ports
 #undef pthread_create
 #undef pthread_detach

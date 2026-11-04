@@ -12,7 +12,8 @@ signing and installation, and [the documentation index](README.md) for current r
 | [Host](../Host/) | Native UIKit tabs, extension launch broker, process ownership, IOSurface/framebuffer and Indigo services. |
 | [LiveProcess](../LiveProcess/main.c) | Pure-C extension entry: receive a plan, restore descriptors/state, prepare a simulator or selected native role. |
 | [Loader](../LiveSimBooter/) | Signed Mach-O mapping, startup vectors, pthread/TSD bootstrap, dyld callbacks and debugger publication. |
-| [Guest shim](../Guest/) | Simulator-side process, identity, path and framework compatibility adapters. |
+| [Guest products](../Guest/) | Runtime executables and dylibs. The [spawn shim](../Guest/libLiveSimSpawn/) owns process and path interposition. The [fork observer](../Guest/lsb-fork-snapshot-child/) uses the same [checkpoint definitions](../Guest/Shared/Fork/). |
+| [Guest tests](../Tests/Guest/) | Source for standalone probes and test fixtures, grouped by executable or dylib. |
 | [ProcessSupport](../ProcessSupport/) | Shared protocols, validation, descriptor actions, child-status tables and terminal state. |
 | [NativeMetal](../NativeMetal/) | Separately hosted native GPU service using the prepared simulator serializer/backend libraries. |
 

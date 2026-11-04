@@ -1,4 +1,4 @@
-#include "../Guest/ExtensionKitRegistration.h"
+#include "../Guest/libLiveSimSpawn/ExtensionKitRegistration.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -26,7 +26,7 @@ static void recordRegistration(const char *path, uint64_t flags) {
 
 #define LSB_EXTENSION_KIT_REGISTRATION_TESTING
 #define xpc_add_bundle recordRegistration
-#include "../Guest/ExtensionKitRegistration.c"
+#include "../Guest/libLiveSimSpawn/ExtensionKitRegistration.c"
 #undef xpc_add_bundle
 
 static void join(char output[PATH_MAX], const char *parent, const char *suffix) {

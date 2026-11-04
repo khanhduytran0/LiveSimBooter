@@ -42,7 +42,7 @@ audited against that runtime's host-support libkernel. Recheck those layouts bef
    the native pipe right and all native XPC objects are then released. The child checks its thread count, performs the fresh-TSD
    handoff, and enters dyld_sim. The default retains the native cache with hardware workqueue redirection; diagnostic detachment
    performs another thread check. READY means preparation reached that point, not that dyld_sim or the guest subsequently ran.
-7. The child inserts [libLiveSimSpawn.dylib](../Guest/SpawnShim.c) into the simulator environment. Its interposition tuples replace
+7. The child inserts [libLiveSimSpawn.dylib](../Guest/libLiveSimSpawn/SpawnShim.c) into the simulator environment. Its interposition tuples replace
    public `posix_spawn` and `posix_spawnp`; a later guest spawn follows the same broker/extension path. After guest libSystem/TLS
    initialization, the shim creates a persistent connection to the handed-off endpoint with simulator-to-host mode enabled.
    Guest RPC uses that connection's synchronous request/reply API. Its wait interposer reads the shared status table directly,
@@ -284,7 +284,7 @@ source. The broker closes its imported FD numbers after dispatching the plan and
 also owns FD objects, when it replies at READY. Keeping either pipe writer would prevent the guest parent from seeing EOF.
 A snapshot of a multithreaded caller's FD table is not atomic with concurrent close/open calls.
 
-[CreationMask.c](../Guest/CreationMask.c) checks the real `KERN_OSRELEASE` before selecting `getumask`. The transplanted support
+[CreationMask.c](../Guest/libLiveSimSpawn/CreationMask.c) checks the real `KERN_OSRELEASE` before selecting `getumask`. The transplanted support
 library exports that function, but iOS 26.1's Darwin 25.1 kernel lacks syscall 215; calling it caused SIGSYS before the first
 spawn. Darwin 26 or newer uses the query when available. On older kernels, a constructor captures the inherited mask while
 the guest is still single threaded, and an `umask` interposer tracks subsequent changes. Later spawn reads use that shadow
@@ -308,7 +308,7 @@ also have logical sessions and process groups. The opt-in Bash fork trial suppor
 
 ## Executable access checks
 
-[ExecutableAccess.c](../Guest/ExecutableAccess.c) interposes `access` and `faccessat` for the guest's executable preflight.
+[ExecutableAccess.c](../Guest/libLiveSimSpawn/ExecutableAccess.c) interposes `access` and `faccessat` for the guest's executable preflight.
 It first performs the native query. Only an `EPERM` result for a valid mode containing `X_OK` can use the fallback: the
 canonical file must be strictly inside canonical `DYLD_ROOT_PATH`, be a readable regular plain-arm64 `MH_EXECUTE` with
 `MH_PIE` and bounded load commands, and have the applicable owner/group/other execute bit. `access` uses real IDs;
@@ -323,7 +323,7 @@ with these runtime checks and the accepted standard wait options; general filesy
 
 ## Signaling a simulated child
 
-[ChildKill.c](../Guest/ChildKill.c) interposes `kill` and `killpg`. Positive PIDs select the caller or one of its direct
+[ChildKill.c](../Guest/libLiveSimSpawn/ChildKill.c) interposes `kill` and `killpg`. Positive PIDs select the caller or one of its direct
 simulated children. An exact self PID calls the simulator's original `kill` implementation without broker IPC. Other positive
 PIDs go through synchronous XPC to the authenticated broker; it rejects unknown, unrelated, and completed child jobs with
 `ESRCH`. A terminal guest can signal its own group with `0` or a specific group in its terminal session with a negative PGID.
@@ -405,7 +405,7 @@ so `siginfo_t` does not describe the simulated child with normal `CLD_*` provena
 The temporary native connection is canceled and activated in that canceled state before release, satisfying libxpc's lifecycle
 requirements without starting a peer handshake.
 
-[ChildWait.c](../Guest/ChildWait.c) supports exact PID, any child (`-1`), current group (`0`), and explicit negative-group selectors,
+[ChildWait.c](../Guest/libLiveSimSpawn/ChildWait.c) supports exact PID, any child (`-1`), current group (`0`), and explicit negative-group selectors,
 plus `WNOHANG`, `WUNTRACED`, `WCONTINUED` and `wait()`. It preserves the raw status for `WIFEXITED`, `WEXITSTATUS`, `WIFSIGNALED`, and `WTERMSIG`. A second wait
 returns `ECHILD`; `WNOHANG` returns 0 without changing the status output when a matching child is still live. Blocking waits use
 the pipe only as a hint and rescan every 100 ms, so another waiter draining it cannot lose an exit. Waiting performs no XPC and
@@ -413,7 +413,7 @@ starts no worker thread. Nonblocking reaping uses lock-free operations and is ex
 
 ### Managed process-source polling cost
 
-`Guest/ProcessEvents.c` emulates managed `DISPATCH_SOURCE_TYPE_PROC` using a separate 10 ms timer per source, with 1 ms leeway.
+`Guest/libLiveSimSpawn/ProcessEvents.c` emulates managed `DISPATCH_SOURCE_TYPE_PROC` using a separate 10 ms timer per source, with 1 ms leeway.
 An idle child still schedules polling callbacks. On 2026-10-28, an authorized read-only task-port probe counted **28** active
 sources in guest launchd PID 2290: a nominal **2,800 callbacks/second**, before dispatch coalescing. Native `ps` measured
 15.6–17.0% CPU and 0.56 seconds of additional CPU time over approximately three seconds. The user observed about 20% in CocoaTop.
@@ -516,7 +516,7 @@ codesign --force --sign D7610EDC80D34A9B1A3D3C8563D66A5CD4716293 --timestamp=non
 Those identifiers match the existing runtime signing set. The tested dyld_sim, cache, df, and shim were accepted from the
 extension's App Group path. A newly signed executable still needs its own device validation.
 
-[SpawnProbe.c](../Guest/SpawnProbe.c) spawns `/bin/df -h`, redirects stdout through a transferred pipe, prints the returned PID,
+[SpawnProbe.c](../Tests/Guest/spawn-probe/SpawnProbe.c) spawns `/bin/df -h`, redirects stdout through a transferred pipe, prints the returned PID,
 and reads until EOF with a 15-second deadline. It then checks `waitpid`, raw exit status 0, SIGCHLD delivery, and `ECHILD` after reaping.
 `--verify-statuses` adds gated children that return 0, return 37, and wait for parent-issued SIGTERM. The signal child resets and
 unblocks SIGTERM, writes a readiness byte, and remains blocked on its gate. After receiving readiness, the parent verifies

@@ -1,4 +1,4 @@
-#include "../Guest/FakePTY.h"
+#include "../Guest/libLiveSimSpawn/FakePTY.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -29,7 +29,7 @@ static int detectBlockingWait(struct pollfd *ready, nfds_t count, int timeout) {
 }
 #define poll(...) detectBlockingWait(__VA_ARGS__)
 #define LSB_FAKE_PTY_TESTING
-#include "../Guest/FakePTY.c"
+#include "../Guest/libLiveSimSpawn/FakePTY.c"
 #undef poll
 
 static pid_t testGroup;

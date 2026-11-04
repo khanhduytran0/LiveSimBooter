@@ -55,7 +55,7 @@ runs before the kernel workqueue opens, and can run earlier when the guest proce
 
 ### Detached development-cache trampoline
 
-[WorkqueueTrampoline.c](../Guest/WorkqueueTrampoline.c) verifies actual shared-region removal and reserves the exact entry pages
+[WorkqueueTrampoline.c](../Guest/libLiveSimSpawn/WorkqueueTrampoline.c) verifies actual shared-region removal and reserves the exact entry pages
 without overwrite. If occupied, it accepts only the kernel's top-level, non-submap, DYLD-tagged placeholder with current and
 maximum protections both zero. It replaces that validated slice or its own reservation with anonymous RX memory, then changes RX to
 RW, writes `ldr x16, #8; br x16` with the guest `start_wqthread` literal, flushes the instruction cache, and changes RW back to RX.

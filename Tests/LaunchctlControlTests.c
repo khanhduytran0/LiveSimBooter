@@ -15,7 +15,7 @@ static int testSleep(const struct timespec *, struct timespec *);
 #define kill testKill
 #define nanosleep testSleep
 #define main controlMain
-#include "../Guest/LaunchctlControl.c"
+#include "../Guest/launchctl-control/LaunchctlControl.c"
 #undef main
 #undef posix_spawn
 #undef clock_gettime

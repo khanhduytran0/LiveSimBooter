@@ -1,4 +1,4 @@
-#include "../Guest/SpringBoardEntitlements.h"
+#include "../Guest/libLiveSimSpawn/SpringBoardEntitlements.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -16,7 +16,7 @@ static int executablePath(char *, uint32_t *);
 #define BSSelfTaskHasEntitlement originalQuery
 #define _NSGetExecutablePath executablePath
 #define LSB_SPRINGBOARD_ENTITLEMENTS_TESTING
-#include "../Guest/SpringBoardEntitlements.c"
+#include "../Guest/libLiveSimSpawn/SpringBoardEntitlements.c"
 #undef BSSelfTaskHasEntitlement
 #undef _NSGetExecutablePath
 

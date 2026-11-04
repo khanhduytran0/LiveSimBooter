@@ -1,4 +1,4 @@
-#include "../Guest/FakePTY.h"
+#include "../Guest/libLiveSimSpawn/FakePTY.h"
 #include "../ProcessSupport/SpawnTransport.h"
 
 #include <assert.h>

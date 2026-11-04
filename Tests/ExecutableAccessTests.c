@@ -1,4 +1,4 @@
-#include "../Guest/ExecutableAccess.h"
+#include "../Guest/libLiveSimSpawn/ExecutableAccess.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -76,8 +76,8 @@ static int testStat(const char *path, struct stat *metadata) { ++statCalls; retu
 #define getenv testGetenv
 #define realpath testRealpath
 #define stat(path, metadata) testStat(path, metadata)
-#include "../Guest/RuntimeDirectories.c"
-#include "../Guest/ExecutableAccess.c"
+#include "../Guest/libLiveSimSpawn/RuntimeDirectories.c"
+#include "../Guest/libLiveSimSpawn/ExecutableAccess.c"
 #undef stat
 #undef realpath
 #undef getenv

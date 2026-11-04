@@ -1,5 +1,5 @@
-#include "../Guest/SpawnAttributes.h"
-#include "../Guest/SpawnAttributeLayout.h"
+#include "../Guest/libLiveSimSpawn/SpawnAttributes.h"
+#include "../Guest/libLiveSimSpawn/SpawnAttributeLayout.h"
 
 #include <assert.h>
 #include <errno.h>

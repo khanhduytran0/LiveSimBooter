@@ -6,7 +6,7 @@
 #define IXAppInstallCoordinator LSBTestInstallCoordinator
 #define LSApplicationRecord LSBTestApplicationRecord
 #define main installerMain
-#include "../Guest/ApplicationInstaller.m"
+#include "../Guest/lsb-app-install/ApplicationInstaller.m"
 #undef main
 
 static uint32_t testPlatform = 7;

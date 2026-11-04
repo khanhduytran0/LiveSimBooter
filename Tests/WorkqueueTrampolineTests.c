@@ -206,7 +206,7 @@ static _Noreturn void testExit(int status) {
 #define mach_port_deallocate testDeallocate
 #define munmap testUnmap
 #define _exit testExit
-#include "../Guest/WorkqueueTrampoline.c"
+#include "../Guest/libLiveSimSpawn/WorkqueueTrampoline.c"
 #undef __shared_region_check_np
 #undef getpagesize
 #undef mach_vm_allocate

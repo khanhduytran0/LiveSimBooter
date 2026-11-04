@@ -1,4 +1,4 @@
-#include "../Guest/ForkHook.h"
+#include "../Guest/libLiveSimSpawn/ForkHook.h"
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
@@ -14,7 +14,7 @@ static pid_t originalFork(void), libcVfork(void), originalSyscall(void);
 #define fork originalFork
 #define __fork originalSyscall
 #define LSB_FORK_HOOK_TESTING
-#include "../Guest/ForkHook.c"
+#include "../Guest/libLiveSimSpawn/ForkHook.c"
 #undef __fork
 #undef fork
 

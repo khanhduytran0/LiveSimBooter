@@ -1,4 +1,4 @@
-#include "ForkBashTraps.h"
+#include "../Guest/Shared/Fork/ForkBashTraps.h"
 #include <assert.h>
 #include <signal.h>
 #include <stdlib.h>

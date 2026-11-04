@@ -16,7 +16,8 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ForkSnapshotBroker.c Host/ForkSnapshotBroker.c -o "$test_directory/ForkSnapshotBroker"
 "$test_directory/ForkSnapshotBroker"
 for test_name in ForkBashCommand ForkBashRedirect ForkBashTraps ForkBashEarlyHeap ForkBashPipeline ForkBashSubshell ForkBashSubstitution ForkProcursusBashCommand; do
-    xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -Wl,-dead_strip "Tests/${test_name}Tests.c" Guest/RuntimeDirectories.c -o "$test_directory/$test_name"
+    xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -Wl,-dead_strip "Tests/${test_name}Tests.c" \
+    Guest/libLiveSimSpawn/RuntimeDirectories.c -o "$test_directory/$test_name"
     "$test_directory/$test_name"
 done
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 Tests/ForkAllocatorTests.c -o "$test_directory/ForkAllocator"
@@ -27,9 +28,10 @@ for test_name in HostStartupPolicy UserspaceReboot NativeRuntimePolicy NativeCac
     "$test_directory/$test_name"
 done
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_GUEST_RUNTIME -DLSB_CHILD_WAIT_TESTING \
-    Tests/ForkSignalStateTests.c Guest/ChildWait.c ProcessSupport/ChildStatus.c -o "$test_directory/ForkSignalState"
+    Tests/ForkSignalStateTests.c Guest/libLiveSimSpawn/ChildWait.c ProcessSupport/ChildStatus.c -o "$test_directory/ForkSignalState"
 "$test_directory/ForkSignalState"
-xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 Tests/ForkStackPreflightTests.c Guest/ForkContext_arm64.S -o "$test_directory/ForkStackPreflight"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 Tests/ForkStackPreflightTests.c Guest/Shared/Fork/ForkContext_arm64.S \
+    -o "$test_directory/ForkStackPreflight"
 "$test_directory/ForkStackPreflight"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/AudioOutputRingTests.c ProcessSupport/AudioOutput.c -o "$test_directory/AudioOutputRing"
@@ -38,7 +40,8 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_TRANSP
     Tests/AudioOutputTransportTests.c ProcessSupport/SpawnPlan.c -o "$test_directory/AudioOutputTransport"
 "$test_directory/AudioOutputTransport"
 xcrun --sdk macosx clang -fblocks -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_AUDIO_OUTPUT_TESTING \
-    Guest/AudioOutputCompatibility.c Tests/AudioOutputCompatibilityTests.c -framework CoreFoundation -o "$test_directory/AudioOutputCompatibility"
+    Guest/libLiveSimAudio/AudioOutputCompatibility.c Tests/AudioOutputCompatibilityTests.c -framework CoreFoundation \
+    -o "$test_directory/AudioOutputCompatibility"
 "$test_directory/AudioOutputCompatibility"
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
     Tests/HapticRelayTests.m -framework Foundation -framework AVFAudio -o "$test_directory/HapticRelay"
@@ -106,13 +109,14 @@ xcrun --sdk macosx clang++ -std=c++17 -Wall -Wextra -Werror -arch arm64 -fno-bui
     -o "$test_directory/DebuggerNotification"
 "$test_directory/DebuggerNotification"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/SpawnPlanTests.c Guest/SpawnAttributes.c Guest/ProcessSession.c Guest/ProcessIdentity.c ProcessSupport/SpawnPlan.c ProcessSupport/ChildStatus.c \
-    Guest/ExecutableAccess.c Guest/RuntimeDirectories.c LiveProcess/ExecutablePath.c -DLSB_EXECUTABLE_ACCESS_TESTING \
+    Tests/SpawnPlanTests.c Guest/libLiveSimSpawn/SpawnAttributes.c Guest/libLiveSimSpawn/ProcessSession.c Guest/libLiveSimSpawn/ProcessIdentity.c \
+    ProcessSupport/SpawnPlan.c ProcessSupport/ChildStatus.c \
+    Guest/libLiveSimSpawn/ExecutableAccess.c Guest/libLiveSimSpawn/RuntimeDirectories.c LiveProcess/ExecutablePath.c -DLSB_EXECUTABLE_ACCESS_TESTING \
     -DLSB_PROCESS_IDENTITY_TESTING -DLSB_PROCESS_SESSION_TESTING -o "$test_directory/SpawnPlan"
 "$test_directory/SpawnPlan"
 LSB_SIMULATE_SESSIONS=1 LSB_TEST_SESSION_GROUP=1 "$test_directory/SpawnPlan"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/SpawnAttributesTests.c Guest/SpawnAttributes.c -o "$test_directory/SpawnAttributes"
+    Tests/SpawnAttributesTests.c Guest/libLiveSimSpawn/SpawnAttributes.c -o "$test_directory/SpawnAttributes"
 "$test_directory/SpawnAttributes"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/LaunchctlControlTests.c -o "$test_directory/LaunchctlControl"
@@ -157,14 +161,16 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ChildStatusTests.c ProcessSupport/ChildStatus.c -o "$test_directory/ChildStatus"
 "$test_directory/ChildStatus"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_CHILD_WAIT_TESTING \
-    Tests/ChildWaitTests.c Guest/ChildWait.c ProcessSupport/ChildStatus.c -o "$test_directory/ChildWait"
+    Tests/ChildWaitTests.c Guest/libLiveSimSpawn/ChildWait.c ProcessSupport/ChildStatus.c -o "$test_directory/ChildWait"
 "$test_directory/ChildWait"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_CHILD_KILL_TESTING \
-    Tests/ChildKillTests.c Guest/ChildKill.c Guest/ProcessIdentity.c Guest/ChildWait.c ProcessSupport/ChildStatus.c \
+    Tests/ChildKillTests.c Guest/libLiveSimSpawn/ChildKill.c Guest/libLiveSimSpawn/ProcessIdentity.c Guest/libLiveSimSpawn/ChildWait.c \
+    ProcessSupport/ChildStatus.c \
     -DLSB_PROCESS_IDENTITY_TESTING -DLSB_CHILD_WAIT_TESTING -o "$test_directory/ChildKill"
 "$test_directory/ChildKill"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_CHILD_KILL_TESTING \
-    Tests/ProcessIdentityTests.c Guest/ChildKill.c Guest/ChildWait.c ProcessSupport/ChildStatus.c -DLSB_CHILD_WAIT_TESTING -o "$test_directory/ProcessIdentity"
+    Tests/ProcessIdentityTests.c Guest/libLiveSimSpawn/ChildKill.c Guest/libLiveSimSpawn/ChildWait.c ProcessSupport/ChildStatus.c \
+    -DLSB_CHILD_WAIT_TESTING -o "$test_directory/ProcessIdentity"
 "$test_directory/ProcessIdentity"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ProcessInspectionTests.c -o "$test_directory/ProcessInspection"
@@ -188,7 +194,8 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/PeerDebuggerTests.c ProcessSupport/PeerDebugger.c -o "$test_directory/PeerDebugger"
 "$test_directory/PeerDebugger"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib -DLSB_INSPECTION_INTERPOSE_FIXTURE \
-    Guest/ProcessInspection.c Guest/RuntimeDirectories.c Tests/ProcessInspectionInterposeTests.c -o "$test_directory/libProcessInspection.dylib"
+    Guest/libLiveSimSpawn/ProcessInspection.c Guest/libLiveSimSpawn/RuntimeDirectories.c Tests/ProcessInspectionInterposeTests.c \
+    -o "$test_directory/libProcessInspection.dylib"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ProcessInspectionInterposeTests.c -o "$test_directory/ProcessInspectionInterpose"
 DYLD_INSERT_LIBRARIES="$test_directory/libProcessInspection.dylib" "$test_directory/ProcessInspectionInterpose"
@@ -199,11 +206,11 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ProcessSessionTests.c ProcessSupport/ChildStatus.c -o "$test_directory/ProcessSession"
 "$test_directory/ProcessSession"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -fblocks -DLSB_CHILD_WAIT_TESTING \
-    Tests/ProcessEventsTests.c Guest/ChildWait.c ProcessSupport/ChildStatus.c -o "$test_directory/ProcessEvents"
+    Tests/ProcessEventsTests.c Guest/libLiveSimSpawn/ChildWait.c ProcessSupport/ChildStatus.c -o "$test_directory/ProcessEvents"
 "$test_directory/ProcessEvents"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -fblocks -dynamiclib -DLSB_CHILD_WAIT_TESTING \
     -DLSB_PROCESS_EVENTS_TEST_INSPECTION \
-    Guest/ProcessEvents.c Guest/ProcessIdentity.c Guest/ChildWait.c ProcessSupport/ChildStatus.c \
+    Guest/libLiveSimSpawn/ProcessEvents.c Guest/libLiveSimSpawn/ProcessIdentity.c Guest/libLiveSimSpawn/ChildWait.c ProcessSupport/ChildStatus.c \
     -install_name "$test_directory/libProcessEvents.dylib" -o "$test_directory/libProcessEvents.dylib"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -fblocks \
     Tests/ProcessEventsInterposeTests.c "$test_directory/libProcessEvents.dylib" -o "$test_directory/ProcessEventsInterpose"
@@ -240,13 +247,13 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ExtensionKitRegistrationTests.c -o "$test_directory/ExtensionKitRegistration"
 "$test_directory/ExtensionKitRegistration"
 xcrun --sdk macosx clang -arch arm64 -fobjc-arc -fblocks -Wall -Wextra -Werror \
-    Guest/ApplicationRegistrationPlan.m Tests/ApplicationRegistrationTests.m -framework Foundation -o "$test_directory/ApplicationRegistration"
+    Guest/app-registration/ApplicationRegistrationPlan.m Tests/ApplicationRegistrationTests.m -framework Foundation -o "$test_directory/ApplicationRegistration"
 "$test_directory/ApplicationRegistration"
 xcrun --sdk macosx clang -std=c11 -fobjc-arc -Wall -Wextra -Werror -arch arm64 \
     Tests/FrameworkBundleCompatibilityTests.m -framework Foundation -framework QuartzCore -o "$test_directory/FrameworkBundleCompatibility"
 "$test_directory/FrameworkBundleCompatibility"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib \
-    Guest/FrameworkBundleCompatibility.c -framework CoreFoundation -o "$test_directory/libFrameworkBundleCompatibility.dylib"
+    Guest/libLiveSimSpawn/FrameworkBundleCompatibility.c -framework CoreFoundation -o "$test_directory/libFrameworkBundleCompatibility.dylib"
 xcrun --sdk macosx clang -std=c11 -fobjc-arc -Wall -Wextra -Werror -arch arm64 -DLSB_FRAMEWORK_BUNDLE_INTERPOSE_TESTING \
     Tests/FrameworkBundleCompatibilityTests.m -framework Foundation -framework QuartzCore -o "$test_directory/FrameworkBundleCompatibilityInterpose"
 DYLD_INSERT_LIBRARIES="$test_directory/libFrameworkBundleCompatibility.dylib" "$test_directory/FrameworkBundleCompatibilityInterpose"
@@ -254,7 +261,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/SharedCachePathCompatibilityTests.c -o "$test_directory/SharedCachePathCompatibility"
 "$test_directory/SharedCachePathCompatibility"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib \
-    Guest/SharedCachePathCompatibility.c -o "$test_directory/libSharedCachePathCompatibility.dylib"
+    Guest/libLiveSimSpawn/SharedCachePathCompatibility.c -o "$test_directory/libSharedCachePathCompatibility.dylib"
 mkdir "$test_directory/cache-path-caller"
 for cache_path_fixture in Caller Sibling; do
     xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib \
@@ -284,7 +291,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/LaunchdJobIdentityTests.c -o "$test_directory/LaunchdJobIdentity"
 "$test_directory/LaunchdJobIdentity"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_FAKE_PTY_TESTING \
-    Tests/FakePTYTests.c Guest/FakePTY.c ProcessSupport/FakePTY.c -o "$test_directory/FakePTY"
+    Tests/FakePTYTests.c Guest/libLiveSimSpawn/FakePTY.c ProcessSupport/FakePTY.c -o "$test_directory/FakePTY"
 "$test_directory/FakePTY"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/FakePTYDescriptorTests.c -o "$test_directory/FakePTYDescriptor"
@@ -293,7 +300,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ThreadBootstrapTests.c -o "$test_directory/ThreadBootstrap"
 "$test_directory/ThreadBootstrap"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/WorkqueueBootstrapTests.c Guest/WorkqueueTrampoline.c -o "$test_directory/WorkqueueBootstrap"
+    Tests/WorkqueueBootstrapTests.c Guest/libLiveSimSpawn/WorkqueueTrampoline.c -o "$test_directory/WorkqueueBootstrap"
 "$test_directory/WorkqueueBootstrap"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/WorkqueueTrampolineTests.c -o "$test_directory/WorkqueueTrampoline"
@@ -302,7 +309,7 @@ xcrun clang -std=c11 -Wall -Wextra -Werror -Wno-unused-function \
     Tests/WorkqueueStartupTests.c -o "$test_directory/WorkqueueStartup"
 "$test_directory/WorkqueueStartup"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/WorkqueueMachTests.c Guest/WorkqueueTrampoline.c ProcessSupport/PeerDebugger.c -o "$test_directory/WorkqueueMach"
+    Tests/WorkqueueMachTests.c Guest/libLiveSimSpawn/WorkqueueTrampoline.c ProcessSupport/PeerDebugger.c -o "$test_directory/WorkqueueMach"
 "$test_directory/WorkqueueMach"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/LaunchdHandshakeTests.c -o "$test_directory/LaunchdHandshake"
@@ -311,14 +318,14 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/LaunchdProbeTests.c ProcessSupport/LaunchdProbe.c -o "$test_directory/LaunchdProbe"
 "$test_directory/LaunchdProbe"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/LaunchdCompatibilityTests.c Guest/ExecutableAccess.c Guest/RuntimeDirectories.c \
+    Tests/LaunchdCompatibilityTests.c Guest/libLiveSimSpawn/ExecutableAccess.c Guest/libLiveSimSpawn/RuntimeDirectories.c \
     -DLSB_EXECUTABLE_ACCESS_TESTING -o "$test_directory/LaunchdCompatibility"
 "$test_directory/LaunchdCompatibility"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/FileLockCompatibilityTests.c -o "$test_directory/FileLockCompatibility"
 "$test_directory/FileLockCompatibility"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib \
-    Guest/FileLockCompatibility.c -o "$test_directory/libFileLockCompatibility.dylib"
+    Guest/libLiveSimSpawn/FileLockCompatibility.c -o "$test_directory/libFileLockCompatibility.dylib"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_FILE_LOCK_INTERPOSE_TESTING \
     Tests/FileLockCompatibilityTests.c -o "$test_directory/FileLockCompatibilityInterpose"
 mkdir -p "$test_directory/file-lock-interpose/data" "$test_directory/file-lock-interpose/RuntimeRoot"
@@ -331,7 +338,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/NotificationSharedMemoryTests.c -o "$test_directory/NotificationSharedMemory"
 "$test_directory/NotificationSharedMemory"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib \
-    Guest/NotificationSharedMemory.c -o "$test_directory/libNotificationSharedMemory.dylib"
+    Guest/libLiveSimSpawn/NotificationSharedMemory.c -o "$test_directory/libNotificationSharedMemory.dylib"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_NOTIFICATION_SHM_INTERPOSE_TESTING \
     Tests/NotificationSharedMemoryTests.c -o "$test_directory/NotificationSharedMemoryInterpose"
 DYLD_INSERT_LIBRARIES="$test_directory/libNotificationSharedMemory.dylib" "$test_directory/NotificationSharedMemoryInterpose"
@@ -345,7 +352,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/LoggingCompatibilityTests.c -o "$test_directory/LoggingCompatibilityNative"
 "$test_directory/LoggingCompatibilityNative"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_GUEST_RUNTIME -dynamiclib \
-    Guest/LoggingCompatibility.c -o "$test_directory/libLoggingCompatibility.dylib"
+    Guest/libLiveSimSpawn/LoggingCompatibility.c -o "$test_directory/libLoggingCompatibility.dylib"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_LOGGING_INTERPOSE_TESTING \
     Tests/LoggingCompatibilityTests.c -o "$test_directory/LoggingCompatibilityInterpose"
 DYLD_INSERT_LIBRARIES="$test_directory/libLoggingCompatibility.dylib" "$test_directory/LoggingCompatibilityInterpose"
@@ -364,7 +371,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
 "$test_directory/SpringBoardEntitlements"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib \
     -DBSSelfTaskHasEntitlement=LSBSpringBoardOriginalFixture -Wl,-U,_LSBSpringBoardOriginalFixture \
-    Guest/SpringBoardEntitlements.c -framework CoreFoundation -o "$test_directory/libSpringBoardEntitlements.dylib"
+    Guest/libLiveSimSpawn/SpringBoardEntitlements.c -framework CoreFoundation -o "$test_directory/libSpringBoardEntitlements.dylib"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib -DLSB_SPRINGBOARD_ENTITLEMENTS_PROVIDER \
     Tests/SpringBoardEntitlementsInterposeTests.c -framework CoreFoundation \
     -install_name "$test_directory/libSpringBoardEntitlementsProvider.dylib" -o "$test_directory/libSpringBoardEntitlementsProvider.dylib"
@@ -387,7 +394,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/SystemPowerCompatibilityTests.c -framework IOKit -framework CoreFoundation -o "$test_directory/SystemPowerCompatibility"
 "$test_directory/SystemPowerCompatibility"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib \
-    Guest/SystemPowerCompatibility.c -framework IOKit -install_name "$test_directory/libSystemPowerCompatibility.dylib" \
+    Guest/libLiveSimSpawn/SystemPowerCompatibility.c -framework IOKit -install_name "$test_directory/libSystemPowerCompatibility.dylib" \
     -o "$test_directory/libSystemPowerCompatibility.dylib"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_SYSTEM_POWER_INTERPOSE_TESTING \
     Tests/SystemPowerCompatibilityTests.c -framework IOKit -framework CoreFoundation -o "$test_directory/SystemPowerCompatibilityInterpose"
@@ -418,7 +425,7 @@ xcrun --sdk macosx clang -std=c11 -fblocks -Wall -Wextra -Werror -arch arm64 \
     Tests/BrokerConnectionTests.c ProcessSupport/SpawnTransport.c ProcessSupport/SpawnPlan.c ProcessSupport/StoreAppGroups.c \
     -o "$test_directory/BrokerConnectionServer"
 xcrun --sdk macosx clang -std=c11 -fblocks -Wall -Wextra -Werror -arch arm64 -DLSB_GUEST_RUNTIME \
-    Tests/BrokerConnectionTests.c Guest/BrokerConnection.c ProcessSupport/SpawnTransport.c ProcessSupport/SpawnPlan.c \
+    Tests/BrokerConnectionTests.c Guest/libLiveSimSpawn/BrokerConnection.c ProcessSupport/SpawnTransport.c ProcessSupport/SpawnPlan.c \
     -o "$test_directory/BrokerConnectionClient"
 XPC_FLAGS=0x2 "$test_directory/BrokerConnectionServer" "$test_directory/BrokerConnectionClient"
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 -IProcessSupport -IHost \

@@ -1,4 +1,4 @@
-#include "../Guest/NotificationSharedMemory.h"
+#include "../Guest/libLiveSimSpawn/NotificationSharedMemory.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -35,7 +35,7 @@ static int nativeUnlink(const char *name) { assert(name == expectedName); ++forw
 #define shm_open nativeOpen
 #define shm_unlink nativeUnlink
 #define LSB_NOTIFICATION_SHM_TESTING
-#include "../Guest/NotificationSharedMemory.c"
+#include "../Guest/libLiveSimSpawn/NotificationSharedMemory.c"
 #undef shm_open
 #undef shm_unlink
 #define objectOpen LSBNotificationShmOpen

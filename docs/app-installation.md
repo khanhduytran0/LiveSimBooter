@@ -26,10 +26,10 @@ selected file and original runtime inputs. A persisted request ID and exclusive 
 submission. The reserved control verb accepts exactly one absolute source path; it cannot choose another executable.
 No new native installation service or host MobileInstallation call is introduced.
 
-[ApplicationInstaller](../Guest/ApplicationInstaller.m) requires simulator platform 7, matching 23A343 RuntimeRoot and
+[ApplicationInstaller](../Guest/lsb-app-install/ApplicationInstaller.m) requires simulator platform 7, matching 23A343 RuntimeRoot and
 sibling data roots, and the exact staged-import layout. It walks the import components without following symlinks and
 keeps a source FD to verify file identity/generation through completion. It calls the pinned typed API declared in
-[ApplicationInstallation.h](../Guest/Private/ApplicationInstallation.h):
+[ApplicationInstallation.h](../Guest/lsb-app-install/ApplicationInstallation.h):
 
 ```objc
 MIInstallOptions *options = [MIInstallOptions new];
@@ -159,7 +159,7 @@ The guest registration helper has two modes for bundles already present on disk.
   Guest 23A343 accepts `registerApplicationDictionary:` with the bundle's own `CFBundleIdentifier` and canonical
   physical `Path`. Removal requires an existing record in that same directory and an absent bundle.
 
-IPA imports continue through InstallCoordination and installd. See the [registration implementation](../Guest/ApplicationRegistration.m)
+IPA imports continue through InstallCoordination and installd. See the [registration implementation](../Guest/app-registration/ApplicationRegistration.m)
 and the [Procursus transaction instructions](procursus.md#run-a-package-repair-in-fish).
 
 ## Temporary staging compatibility
@@ -173,7 +173,7 @@ hardcodes `/private/var/tmp` for subsystem 3. That branch does not consult `TMPD
 staging setter. The request originates in installcoordinationd's synchronous staging call; creating `data/var/tmp`
 would not redirect the absolute native path.
 
-[InstallationCompatibility](../Guest/InstallationCompatibility.m) is a separate Objective-C dylib inserted only into the
+[InstallationCompatibility](../Guest/libLiveSimInstall/InstallationCompatibility.m) is a separate Objective-C dylib inserted only into the
 exact guest MobileInstallationHelperService executable. It validates helper UUID `3F7ABD1C-04D6-3A63-9C61-731176B12263`,
 method ABI, offset and original instructions before exchanging the typed method. It obtains the image from the method's
 `dladdr` owner and separately checks `_NSGetExecutablePath`; image index zero can be the inserted spawn shim. Subsystem 3 returns the same record
@@ -198,7 +198,7 @@ Before opening that connection, pinned CoreServices caches a sandbox preflight f
 port. The controls behaved distinctly: `com.apple.cfprefsd.daemon` returned **0**, and an unregistered test name returned
 **1**. This exposes the difference between the native extension's sandbox policy and the running guest service namespace.
 
-[LaunchServicesNotifications](../Guest/LaunchServicesNotifications.c) adapts only this self preflight. It requires simulator
+[LaunchServicesNotifications](../Guest/libLiveSimSpawn/LaunchServicesNotifications.c) adapts only this self preflight. It requires simulator
 platform 7, matching canonical runtime-root environment values, CoreServices UUID `73F411D9-84A9-33FE-84C9-8CD57CA633DC`,
 the exact return address at image offset `0xcfa94`, and the original instruction window. It additionally requires:
 
@@ -236,9 +236,9 @@ are not executable roots. [ExecutablePath](../LiveProcess/ExecutablePath.c) and 
 same containment rules and retain opened-FD identity checks. System roles retain virtual identities; installed apps retain
 their physical paths, so adding data apps does not grant native helper roles.
 
-[ExecutableAccess](../Guest/ExecutableAccess.c), [PeerProcessCompatibility](../Guest/PeerProcessCompatibility.c) and
-[ProcessInspection](../Guest/ProcessInspection.c) handle these physical installed-app paths without prepending RuntimeRoot
-again. [MetalCompilerRegistration](../Guest/MetalCompilerRegistration.c) accepts any contained guest executable, including
+[ExecutableAccess](../Guest/libLiveSimSpawn/ExecutableAccess.c), [PeerProcessCompatibility](../Guest/libLiveSimSpawn/PeerProcessCompatibility.c) and
+[ProcessInspection](../Guest/libLiveSimSpawn/ProcessInspection.c) handle these physical installed-app paths without prepending RuntimeRoot
+again. [MetalCompilerRegistration](../Guest/libLiveSimSpawn/MetalCompilerRegistration.c) accepts any contained guest executable, including
 installed apps and nested services, and imports the fixed compiler bundle only when that process requests its exact XPC
 service. It no longer needs an APPL Info.plist check or a list of graphics processes; see [the demand hook](metal.md#guest-compiler-bundle-registration).
 

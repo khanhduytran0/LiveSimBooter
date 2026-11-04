@@ -53,7 +53,7 @@ static int descriptorPath(int fd, int command, void *argument) {
 #define fsetxattr writeAttribute
 #define fstat descriptorStatus
 #define fcntl(fd, command, argument) descriptorPath((fd), (command), (void *)(uintptr_t)(argument))
-#include "../Guest/FileLockCompatibility.c"
+#include "../Guest/libLiveSimSpawn/FileLockCompatibility.c"
 #undef fcntl
 #undef fstat
 #undef fsetxattr
@@ -297,7 +297,7 @@ int main(void) {
 
 #else
 
-#include "../Guest/FileLockCompatibility.h"
+#include "../Guest/libLiveSimSpawn/FileLockCompatibility.h"
 
 extern int nativeNoCancel(int descriptor, int command, ...) __asm("_fcntl$NOCANCEL");
 extern int __fcntl(int descriptor, int command, uintptr_t argument);

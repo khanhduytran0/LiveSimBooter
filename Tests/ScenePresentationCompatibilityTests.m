@@ -33,7 +33,7 @@
 @implementation SBRootSceneWindow @end
 
 #define LSB_SCENE_PRESENTATION_TESTING 1
-#include "../Guest/ScenePresentationCompatibility.m"
+#include "../Guest/libLiveSimScene/ScenePresentationCompatibility.m"
 
 @interface FBScene ()
 @property(nonatomic, readwrite) NSString *identifier;

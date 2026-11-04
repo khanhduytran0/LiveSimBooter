@@ -57,7 +57,7 @@ static mach_msg_return_t mockMessage(mach_msg_header_t *header, mach_msg_option_
 #define mach_port_destroy mockDestroy
 #define mach_msg mockMessage
 #define mach_msg_destroy mockMessageDestroy
-#include "../Guest/DisplaySettingsRenderServer.c"
+#include "../Guest/display-settings/DisplaySettingsRenderServer.c"
 #undef mach_port_allocate
 #undef mach_port_destroy
 #undef mach_msg

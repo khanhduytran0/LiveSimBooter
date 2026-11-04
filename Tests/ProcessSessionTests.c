@@ -1,5 +1,5 @@
 #define LSB_PROCESS_SESSION_TESTING
-#include "../Guest/ProcessSession.c"
+#include "../Guest/libLiveSimSpawn/ProcessSession.c"
 
 #include <assert.h>
 #include <pthread.h>

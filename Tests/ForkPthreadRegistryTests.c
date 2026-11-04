@@ -1,4 +1,4 @@
-#include "ForkPthreadRegistry.h"
+#include "../Guest/Shared/Fork/ForkPthreadRegistry.h"
 #include <assert.h>
 #include <mach-o/ldsyms.h>
 #include <stdio.h>

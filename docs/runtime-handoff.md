@@ -92,7 +92,7 @@ Cache detachment does not replace XNU's recorded pthread entry point. The simula
 with `EINVAL`, leaving the native startup PC registered. An interactive Fish worker consequently started in the unmapped
 host cache even though the main guest thread was running correctly.
 
-[Guest/ThreadBootstrap.c](../Guest/ThreadBootstrap.c) interposes the simulator's registration and creation syscall wrappers.
+[Guest/libLiveSimSpawn/ThreadBootstrap.c](../Guest/libLiveSimSpawn/ThreadBootstrap.c) interposes the simulator's registration and creation syscall wrappers.
 It preserves the registration result. For the pinned layout (16 KiB pthread storage, TSD offset `0xe0`, Mach-self slot offset
 `0x18`), a rejected repeat registration records the simulator startup PC for subsequent explicit pthread creation. A
 successful native registration keeps the ordinary creation path. Unsupported layouts and creation modes fail explicitly.
@@ -124,7 +124,7 @@ Ctrl-C, editing, and clean Ctrl-D exit are recorded with the [terminal validatio
 
 ## Detached development workqueue entry
 
-After guest TLS initialization and confirmed native-cache removal, [WorkqueueTrampoline.c](../Guest/WorkqueueTrampoline.c)
+After guest TLS initialization and confirmed native-cache removal, [WorkqueueTrampoline.c](../Guest/libLiveSimSpawn/WorkqueueTrampoline.c)
 recreates the kernel's recorded native `start_wqthread` address with a small anonymous executable mapping. It first reserves
 the exact page range with `mach_vm_allocate(VM_FLAGS_FIXED)` without overwrite. If occupied, only the kernel's detached-cache
 placeholder is accepted: a top-level, non-submap `VM_MEMORY_DYLD` region covering the whole range with current and maximum

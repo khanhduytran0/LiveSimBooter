@@ -111,7 +111,7 @@ uintptr_t LSBTestSignThreadPC(uintptr_t start, uintptr_t modifier) {
 #define mach_port_deallocate testDeallocate
 #define _exit testExit
 #define getenv testGetenv
-#include "../Guest/ThreadBootstrap.c"
+#include "../Guest/libLiveSimSpawn/ThreadBootstrap.c"
 #undef __bsdthread_register
 #undef __bsdthread_create
 #undef thread_get_state

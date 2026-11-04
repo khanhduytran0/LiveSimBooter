@@ -75,7 +75,7 @@ static mode_t testUmask(mode_t mask) {
 #define LSBRequireSingleThread testSingleThread
 #define sigprocmask testSigprocmask
 #define umask testUmask
-#include "../Guest/CreationMask.c"
+#include "../Guest/libLiveSimSpawn/CreationMask.c"
 #undef sysctl
 #undef dlsym
 #undef LSBRequireSingleThread

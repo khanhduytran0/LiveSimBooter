@@ -1,4 +1,4 @@
-#include "../Guest/LoggingCompatibility.h"
+#include "../Guest/libLiveSimSpawn/LoggingCompatibility.h"
 #include <assert.h>
 #include <errno.h>
 #include <mach/mach.h>
@@ -68,7 +68,7 @@ static kern_return_t inspectTask(task_name_t task, task_flavor_t flavor, task_in
 #define xpc_copy_entitlement_for_token originalQuery
 #define xpc_bool_create createBoolean
 #define task_info inspectTask
-#include "../Guest/LoggingCompatibility.c"
+#include "../Guest/libLiveSimSpawn/LoggingCompatibility.c"
 #undef xpc_copy_entitlement_for_token
 #undef xpc_bool_create
 #undef task_info

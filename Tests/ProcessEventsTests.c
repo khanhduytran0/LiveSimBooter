@@ -1,5 +1,5 @@
-#include "../Guest/ProcessEvents.h"
-#include "../Guest/ChildWait.h"
+#include "../Guest/libLiveSimSpawn/ProcessEvents.h"
+#include "../Guest/libLiveSimSpawn/ChildWait.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -33,7 +33,7 @@ int LSBPeerProcessPIDInfo(uintptr_t caller, int pid, int flavor, uint64_t arg, v
 #define LSB_GUEST_RUNTIME
 #define LSB_PROCESS_EVENTS_TESTING
 #define proc_pidinfo testProcPIDInfo
-#include "../Guest/ProcessEvents.c"
+#include "../Guest/libLiveSimSpawn/ProcessEvents.c"
 #undef proc_pidinfo
 
 static LSBChildStatus ledger;

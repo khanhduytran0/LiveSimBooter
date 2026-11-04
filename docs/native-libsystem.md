@@ -305,9 +305,9 @@ but native-support mode installs no workqueue exception mask or hardware redirec
 The guest spawn decoder also needs the actual support library's private attribute layout. The reviewed native 23B50 and
 23H128 `posix_spawnattr_init` implementations allocate `0xf8` bytes and put the port-action pointer at `0xc0`; native 24A435
 and the original Mac support library allocate `0x100` bytes and put it at `0xc8`. The port-action header and 24-byte records
-are unchanged. [SpawnAttributes](../Guest/SpawnAttributes.c) identifies these structural profiles using the native crash-count,
+are unchanged. [SpawnAttributes](../Guest/libLiveSimSpawn/SpawnAttributes.c) identifies these structural profiles using the native crash-count,
 CSM and special-port setters on a disposable attribute object. It checks the exact changed fields against
-[SpawnAttributeLayout](../Guest/SpawnAttributeLayout.h), then destroys the object; no process is spawned and no policy or Mach
+[SpawnAttributeLayout](../Guest/libLiveSimSpawn/SpawnAttributeLayout.h), then destroys the object; no process is spawned and no policy or Mach
 rights are applied. The probe reads only the common `0xf8` extent. `malloc_size` bounds access but does not select a layout:
 the allocator can round an older `0xf8` request to `0x100`. Only successful discovery is cached, without consulting environment
 flags or matching initializer instructions. Architecture preferences use the native getter.

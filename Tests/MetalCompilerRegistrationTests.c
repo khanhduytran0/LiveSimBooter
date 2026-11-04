@@ -1,4 +1,4 @@
-#include "../Guest/MetalCompilerRegistration.h"
+#include "../Guest/libLiveSimSpawn/MetalCompilerRegistration.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -33,7 +33,7 @@ static xpc_connection_t recordConnection(const char *name, dispatch_queue_t queu
 #define LSB_METAL_COMPILER_REGISTRATION_TESTING
 #define xpc_add_bundle recordRegistration
 #define xpc_connection_create recordConnection
-#include "../Guest/MetalCompilerRegistration.c"
+#include "../Guest/libLiveSimSpawn/MetalCompilerRegistration.c"
 #undef xpc_connection_create
 #undef xpc_add_bundle
 

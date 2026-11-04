@@ -1,4 +1,4 @@
-#include "../Guest/CodeSigningCompatibility.h"
+#include "../Guest/libLiveSimSpawn/CodeSigningCompatibility.h"
 #include "../ProcessSupport/SpawnTransport.h"
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -22,7 +22,7 @@ static int brokerHashQuery(const audit_token_t *, unsigned char [LSB_GUEST_CDHAS
 #define LSBTransportCopyEntitlements brokerQuery
 #define LSBTransportCopyCodeDirectoryHash brokerHashQuery
 #define LSB_CODE_SIGNING_TESTING
-#include "../Guest/CodeSigningCompatibility.c"
+#include "../Guest/libLiveSimSpawn/CodeSigningCompatibility.c"
 #undef csops_audittoken
 #undef csops
 #undef LSBTransportCopyEntitlements

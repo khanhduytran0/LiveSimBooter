@@ -17,8 +17,8 @@ static void *testKinfoAlloc(size_t, size_t);
 #define mach_port_mod_refs testPortModRefs
 #define calloc testKinfoAlloc
 #define LSB_PROCESS_INSPECTION_TESTING
-#include "../Guest/RuntimeDirectories.c"
-#include "../Guest/ProcessInspection.c"
+#include "../Guest/libLiveSimSpawn/RuntimeDirectories.c"
+#include "../Guest/libLiveSimSpawn/ProcessInspection.c"
 #undef sysctl
 #undef proc_pid_rusage
 #undef task_for_pid

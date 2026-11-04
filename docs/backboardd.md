@@ -252,7 +252,7 @@ dyld_sim`start_sim + 20
 
 The failing native operation was `task_name_for_pid(mach_task_self(), getpid(), &port)`: ordinary guest `getpid()` still
 returned the stable proxy PID, which is not the running replacement's kernel PID. The new `LSBTaskNameForPID` wrapper in
-`Guest/ProcessIdentity.c` translates only a positive guest-self PID when the target is the current task. It calls the real
+`Guest/libLiveSimSpawn/ProcessIdentity.c` translates only a positive guest-self PID when the target is the current task. It calls the real
 kernel API with the native PID and preserves that API's returned task-name right and result; other targets and PIDs are
 unchanged. This does not grant access to another process or replace a kernel-generated identity.
 

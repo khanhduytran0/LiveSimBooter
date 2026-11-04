@@ -114,7 +114,7 @@ static char *testGetenv(const char *name) { ++environmentCalls; return getenv(na
 #define dlopen nativeDlopen
 #define _dyld_shared_cache_contains_path cacheContainsPath
 #define getenv testGetenv
-#include "../Guest/SharedCachePathCompatibility.c"
+#include "../Guest/libLiveSimSpawn/SharedCachePathCompatibility.c"
 #undef getenv
 #undef _dyld_shared_cache_contains_path
 #undef dlopen

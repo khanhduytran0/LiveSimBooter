@@ -1,5 +1,5 @@
-#include "ForkTrial.c"
-#include "ForkBashImports.h"
+#include "../Guest/libLiveSimSpawn/ForkTrial.c"
+#include "../Guest/lsb-fork-snapshot-child/ForkBashImports.h"
 #include <assert.h>
 #include <sys/mman.h>
 #include <sys/wait.h>

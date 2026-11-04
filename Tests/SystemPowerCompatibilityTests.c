@@ -1,4 +1,4 @@
-#include "../Guest/SystemPowerCompatibility.h"
+#include "../Guest/libLiveSimSpawn/SystemPowerCompatibility.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <assert.h>
 #include <dispatch/dispatch.h>
@@ -74,7 +74,7 @@ static kern_return_t releaseRight(ipc_space_t, mach_port_name_t);
 #define mach_port_allocate allocateRight
 #define mach_port_deallocate releaseRight
 #define LSB_SYSTEM_POWER_TESTING
-#include "../Guest/SystemPowerCompatibility.c"
+#include "../Guest/libLiveSimSpawn/SystemPowerCompatibility.c"
 #undef IORegisterForSystemPower
 #undef IODeregisterForSystemPower
 #undef IOServiceClose

@@ -1,6 +1,6 @@
 // The recorded Bash failure had a vacant SP and an occupied page elsewhere inside its 8 MiB stack.
 #define main forkObserverMain
-#include "ForkSnapshotChild.c"
+#include "../Guest/lsb-fork-snapshot-child/ForkSnapshotChild.c"
 #undef main
 #include <assert.h>
 

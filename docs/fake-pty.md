@@ -63,7 +63,7 @@ the strict `/var` alias of `/private/var`, while retaining traversal rejection a
 The stored identity is still the canonical logical `/usr/libexec/xpcproxy_sim`. The helper recognizer accepts the same
 specific boundary spelling; other duplicate components, doubled separators under unrelated alias roots and escaping symlinks remain rejected.
 
-`Guest/TerminalFish.c` then requests only `POSIX_SPAWN_SETEXEC` for Fish. The existing replacement protocol preserves the
+`Guest/terminal-fish/TerminalFish.c` then requests only `POSIX_SPAWN_SETEXEC` for Fish. The existing replacement protocol preserves the
 logical job PID, parent ledger and wait ownership across xpcproxy → helper → Fish. Terminal ownership follows that lineage
 and its descendants. Simulator launchd, Metal helpers and unrelated launchd jobs do not become terminal jobs merely because
 a global terminal session exists. A failed replacement exits the helper with an error; it does not spawn an ordinary child
@@ -111,7 +111,7 @@ after `dup`, fileport transfer, and descriptor renumbering without globally trea
 Unrelated descriptors retain native behavior. The host removes the state file when the session closes; already mapped state
 remains available until the corresponding guest exits.
 
-`ProcessSupport/FakePTY.c` implements the shared records and host line discipline. `Guest/FakePTY.c` interposes `isatty`,
+`ProcessSupport/FakePTY.c` implements the shared records and host line discipline. `Guest/libLiveSimSpawn/FakePTY.c` interposes `isatty`,
 termios access, foreground-group access, window ioctls, and tty naming for matching descriptors. `TCSANOW` updates supported
 attributes immediately. For `TCSADRAIN` and `tcdrain`, the attached guest asks the host to consume the bytes already queued
 on the master endpoint before returning. Bash readline uses this when changing and restoring its input mode.

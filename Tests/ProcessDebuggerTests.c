@@ -4,7 +4,7 @@
 static void testDestroy(mach_msg_header_t *);
 #define LSB_PROCESS_DEBUGGER_TESTING
 #define mach_msg_destroy testDestroy
-#include "../Guest/ProcessDebugger.c"
+#include "../Guest/libLiveSimSpawn/ProcessDebugger.c"
 #undef mach_msg_destroy
 
 static unsigned queries, replies, destroyed;

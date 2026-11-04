@@ -1,6 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <QuartzCore/QuartzCore.h>
-#include "../Guest/FrameworkBundleCompatibility.h"
+#include "../Guest/libLiveSimSpawn/FrameworkBundleCompatibility.h"
 #include <assert.h>
 #include <limits.h>
 #include <pthread.h>
@@ -72,7 +72,7 @@ int main(void) {
 static CFBundleRef originalCreate(CFAllocatorRef allocator, CFURLRef url) CF_RETURNS_RETAINED;
 #define CFBundleCreate originalCreate
 #define LSB_FRAMEWORK_BUNDLE_TESTING
-#include "../Guest/FrameworkBundleCompatibility.c"
+#include "../Guest/libLiveSimSpawn/FrameworkBundleCompatibility.c"
 #undef CFBundleCreate
 
 static _Atomic(unsigned) originalCalls;

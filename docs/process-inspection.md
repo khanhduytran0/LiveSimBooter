@@ -23,7 +23,7 @@ roles are denied. The original `__TEXT,__ents_der` is captured before guest exec
 
 List copyout returns complete `kinfo_proc` records. A short buffer receives `ENOMEM` and the number of bytes actually copied;
 size-only queries return the required size. Before initialization, unmatched operations retain their original behavior.
-The implementation is in `Guest/ProcessInspection.c`, the existing process wrappers, `ProcessSupport/SpawnTransport.c`, and `Host/Broker.m`.
+The implementation is in `Guest/libLiveSimSpawn/ProcessInspection.c`, the existing process wrappers, `ProcessSupport/SpawnTransport.c`, and `Host/Broker.m`.
 
 The broker retains virtual paths for identity and role checks. Only `proc_pidpath` converts them to physical paths, using the runtime root
 captured during guest initialization. CocoaTop reads the adjacent `Info.plist` and icon files directly; a virtual `/Applications/...` path

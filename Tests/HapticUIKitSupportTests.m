@@ -1,4 +1,4 @@
-#import "../Guest/HapticUIKitSupport.h"
+#import "../Guest/libLiveSimHaptics/HapticUIKitSupport.h"
 #include <assert.h>
 #include <stdlib.h>
 

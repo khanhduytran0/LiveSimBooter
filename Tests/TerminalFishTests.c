@@ -37,7 +37,7 @@ static int testSpawn(pid_t *pid, const char *path, const posix_spawn_file_action
 #define isatty testIsATTY
 #define posix_spawn testSpawn
 #define main terminalFishMain
-#include "../Guest/TerminalFish.c"
+#include "../Guest/terminal-fish/TerminalFish.c"
 #undef main
 #undef posix_spawn
 #undef isatty

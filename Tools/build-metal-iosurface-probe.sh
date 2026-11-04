@@ -51,5 +51,6 @@ if [ "$clear_only" = 1 ]; then
     set -- "$@" -DLSB_PROBE_CLEAR_ONLY=1
 fi
 xcrun --sdk iphonesimulator clang -arch arm64 -target arm64-apple-ios26.0-simulator -fobjc-arc -fblocks -Wall -Wextra -Werror "$@" \
-    Guest/MetalIOSurfaceProbe.m -framework Foundation -framework Metal -framework IOSurface -framework ImageIO -framework CoreGraphics -o "$output"
+    Tests/Guest/metal-iosurface-probe/MetalIOSurfaceProbe.m -framework Foundation -framework Metal -framework IOSurface -framework ImageIO \
+    -framework CoreGraphics -o "$output"
 printf '%s\n' "$output"

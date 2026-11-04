@@ -2,7 +2,7 @@
 
 The earlier backboardd experiment reached a deliberate SystemWake assertion because `IORegisterForSystemPower` returned
 `IO_OBJECT_NULL`. This was a separate issue from simulator launchd ownership, HID registration, or framebuffer transport.
-`Guest/SystemPowerCompatibility.c` implements an opt-in C adapter for an always-awake guest. Local lifecycle and native
+`Guest/libLiveSimSpawn/SystemPowerCompatibility.c` implements an opt-in C adapter for an always-awake guest. Local lifecycle and native
 interposition tests pass. The phone trial with backboardd PID 81599 passed the previous SystemWake assertion without its
 debugger bypass, created a CAWindowServer swapchain, and entered rendering before a separate Metal shader lookup abort.
 Device-side provider teardown has not been verified. The LLDB bypass below is historical diagnostic evidence only.

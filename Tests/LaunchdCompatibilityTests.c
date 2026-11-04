@@ -1,4 +1,4 @@
-#include "../Guest/LaunchdCompatibility.h"
+#include "../Guest/libLiveSimSpawn/LaunchdCompatibility.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -112,7 +112,7 @@ static char *checkedGetenv(const char *name) {
 #define renamex_np nativeRename
 #define unlink nativeUnlink
 #define stat(path, status) nativeStat(path, status)
-#include "../Guest/LaunchdCompatibility.c"
+#include "../Guest/libLiveSimSpawn/LaunchdCompatibility.c"
 #undef stat
 #undef unlink
 #undef renamex_np

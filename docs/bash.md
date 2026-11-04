@@ -569,7 +569,7 @@ Build the optional device fixture against the matching guest shim produced by `T
 
 ```sh
 xcrun --sdk iphonesimulator clang -target arm64-apple-ios26.0-simulator -Wall -Wextra -Werror \
-    Tests/ForkContinuation.c Tests/ForkContinuation_arm64.S Guest/ForkContext_arm64.S \
+    Tests/Guest/fork-continuation/ForkContinuation.c Tests/Guest/fork-continuation/ForkContinuation_arm64.S Guest/Shared/Fork/ForkContext_arm64.S \
     "$LSB_WORK/libLiveSimSpawn.dylib" -o "$LSB_WORK/fork-continuation"
 ```
 

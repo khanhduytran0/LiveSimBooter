@@ -10,7 +10,7 @@ __attribute__((noreturn)) static void originalExit(int status);
 #define LSB_USERSPACE_REBOOT_TESTING
 #define xpc_dictionary_create_reply originalCreateReply
 #define exit originalExit
-#include "../Guest/UserspaceReboot.c"
+#include "../Guest/libLiveSimSpawn/UserspaceReboot.c"
 #undef exit
 #undef xpc_dictionary_create_reply
 

@@ -1,4 +1,4 @@
-#include "../Guest/LaunchdIdentity.c"
+#include "../Guest/libLiveSimSpawn/LaunchdIdentity.c"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>

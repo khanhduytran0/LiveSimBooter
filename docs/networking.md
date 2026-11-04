@@ -6,7 +6,7 @@ socket for this check; its ordinary path evaluation does not follow the native N
 
 ## Routing reply PID compatibility
 
-`Guest/ProcessIdentity.c` supplies the native PID to one pinned `getpid()` call inside Network.framework's
+`Guest/libLiveSimSpawn/ProcessIdentity.c` supplies the native PID to one pinned `getpid()` call inside Network.framework's
 `nw_route_get_ifindex`. That function sends `RTM_GET_SILENT` and compares the reply's PID and sequence with its request.
 XNU replaces the request PID with the actual native sender PID and changes the reply type to `RTM_GET`. Consequently,
 a logical guest PID differing from the current native process makes the stock simulator code discard an otherwise valid

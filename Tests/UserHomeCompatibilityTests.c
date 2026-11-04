@@ -1,4 +1,4 @@
-#include "../Guest/UserHomeCompatibility.h"
+#include "../Guest/libLiveSimSpawn/UserHomeCompatibility.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -50,7 +50,7 @@ static int nativeGetPWNAMR(const char *name, struct passwd *entry, char *buffer,
 #define LSB_USER_HOME_TESTING
 #define getpwuid_r nativeGetPWUIDR
 #define getpwnam_r nativeGetPWNAMR
-#include "../Guest/UserHomeCompatibility.c"
+#include "../Guest/libLiveSimSpawn/UserHomeCompatibility.c"
 #undef getpwuid_r
 #undef getpwnam_r
 

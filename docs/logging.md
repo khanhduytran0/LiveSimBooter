@@ -4,7 +4,7 @@ The guest shim disables libtrace's Mach logging ports while the simulator loggin
 [Sim26Booter's 2025-09-11 workaround](https://github.com/khanhduytran0/Sim26Booter/blob/main/PATCHING.md#2025-09-11),
 implemented here at the entitlement query instead of patching libtrace instructions.
 
-[LoggingCompatibility.c](../Guest/LoggingCompatibility.c) interposes the typed
+[LoggingCompatibility.c](../Guest/libLiveSimSpawn/LoggingCompatibility.c) interposes the typed
 `xpc_copy_entitlement_for_token(const char *, const audit_token_t *)` API. In guest builds, exactly
 `com.apple.private.disable-log-mach-ports` with a **NULL token** returns an owned XPC true object. NULL is libtrace's
 self-query convention. Every explicit token, including a token for the current process, and unrelated key or NULL-key

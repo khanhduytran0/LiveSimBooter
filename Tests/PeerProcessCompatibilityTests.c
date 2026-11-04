@@ -19,7 +19,7 @@ int LSBTestSandboxOriginal(pid_t pid, const char *operation, int type, ...);
 #define LSB_PEER_SANDBOX_ORIGINAL "_LSBTestSandboxOriginal"
 #undef errno
 #define errno (*testErrnoLocation())
-#include "../Guest/PeerProcessCompatibility.c"
+#include "../Guest/libLiveSimSpawn/PeerProcessCompatibility.c"
 #undef proc_pidpath
 #undef proc_terminate
 #undef errno

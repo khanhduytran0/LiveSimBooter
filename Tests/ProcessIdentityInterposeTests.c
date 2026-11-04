@@ -1,4 +1,4 @@
-#include "../Guest/ProcessIdentity.h"
+#include "../Guest/libLiveSimSpawn/ProcessIdentity.h"
 #include <assert.h>
 #include <dlfcn.h>
 #include <mach/mach.h>

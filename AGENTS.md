@@ -35,7 +35,10 @@ Do not substitute an iOS 26.x update or iOS 27 runtime because its marketing ver
   non-production MobileGestalt result permits cache detachment; do not infer this from the OS version or Developer Mode.
   Detached code must not call removed host-cache implementations; retained native code must not run against incompatible guest TLS either.
 - Native Metal helpers use separate host-selected LiveProcess roles and keep native libraries. Guests cannot choose arbitrary native roles.
-- `Guest/` contains simulator interposers. `ProcessSupport/` contains shared wire formats and validation. Preserve ownership of FDs,
+- Put each runtime executable or dylib in its own `Guest/<product>/` directory. For dylibs, use the filename without
+  the `.dylib` extension. `Guest/Shared/` holds code compiled or included by multiple guest products.
+  Guest probe and test fixture sources live in `Tests/Guest/<product>/`. The build entry points remain under `Tools/` and `Tests/`.
+- `ProcessSupport/` contains shared wire formats and validation. Preserve ownership of FDs,
   Mach rights, immutable identity snapshots, full audit tokens, and logical/native PID distinctions.
 - Fish in the ordinary UI belongs to simulator launchd through `/usr/libexec/terminal-fish`; tab changes must not spawn a host-owned replacement.
 - Declare private C/Objective-C APIs in headers and call them normally. Avoid hand-written selector dispatch for private methods.

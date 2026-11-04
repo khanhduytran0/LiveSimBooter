@@ -30,7 +30,7 @@ native client, so native foreground/background and actuator policy still apply t
 relay admission; it is not substituted into a forged native audit token. Disconnect, native interruption or simulator shutdown
 invalidates both legs and releases the native session. Admission and cleanup run off main; shutdown never waits on main.
 
-The optional [HapticCompatibility](../Guest/HapticCompatibility.m) constructor handles the simulator's intentionally empty
+The optional [HapticCompatibility](../Guest/libLiveSimHaptics/HapticCompatibility.m) constructor handles the simulator's intentionally empty
 AudioSession implementation. It checks the original 23A343 CoreHaptics UUID, method encoding and initial instructions,
 then adapts only `doInit:sessionIsShared:options:bypassAudioSession:error:` with session ID zero and the default haptic service.
 That bypass applies to the **local constructor**; the relay replaces it with its real host session before any native request.
@@ -133,7 +133,7 @@ returning a constant. With experimental haptics enabled, the host now publishes 
 `capabilities.LSBUIKitFeedbackSupportLevel`. Only integer values 0–2 are accepted; Booleans, floating-point values and unknown
 results are rejected. This field does not change the selected simulated device identity. Disabled sessions restore the stock profile.
 
-The optional [guest helper](../Guest/HapticCompatibility.m) installs an override only for UIKit already present at process
+The optional [guest helper](../Guest/libLiveSimHaptics/HapticCompatibility.m) installs an override only for UIKit already present at process
 startup, only with the trusted haptics opt-in, an exact true closed-loop capability, and a valid positive native level. It checks
 UIDevice's own method, its encoding, the UIKit image UUID, the original implementation offset, and all 16 instructions of the
 simulator stub; only relocated address immediates are masked. It leaves UIKit's engine selection, feedback patterns, categories,

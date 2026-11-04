@@ -1,4 +1,4 @@
-#import "../Guest/ApplicationRegistrationPlan.h"
+#import "../Guest/app-registration/ApplicationRegistrationPlan.h"
 
 #include <assert.h>
 #include <errno.h>

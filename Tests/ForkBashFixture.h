@@ -1,5 +1,5 @@
 #pragma once
-#include "ForkTrial.c"
+#include "../Guest/libLiveSimSpawn/ForkTrial.c"
 #include <assert.h>
 #include <sys/mman.h>
 

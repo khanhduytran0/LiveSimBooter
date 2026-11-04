@@ -164,7 +164,7 @@ The existing positional output and optional metallib arguments remain supported.
 clear workload and rejects a simultaneous metallib input. All three variants compile with iOS Simulator minimum OS 26.0
 and `-Wall -Wextra -Werror`; building alone does not sign, deploy or execute them.
 
-Two compile-time diagnostic options are also available in `Guest/MetalIOSurfaceProbe.m`. `LSB_PROBE_REGISTER_COMPILER=1`
+Two compile-time diagnostic options are also available in `Tests/Guest/metal-iosurface-probe/MetalIOSurfaceProbe.m`. `LSB_PROBE_REGISTER_COMPILER=1`
 validates the compiler bundle under the canonical `DYLD_ROOT_PATH`, then calls declared `xpc_add_bundle(path, 2)` before
 Metal initialization. Its request and return logs explicitly avoid claiming registration success because the API returns
 void. `LSB_PROBE_COMPILER_DIAGNOSTICS=1` logs the invalidation string when Metal calls
@@ -498,7 +498,7 @@ why merely deploying resources under RuntimeRoot is insufficient; a device trace
 has not been captured. No environment variable selecting an additional compiler bundle was found in this libxpc build.
 `IPHONE_SIMULATOR_ROOT` is used there for SystemVersion.plist, not this registration path.
 
-The C compatibility hook in [MetalCompilerRegistration.c](../Guest/MetalCompilerRegistration.c) now registers on demand,
+The C compatibility hook in [MetalCompilerRegistration.c](../Guest/libLiveSimSpawn/MetalCompilerRegistration.c) now registers on demand,
 without a process whitelist. Its constructor only snapshots canonical guest identity after libSystem initialization:
 exact `LSB_REGISTER_METAL_COMPILER=1`, simulator platform 7, matching `DYLD_ROOT_PATH` and `SIMULATOR_ROOT`, and a regular
 executable contained in RuntimeRoot or this runtime's installed-app bundle tree. The constructor makes no XPC call.
@@ -642,7 +642,7 @@ all four native seed variants (`none`, `cf`, `ns`, `both`) still selected the or
 lazy `-[NSBundle _cfBundle]` calls public `CFBundleCreate` at Foundation offset `0x7a0d48`. Its bundle URL, identifier and
 modern resource methods then use that CFBundle. This provides the narrow C integration point.
 
-`Guest/FrameworkBundleCompatibility.c` interposes only `CFBundleCreate`. With exact opt-in
+`Guest/libLiveSimSpawn/FrameworkBundleCompatibility.c` interposes only `CFBundleCreate`. With exact opt-in
 `LSB_SIMULATE_FRAMEWORK_BUNDLES=1`, a file URL naming a `.framework` under `/System/Library/Frameworks/` or
 `/System/Library/PrivateFrameworks/` can resolve to its existing counterpart under canonical `DYLD_ROOT_PATH`. Nested
 frameworks are supported. The candidate must remain inside that root and one of those two namespaces after symlink

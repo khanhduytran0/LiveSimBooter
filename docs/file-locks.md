@@ -15,7 +15,7 @@ DeviceSupport binary, rather than the simulator RunningBoard image. WebKit's
 [SQLiteFileSystem implementation](https://github.com/WebKit/WebKit/blob/main/Source/WebCore/platform/sql/SQLiteFileSystem.cpp)
 uses the same attribute with a single byte `0xff`.
 
-`Guest/FileLockCompatibility.c` provides an opt-in guest adapter, enabled by `LSB_SIMULATE_FILE_LOCK_SUSPENSION=1`.
+`Guest/libLiveSimSpawn/FileLockCompatibility.c` provides an opt-in guest adapter, enabled by `LSB_SIMULATE_FILE_LOCK_SUSPENSION=1`.
 It captures the canonical, owned `SIMULATOR_SHARED_RESOURCES_DIRECTORY`, whose final component is now `data` under the pinned
 `LSB/iOS/23A343` storage root. The crash evidence above predates this storage rename.
 Before an acquiring `flock` or record-lock operation, it checks the actual descriptor: an owned regular file with one

@@ -1,4 +1,4 @@
-#include "ForkSignalState.h"
+#include "../Guest/Shared/Fork/ForkSignalState.h"
 #include <assert.h>
 #include <fcntl.h>
 #include <stdio.h>

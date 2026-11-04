@@ -10,7 +10,7 @@ static int testDladdr(const void *address, Dl_info *info) {
     return 1;
 }
 #define dladdr testDladdr
-#include "ForkLibcCheckpoint.h"
+#include "../Guest/lsb-fork-snapshot-child/ForkLibcCheckpoint.h"
 #undef dladdr
 
 static uintptr_t forkPC, vforkPC;

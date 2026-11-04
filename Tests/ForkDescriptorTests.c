@@ -1,7 +1,7 @@
-#include "ForkDescriptorState.h"
+#include "../Guest/Shared/Fork/ForkDescriptorState.h"
 #include "../ProcessSupport/ForkDescriptorSlots.h"
 #define LSB_FORK_SNAPSHOT_TRIAL 1
-#include "../Guest/TerminalStopWitness.c"
+#include "../Guest/libLiveSimSpawn/TerminalStopWitness.c"
 #include <assert.h>
 #include <stdio.h>
 #include <pthread.h>

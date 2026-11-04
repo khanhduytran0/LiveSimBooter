@@ -3,9 +3,9 @@ static kern_return_t testTaskNameForPID(mach_port_name_t target, int pid, mach_p
 #define task_name_for_pid testTaskNameForPID
 #define LSB_PROCESS_IDENTITY_TESTING
 #define LSB_GUEST_RUNTIME
-#include "../Guest/ProcessIdentity.c"
+#include "../Guest/libLiveSimSpawn/ProcessIdentity.c"
 #undef task_name_for_pid
-#include "../Guest/ChildKill.h"
+#include "../Guest/libLiveSimSpawn/ChildKill.h"
 #include <assert.h>
 #include <errno.h>
 #include <signal.h>

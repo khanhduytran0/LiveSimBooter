@@ -1,5 +1,5 @@
 #define LSB_SPAWN_SHIM_TESTING 1
-#include "../Guest/SpawnShim.c"
+#include "../Guest/libLiveSimSpawn/SpawnShim.c"
 
 #include <assert.h>
 #include <stdio.h>

@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 #define LSB_LAUNCHD_JOB_IDENTITY_TESTING
-#include "../Guest/LaunchdJobIdentity.c"
+#include "../Guest/libLiveSimSpawn/LaunchdJobIdentity.c"
 
 static struct mach_header_64 *image;
 static unsigned outboundQueries, inboundQueries;

@@ -8,7 +8,7 @@
 #include "StoreAppGroups.h"
 #endif
 #if defined(LSB_GUEST_RUNTIME)
-#include "../Guest/BrokerConnection.h"
+#include "../Guest/libLiveSimSpawn/BrokerConnection.h"
 #endif
 
 #include <errno.h>

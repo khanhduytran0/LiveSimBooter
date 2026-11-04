@@ -8,7 +8,7 @@
 #include "../ProcessSupport/PeerDebugger.h"
 
 #define LSB_WORKQUEUE_BOOTSTRAP_TESTING
-#include "../Guest/WorkqueueBootstrap.c"
+#include "../Guest/libLiveSimSpawn/WorkqueueBootstrap.c"
 
 static mach_port_t controlPort;
 static audit_token_t brokerAudit;

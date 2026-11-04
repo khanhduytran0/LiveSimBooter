@@ -1,5 +1,5 @@
 #include "ForkBashFixture.h"
-#include "ForkBashSubstitution.h"
+#include "../Guest/libLiveSimSpawn/ForkBashSubstitution.h"
 
 int main(void) {
     size_t page = vm_page_size;

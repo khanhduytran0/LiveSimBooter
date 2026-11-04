@@ -58,7 +58,6 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
     LSBGuestDeviceSettings *_device;
     LSBGuestApplicationInstaller *_installer;
     __weak UIDocumentPickerViewController *_ipaPicker;
-    PSSpecifier *_fullWidthSpecifier;
     id _audioObserver, _displayObserver, _deviceObserver, _signingObserver, _installerObserver;
     NSString *_signingSummary, *_signingError;
     BOOL _importingIdentity;
@@ -132,12 +131,12 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
 - (NSArray<PSSpecifier *> *)specifiers {
     NSArray<PSSpecifier *> *existing = [super unprotectedSpecifiers];
     if (existing) return existing;
-    _fullWidthSpecifier = [self setting:FullWidth title:NSLocalizedString(@"Use Full Width", @"Switch to expand the simulator display within the available view.")
-        cell:PSSwitchCell detail:Nil];
-    NSMutableArray<PSSpecifier *> *items = [NSMutableArray arrayWithArray:@[
+    NSArray<PSSpecifier *> *items = @[
         [self group:DeviceGroup title:NSLocalizedString(@"Simulator device", @"Settings section heading for device selection and display sizing.")],
         [self setting:Device title:NSLocalizedString(@"Device", @"Settings row that opens the simulated device picker.")
             cell:PSLinkCell detail:LSBDeviceTypePickerViewController.class],
+        [self setting:FullWidth title:NSLocalizedString(@"Use Full Width", @"Switch to expand the simulator display within the available view.")
+            cell:PSSwitchCell detail:Nil],
         [self group:SigningGroup title:NSLocalizedString(@"Code signing", @"Settings section heading for lazy runtime code signing.")],
         [self setting:LazySign title:NSLocalizedString(@"Lazy sign", @"Switch to sign runtime binaries on signature-registration failure.")
             cell:PSSwitchCell detail:Nil],
@@ -160,9 +159,7 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
         [self group:SessionGroup title:NSLocalizedString(@"Simulator session", @"Settings section heading for Power Off and Restart.")],
         [self setting:PowerOff title:NSLocalizedString(@"Power Off", @"Stop the simulator session without deleting its data.") cell:PSButtonCell detail:Nil],
         [self setting:Restart title:NSLocalizedString(@"Restart", @"Restart the simulator session.") cell:PSButtonCell detail:Nil],
-    ]];
-    LSBGuestDeviceType *type = LSBGuestDeviceTypeForIdentifier(_device.currentIdentifier);
-    if (type.hasHomeButton || type.isPad) [items insertObject:_fullWidthSpecifier atIndex:2];
+    ];
     for (PSSpecifier *specifier in items) {
         if (specifier.cellType == PSButtonCell) specifier.buttonAction = @selector(performSettingAction:);
         [self updateSpecifier:specifier];
@@ -217,10 +214,10 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
     if ([identifier isEqual:DisplayGroup]) return _device.simulatorOff ?
         NSLocalizedString(@"Start the simulator to change its live display settings.", @"Settings footer while the simulator is off.") : _display.statusText;
     if ([identifier isEqual:DeviceGroup]) {
-        LSBGuestDeviceType *type = LSBGuestDeviceTypeForIdentifier(_device.currentIdentifier);
-        if (!type.hasHomeButton && !type.isPad) return _device.statusText;
-        return [NSString stringWithFormat:NSLocalizedString(@"%@\n\nFull width preserves the screen’s aspect ratio and fits within the available height.",
-            @"Device settings footer: current status followed by the Full Width explanation."), _device.statusText];
+        return [NSString stringWithFormat:NSLocalizedString(@"%@\n\nFull width hides the tab bar on IOSurface. Tap the arrow below the display to show it again."
+            @"\n\nIf this device and the simulated device both have a home indicator, Guided Access hides the host status bar and controls for a full-screen view. "
+            @"End Guided Access to restore the previous layout.", @"Simulator Device footer explaining Full Width and Guided Access after the current status."),
+            _device.statusText];
     }
     NSString *description = NSLocalizedString(@"Play silence to keep the host's audio session active in the background. Off by default. "
         @"This may increase battery use. Other audio can continue playing.",
@@ -246,19 +243,8 @@ static void offerSigningRestart(UIViewController *controller, LSBGuestDeviceSett
     if (!self.isViewLoaded) return;
     [UIView performWithoutAnimation:^{
         self.navigationItem.rightBarButtonItem.enabled = !self->_display.pending && !self->_device.pending;
-        LSBGuestDeviceType *type = LSBGuestDeviceTypeForIdentifier(self->_device.currentIdentifier);
-        BOOL fullWidth = type.hasHomeButton || type.isPad;
-        BOOL present = [self.specifiers containsObject:self->_fullWidthSpecifier];
-        if (fullWidth != present) {
-            NSMutableArray *items = [self.specifiers mutableCopy];
-            if (fullWidth) [items insertObject:self->_fullWidthSpecifier atIndex:[items indexOfObject:[self specifierForID:Device]] + 1];
-            else [items removeObject:self->_fullWidthSpecifier];
-            for (PSSpecifier *specifier in items) [self updateSpecifier:specifier];
-            [self setSpecifiers:items];
-        } else {
-            for (PSSpecifier *specifier in self.specifiers)
-                if ([self updateSpecifier:specifier]) [self reloadSpecifier:specifier animated:NO];
-        }
+        for (PSSpecifier *specifier in self.specifiers)
+            if ([self updateSpecifier:specifier]) [self reloadSpecifier:specifier animated:NO];
         [self configureVisibleCells];
         [self.table layoutIfNeeded];
     }];

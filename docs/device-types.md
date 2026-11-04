@@ -9,15 +9,22 @@ capabilities, and starts a fresh session. The `data` root and native IOSurface, 
 
 The default remains **iPhone 15 Pro Max**. The simulated device is independent of the physical host iPhone.
 
-For a Home-button profile or either iPad, **Settings → Use Full Width** removes the normal presentation inset. This saved
-option takes effect immediately without rebooting or changing the guest's resolution. The display keeps its aspect ratio
-and fits the native safe area; if height is limiting, it uses the largest width that still fits. Home-indicator iPhones keep
-the existing inset layout. Switching profiles preserves the saved option but applies it only to eligible devices.
+**Settings → Use Full Width** expands IOSurface and hides the native tab bar for every iPhone and iPad profile.
+Tap the up arrow in the lower-right corner to reveal Fish and Settings. Returning to IOSurface hides the tabs again.
+The preference takes effect immediately. With the tabs hidden, the guest screen stays centered in the host view.
+Its aspect ratio is preserved and its touch area stays clear of the native controls.
+
+If both the physical device and the running guest have a home indicator, starting Guided Access on IOSurface
+automatically hides the host status bar, tab bar and reveal arrow. The guest fills as much of the entire window as its
+aspect ratio allows. Ending Guided Access restores the previous display mode, including the arrow if Full Width was active.
+This works with either Full Width setting.
+
+On iPhone 17 with the iPhone 15 Pro Max guest, Guided Access expanded the image from 1152 × 2496 to 1320 × 2862 pixels.
+The host status bar and reveal arrow returned at their previous positions when Guided Access ended.
 
 A virtual **Home** button appears below the guest screen for iPhone 8, 8 Plus, SE2 and iPad (9th generation). It reserves a
 48-point touch target outside the framebuffer, so it does not cover simulator content. The layout keeps full width when
-the screen and button fit vertically, otherwise reducing the screen just enough to fit both. There is no extra button for
-Home-indicator profiles.
+the screen and button fit vertically, otherwise reducing the screen just enough to fit both.
 
 The button sends stock Indigo Home down/up events to the authenticated simulator backboardd, never to the physical phone.
 Releases on drag-out, cancellation, tab/window inactivity and session replacement target the server that accepted the down.

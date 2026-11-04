@@ -23,13 +23,13 @@
         }
       }
     },
-    "%@\n\nFull width preserves the screen’s aspect ratio and fits within the available height.": {
-      "comment": "Device settings footer: current status followed by the Full Width explanation.",
+    "%@\n\nFull width hides the tab bar on IOSurface. Tap the arrow below the display to show it again.\n\nIf this device and the simulated device both have a home indicator, Guided Access hides the host status bar and controls for a full-screen view. End Guided Access to restore the previous layout.": {
+      "comment": "Simulator Device footer explaining Full Width and Guided Access after the current status.",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@\n\nFull width preserves the screen’s aspect ratio and fits within the available height."
+            "value": "%@\n\nFull width hides the tab bar on IOSurface. Tap the arrow below the display to show it again.\n\nIf this device and the simulated device both have a home indicator, Guided Access hides the host status bar and controls for a full-screen view. End Guided Access to restore the previous layout."
           }
         }
       }
@@ -1075,6 +1075,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "Settings"
+          }
+        }
+      }
+    },
+    "Show tab bar": {
+      "comment": "Button below the simulator display that reveals the native tabs.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show tab bar"
           }
         }
       }

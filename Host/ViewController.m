@@ -1,4 +1,5 @@
 #import "ViewController.h"
+#import "Private/UIKitPrivate.h"
 #include "HostApplication.h"
 #include "Broker.h"
 #import "TerminalSession.h"
@@ -50,9 +51,12 @@ static void showStatus(UIViewController *controller, NSString *text) {
 @property (nonatomic, strong) UIButton *startButton;
 @property (nonatomic, strong) id indigoObserver;
 @property (nonatomic, strong) id framebufferObserver;
-@property (nonatomic, strong) id deviceSettingsObserver, inactiveObserver, activeObserver, sessionObserver;
+@property (nonatomic, strong) id deviceSettingsObserver, inactiveObserver, activeObserver, sessionObserver, guidedAccessObserver;
 @property (nonatomic, strong) LSBSimulatorDisplayView *simulatorDisplay;
 @property (nonatomic, strong) LSBVirtualHomeButton *homeButton;
+@property (nonatomic, strong) UIButton *showTabsButton;
+@property BOOL tabsRevealed, hostHasHomeIndicator;
+@property LSBSurfacePresentation surfacePresentation;
 @property (nonatomic, strong) LSBIndigoHIDServer *pressedHomeServer;
 @property (nonatomic, strong) LSBFramebufferServer *framebuffer;
 @property uint64_t displayGeneration;
@@ -64,7 +68,7 @@ static void showStatus(UIViewController *controller, NSString *text) {
     if (_indigoObserver) [NSNotificationCenter.defaultCenter removeObserver:_indigoObserver];
     if (_framebufferObserver) [NSNotificationCenter.defaultCenter removeObserver:_framebufferObserver];
     for (id observer in @[_deviceSettingsObserver ?: NSNull.null, _inactiveObserver ?: NSNull.null, _activeObserver ?: NSNull.null,
-                         _sessionObserver ?: NSNull.null])
+                         _sessionObserver ?: NSNull.null, _guidedAccessObserver ?: NSNull.null])
         if (observer != NSNull.null) [NSNotificationCenter.defaultCenter removeObserver:observer];
     _framebuffer.frameHandler = nil;
 }
@@ -86,6 +90,28 @@ static void showStatus(UIViewController *controller, NSString *text) {
 }
 - (void)homeButtonDown:(UIButton *)button { (void)button; [self pressHomeButton]; }
 - (void)homeButtonUp:(UIButton *)button { (void)button; [self releaseHomeButton]; }
+- (BOOL)prefersStatusBarHidden { return self.surfacePresentation == LSBSurfaceGuidedFullscreen || super.prefersStatusBarHidden; }
+- (BOOL)prefersHomeIndicatorAutoHidden { return self.surfacePresentation == LSBSurfaceGuidedFullscreen || super.prefersHomeIndicatorAutoHidden; }
+- (void)updateDisplayPresentation {
+    BOOL active = self.visible && self.simulatorDisplay && !LSBHostSimulatorIsOff() && !self.startupError;
+    LSBGuestDeviceType *guest = active ? LSBHostCurrentDeviceType() : nil;
+    BOOL hideTabs = LSBGuestDeviceSettings.sharedController.fullWidth && !self.tabsRevealed;
+    LSBSurfacePresentation mode = LSBSelectSurfacePresentation(active, hideTabs, active && UIAccessibilityIsGuidedAccessEnabled(),
+                                                               self.hostHasHomeIndicator, guest && !guest.hasHomeButton);
+    BOOL changed = self.surfacePresentation != mode;
+    self.surfacePresentation = mode;
+    self.showTabsButton.hidden = mode != LSBSurfaceWithTabButton;
+    if (self.tabBarController.isTabBarHidden != (mode != LSBSurfaceWithTabs)) [self.tabBarController setTabBarHidden:(mode != LSBSurfaceWithTabs) animated:NO];
+    if (changed) {
+        [self.tabBarController setNeedsStatusBarAppearanceUpdate];
+        [self.tabBarController setNeedsUpdateOfHomeIndicatorAutoHidden];
+    }
+    [self.view setNeedsLayout];
+}
+- (void)showTabs {
+    self.tabsRevealed = YES;
+    [self updateDisplayPresentation];
+}
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     if (!self.simulatorDisplay) return;
@@ -93,9 +119,14 @@ static void showStatus(UIViewController *controller, NSString *text) {
     LSBFramebufferGeometry geometry = self.framebuffer ? self.framebuffer.geometry : (LSBFramebufferGeometry){0};
     CGSize pixels = self.framebuffer ? CGSizeMake(geometry.width, geometry.height) : CGSizeMake(device.width, device.height);
     BOOL needsHome = device.hasHomeButton;
+    CGRect safe = self.view.safeAreaLayoutGuide.layoutFrame, viewport = self.view.bounds;
+    if (self.surfacePresentation == LSBSurfaceWithTabButton) {
+        self.showTabsButton.frame = LSBShowTabsButtonFrame(safe, viewport);
+        // A compact window must always retain a way to navigate, even if it cannot fit the reveal target.
+        if (CGRectIsEmpty(self.showTabsButton.frame) && !CGRectIsEmpty(safe)) [self showTabs];
+    }
     LSBDisplayLayout layout;
-    BOOL fits = LSBComputeSimulatorDisplayLayout(self.view.safeAreaLayoutGuide.layoutFrame, pixels, needsHome || device.isPad,
-                                                 LSBGuestDeviceSettings.sharedController.fullWidth, needsHome, &layout);
+    BOOL fits = LSBComputeSimulatorDisplayLayout(safe, viewport, pixels, LSBGuestDeviceSettings.sharedController.fullWidth, needsHome, self.surfacePresentation, &layout);
     if (!fits || !needsHome || !CGRectEqualToRect(self.homeButton.frame, layout.homeButtonFrame)) [self releaseHomeButton];
     self.simulatorDisplay.frame = fits ? layout.displayFrame : CGRectZero;
     self.homeButton.hidden = !fits || !needsHome || LSBHostSimulatorIsOff();
@@ -136,6 +167,8 @@ static void showStatus(UIViewController *controller, NSString *text) {
 }
 - (void)viewWillDisappear:(BOOL)animated {
     self.visible = NO;
+    self.tabsRevealed = NO;
+    [self updateDisplayPresentation];
     [self releaseHomeButton];
     self.homeButton.enabled = NO;
     self.simulatorDisplay.userInteractionEnabled = NO; // Cancels active contacts before another tab can receive touches.
@@ -182,6 +215,7 @@ static void showStatus(UIViewController *controller, NSString *text) {
 }
 - (void)updateSessionState {
     BOOL off = LSBHostSimulatorIsOff();
+    if (off) self.tabsRevealed = NO;
     self.simulatorDisplay.hidden = off;
     self.simulatorDisplay.presentationEnabled = self.visible && !off;
     self.simulatorDisplay.userInteractionEnabled = self.visible && !off;
@@ -201,7 +235,7 @@ static void showStatus(UIViewController *controller, NSString *text) {
         self.startButton.enabled = YES;
         [self.view bringSubviewToFront:self.startOverlay];
     }
-    [self.view setNeedsLayout];
+    [self updateDisplayPresentation];
 }
 - (void)startInitialRuntime {
     if (self.startupAttempted && !LSBHostSimulatorIsOff()) return;
@@ -223,6 +257,8 @@ static void showStatus(UIViewController *controller, NSString *text) {
     [self.view addSubview:display];
     hostDisplay = display;
     self.simulatorDisplay = display;
+    // UIKit can remove the bottom safe-area inset while Guided Access is active.
+    self.hostHasHomeIndicator = [UIDevice respondsToSelector:@selector(_hasHomeButton)] && ![UIDevice _hasHomeButton];
     UIButtonConfiguration *homeConfiguration = UIButtonConfiguration.grayButtonConfiguration;
     homeConfiguration.image = [UIImage systemImageNamed:@"square"];
     homeConfiguration.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightRegular];
@@ -244,6 +280,16 @@ static void showStatus(UIViewController *controller, NSString *text) {
         UIControlEventTouchCancel | UIControlEventTouchDragExit];
     [self.view addSubview:home];
     self.homeButton = home;
+    UIButtonConfiguration *tabsConfiguration = UIButtonConfiguration.grayButtonConfiguration;
+    tabsConfiguration.image = [UIImage systemImageNamed:@"chevron.up"];
+    tabsConfiguration.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    tabsConfiguration.background.backgroundInsets = NSDirectionalEdgeInsetsMake(4, 4, 4, 4);
+    UIButton *tabs = [UIButton buttonWithConfiguration:tabsConfiguration primaryAction:nil];
+    tabs.accessibilityLabel = NSLocalizedString(@"Show tab bar", @"Button below the simulator display that reveals the native tabs.");
+    tabs.accessibilityIdentifier = @"simulator-show-tabs";
+    [tabs addTarget:self action:@selector(showTabs) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:tabs];
+    self.showTabsButton = tabs;
     [self bindFramebuffer];
     __weak LSBSimulatorDisplayView *weakDisplay = display;
     __weak LSBSurfaceViewController *weakSelf = self;
@@ -264,15 +310,18 @@ static void showStatus(UIViewController *controller, NSString *text) {
         queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; [weakSelf bindFramebuffer]; }];
     self.deviceSettingsObserver = [NSNotificationCenter.defaultCenter addObserverForName:LSBGuestDeviceSettingsDidChangeNotification
         object:LSBGuestDeviceSettings.sharedController queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
-            (void)notification; [weakSelf.view setNeedsLayout];
+            (void)notification; [weakSelf updateDisplayPresentation];
         }];
+    // UIKit posts UIAccessibilityGuidedAccessStateChanged under this public notification name.
+    self.guidedAccessObserver = [NSNotificationCenter.defaultCenter addObserverForName:UIAccessibilityGuidedAccessStatusDidChangeNotification object:nil
+        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; [weakSelf updateDisplayPresentation]; }];
     self.inactiveObserver = [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillResignActiveNotification object:nil
         queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
             (void)notification; [weakSelf releaseHomeButton]; weakSelf.homeButton.enabled = NO;
         }];
     self.activeObserver = [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
-        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; [weakSelf.view setNeedsLayout]; }];
-    [self.view setNeedsLayout];
+        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; [weakSelf updateDisplayPresentation]; }];
+    [self updateDisplayPresentation];
     if (self.visible) [display becomeFirstResponder];
 }
 @end
@@ -397,6 +446,8 @@ static void showStatus(UIViewController *controller, NSString *text) {
 @end
 
 @implementation LSBHostViewController
+- (UIViewController *)childViewControllerForStatusBarHidden { return self.selectedViewController; }
+- (UIViewController *)childViewControllerForHomeIndicatorAutoHidden { return self.selectedViewController; }
 - (void)viewDidLoad {
     [super viewDidLoad];
     // The scene keeps the display and terminal connections. Tab selection never starts or stops a process.

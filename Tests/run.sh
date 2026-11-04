@@ -238,7 +238,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/CreationMaskTests.c -o "$test_directory/CreationMask"
 "$test_directory/CreationMask"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/ExecutableAccessTests.c -o "$test_directory/ExecutableAccess"
+    Tests/ExecutableAccessTests.c ProcessSupport/SpawnPlan.c -o "$test_directory/ExecutableAccess"
 "$test_directory/ExecutableAccess"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ProcursusLaunchctlTests.c ProcessSupport/SpawnPlan.c -o "$test_directory/ProcursusLaunchctl"
@@ -321,7 +321,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/LaunchdProbeTests.c ProcessSupport/LaunchdProbe.c -o "$test_directory/LaunchdProbe"
 "$test_directory/LaunchdProbe"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
-    Tests/LaunchdCompatibilityTests.c Guest/libLiveSimSpawn/ExecutableAccess.c Guest/libLiveSimSpawn/RuntimeDirectories.c \
+    Tests/LaunchdCompatibilityTests.c Guest/libLiveSimSpawn/ExecutableAccess.c Guest/libLiveSimSpawn/RuntimeDirectories.c ProcessSupport/SpawnPlan.c \
     -DLSB_EXECUTABLE_ACCESS_TESTING -o "$test_directory/LaunchdCompatibility"
 "$test_directory/LaunchdCompatibility"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \

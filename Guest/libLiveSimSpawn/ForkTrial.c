@@ -68,6 +68,26 @@ static int forkTrialMode(const char *value) {
     return LSB_FORK_NOT_HANDLED;
 }
 
+// A script inherits Fish's PTY as well. Only select the specialized interactive Bash checkpoint for a shell invocation.
+static bool bashTerminalInvocation(char *const argv[]) {
+    bool interactive = false, command = false, readStdin = false;
+    unsigned i = 1;
+    for (; argv[i]; ++i) {
+        const char *arg = argv[i];
+        if (!strcmp(arg, "--") || !strcmp(arg, "-")) { ++i; break; }
+        if ((*arg != '-' && *arg != '+') || !arg[1]) break;
+        if (!strcmp(arg, "--init-file") || !strcmp(arg, "--rcfile")) {
+            if (argv[i + 1]) ++i;
+        } else if (arg[1] != '-') {
+            if (strchr(arg + 1, 'i')) interactive = *arg == '-';
+            if (strchr(arg + 1, 'c')) command = true;
+            if (strchr(arg + 1, 's')) readStdin = *arg == '-';
+            if ((strchr(arg + 1, 'o') || strchr(arg + 1, 'O')) && argv[i + 1]) ++i;
+        }
+    }
+    return interactive || (!command && (readStdin || !argv[i]));
+}
+
 bool LSBForkTrialEnabled(void) {
     const char *selected = getenv(option);
     const char *nativeSupport = getenv("LSB_NATIVE_SUPPORT");
@@ -82,7 +102,7 @@ bool LSBForkTrialEnabled(void) {
         const char *path = argv && argv[0] ? argv[0] : "";
         const char *slash = strrchr(path, '/');
         const char *name = slash ? slash + 1 : path;
-        if (!strcmp(name, "bash") || !strcmp(name, "-bash"))
+        if ((!strcmp(name, "bash") || !strcmp(name, "-bash")) && bashTerminalInvocation(argv))
             procursusTerminal = forkTrialProcursusBashImage((uintptr_t)_NSGetMachExecuteHeader());
     }
     int mode = forkTrialMode(selected);

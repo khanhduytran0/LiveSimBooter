@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 
 static void *receiveMessage(void *context) {
@@ -135,9 +136,13 @@ int main(int argc, char **argv) {
     char path[] = "/tmp/lsb-fork-fds.XXXXXX";
     int file = mkstemp(path);
     assert(file > 2 && unlink(path) == 0 && write(file, "abc", 3) == 3 && lseek(file, 0, SEEK_SET) == 0);
-    int alias = fcntl(file, F_DUPFD_CLOEXEC, 22);
+    struct rlimit limit;
+    assert(!getrlimit(RLIMIT_NOFILE, &limit) && limit.rlim_cur >= 256);
+    limit.rlim_cur = 256;
+    assert(!setrlimit(RLIMIT_NOFILE, &limit));
+    int alias = fcntl(file, F_DUPFD_CLOEXEC, 255); // Bash keeps an open script here even when only a few descriptors are live.
     int channel[2], pipeFDs[2];
-    assert(alias >= 22 && alias < LSB_MAX_FDS && !socketpair(AF_UNIX, SOCK_STREAM, 0, channel) && !pipe(pipeFDs));
+    assert(alias == 255 && !socketpair(AF_UNIX, SOCK_STREAM, 0, channel) && !pipe(pipeFDs));
     pid_t child = fork();
     assert(child >= 0);
     if (!child) {

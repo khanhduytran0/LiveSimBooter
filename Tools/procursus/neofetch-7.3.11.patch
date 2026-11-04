@@ -1,0 +1,23 @@
+--- a/usr/bin/neofetch
++++ b/usr/bin/neofetch
+@@ -51,3 +51,3 @@
+ # Use sed -r instead of sed -E if using GNU sed.
+-[[ $(sed --version 2>/dev/null) =~ GNU ]] && gnu_sed=1
++[[ $(exec sed --version 2>/dev/null) =~ GNU ]] && gnu_sed=1
+ sed() {
+@@ -3514,4 +3514,13 @@
+             pages_app="$(($(sysctl -n vm.page_pageable_internal_count) - $(sysctl -n vm.page_purgeable_count)))"
+-            pages_wired="$(vm_stat | awk '/ wired/ { print $4 }')"
+-            pages_compressed="$(vm_stat | awk '/ occupied/ { printf $5 }')"
++            local vm_rows row count
++            vm_rows=$(vm_stat)
++            pages_wired=0
++            pages_compressed=0
++            while IFS= read -r row; do
++                count=${row##* }
++                case $row in
++                    "Pages wired down:"*) pages_wired=${count%.} ;;
++                    "Pages occupied by compressor:"*) pages_compressed=${count%.} ;;
++                esac
++            done <<< "$vm_rows"
+             pages_compressed="${pages_compressed:-0}"

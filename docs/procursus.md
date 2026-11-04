@@ -21,9 +21,14 @@ To reuse an approved signing helper, add `--cms-helper /path/to/sign-code-direct
 drops to mobile before writing. If several store App Groups contain the runtime, pass `--runtime-root` with the full device path
 to the selected group's `LSB/iOS/23A343/RuntimeRoot`.
 
-- **Fresh installation.** The Mac rebuilds APT's acquisition library and verification method and signs all bootstrap Mach-O files.
-  The phone publishes the prepared tree at `data/var/jb`. Internal absolute package symlinks become relative, and
-  `RuntimeRoot/var/jb -> ../../data/var/jb` lets guest dyld resolve the packages' embedded library paths.
+- **Fresh installation.** The Mac rebuilds APT's acquisition library and verification method and signs the bootstrap Mach-O files.
+  Before publishing the tree at `data/var/jb`, the installer records the guest's `ProductVersion` as the zero-payload
+  `firmware` package. It omits the empty `essential` package that requires a graphical package manager or SSH server,
+  along with `shshd` and its kernel-access dependencies `libdimentio0` and `libkrw0`. The pinned bootstrap starts with
+  64 installed packages. The fresh APT config sets `pkgCacheGen::Essential "installed"` so a full upgrade keeps the CLI
+  package selection. For the empty package `Applications` directory, setup registers the existing `uikittools` file trigger
+  with an empty pending queue. A package that adds an app can still activate it. Internal package symlinks become relative,
+  and `RuntimeRoot/var/jb -> ../../data/var/jb` lets guest dyld resolve the packages' library paths.
 - **Existing installation.** The installer checks the installed APT and libapt-pkg versions. It patches the APT pair, re-signs
   binaries that still match the original archive bytes, and repairs the shipped internal symlinks. Local package data, settings,
   additional packages, and other changed or previously signed binaries stay in place. The installer prints a backup directory
@@ -34,6 +39,11 @@ To deploy the same build/signing identity to another phone, pass a signed output
 using `--prepared` in place of the signing options. Use `Tools/build-procursus-apt.py --help` and
 `Tools/prepare-procursus.py --help` for the separate local build and signing steps.
 
+To switch an existing guest to the fresh CLI base, power it off and move its entire `data/var/jb` directory to a backup
+beside `RuntimeRoot`. Leave the `RuntimeRoot/var/jb` symlink in place and rerun the installer. Keep the backup until
+you have verified the new environment. To roll back, power off the guest, move the new directory aside and restore
+the backup at `data/var/jb`.
+
 ## Verify in Fish
 
 Start the simulator and run these commands from Fish.
@@ -42,6 +52,7 @@ Start the simulator and run these commands from Fish.
 command -s apt
 /var/jb/bin/ls -d .
 apt update
+apt-get check
 apt-cache policy cmake
 apt list --installed
 ```
@@ -72,10 +83,64 @@ On iPhone 15 and iPhone 17, an update from empty lists downloaded and authentica
 and `apt list --installed` matched all 67 entries in the guest's dpkg database. The verifier rejected an altered release
 with `BADSIG` and a different keyring with `NO_PUBKEY`.
 
-On iPhone 17, `apt install cmake` exited 100 during dependency resolution. Neither `firmware (>= 14.0)` nor its alternative
-`libexpat1` was available. APT also reported unsatisfied dependencies for the bootstrap's `essential`, `libkrw0`, `shshd` and
-`snaputil` packages. It never ran dpkg. Fish then returned 127 for `cmake --version`.
-The installer skips the archive's `prep_bootstrap.sh`. An earlier test, before guest `vfork` support, stopped at its first external command.
+To test a package installation in Fish, run `apt install cmake`, then `cmake --version`. On the fresh iPhone 15 guest, APT
+selected CMake 3.30.2 and its nine dependencies from the 1900 repository. The runtime provides `/usr/lib/libexpat.1.dylib`,
+and its recorded firmware version satisfies CMake's `firmware (>= 14.0) | libexpat1` dependency. On both iPhone 15 and
+iPhone 17, `cmake -P` loaded `CMakePrintHelpers` from the installed `usr/share/cmake-3.30/Modules` directory.
+Older installations retain their original package selection and may still need [package repair](#run-a-package-repair-in-fish).
+
+### Neofetch
+
+The Procursus 1900 package is a Bash script. Install it from Fish with the chrootless option for this transaction so that
+the stock `gawk` post-install script can register the guest's `awk` alternative.
+
+```fish
+apt -o DPkg::Options::=--force-script-chrootless install neofetch
+neofetch
+```
+
+The guest launcher resolves the script's `#!/usr/bin/env bash` against the guest filesystem and preserves the arguments.
+Procursus's absolute `/var/jb/etc/alternatives/awk` symlink resolves inside the same guest bootstrap. Bash uses the general
+fork path when reading a script from the Fish tab. Its open script descriptor (often 255) keeps its number and close-on-exec flag.
+
+Neofetch also calls `vm_stat` for wired and compressed memory. When the command is absent from the bootstrap, compile
+[Apple's vm_stat source](https://github.com/apple-oss-distributions/system_cmds/blob/408bba7453608006b89772db185defbac8fe2fd0/vm_stat/vm_stat.c) for the simulator,
+then sign the executable and stage it at `RuntimeRoot/usr/local/bin/vm_stat` using the [guest executable signing instructions](agent-setup.md).
+
+```sh
+xcrun --sdk iphonesimulator clang -target arm64-apple-ios26.0-simulator -O2 vm_stat.c -o "$LSB_WORK/guest/vm_stat"
+```
+
+Procursus tools reading `/System/Library/CoreServices/SystemVersion.plist` get the selected runtime's file. For the uptime and
+memory queries, the stock `sysctl` utility also requests the kernel's OID format. When that request is denied, the shim supplies
+the format for these five read-only keys. Page size, total memory and boot time come from the ordinary kernel reads. If the two
+VM counter reads are denied, the guest uses Mach's VM statistics. Its internal count includes pages on local queues.
+[XNU host statistics implementation](https://github.com/apple-oss-distributions/xnu/blob/xnu-12377.1.9/osfmk/kern/host.c#L791-L818)
+
+Neofetch 7.3.11's stock hardware tables omit `iPhone16,2`. Its model, resolution, CPU and GPU fields can therefore print `prin`.
+The stock script can also print a fork warning during its optional GNU sed check. Its two `vm_stat | awk` pipelines run inside
+command substitutions and can omit wired and compressed memory when a nested fork fails.
+
+To keep the packaged command intact, build a sibling script named `neofetch-lsb` from the installed 7.3.11 script or from the
+same package archive. On the Mac, set `LSB_NEOFETCH_SOURCE` to that local script and run these commands from the repository root.
+
+```sh
+mkdir -p tmp/neofetch
+patch -s -o tmp/neofetch/neofetch-lsb "$LSB_NEOFETCH_SOURCE" Tools/procursus/neofetch-7.3.11.patch
+chmod 755 tmp/neofetch/neofetch-lsb
+```
+
+Copy `neofetch-lsb` to `data/var/jb/usr/bin/neofetch-lsb` with mode 0755. The copy uses `exec` for the sed probe and parses
+one `vm_stat` sample with Bash builtins. Both commands use the same Neofetch configuration.
+
+On iPhone 15 (host 23B50, guest 23A343, cache `9a2fb463-a774-53ed-a661-ff3f3fcac717` at `0x480000000`), two ordinary
+`neofetch-lsb` runs in launchd's Fish terminal exited 0 without a fork warning. They reported iOS 26.0 and 4.00 and 4.03 GiB
+of 7.45 GiB memory in use. The packaged `neofetch` file retained its original checksum.
+
+On iPhone 17 (host 24A435, same guest and cache UUID at `0x7180000000`), Fish and Bash both needed
+`stat` to follow the guest's two absolute alternatives links even when PATH contained the physical App Group directory.
+The stock Procursus `env`, `gawk` and `libmpfr` also needed development signatures with space for the signature blob.
+Two launchd-owned Fish runs of `neofetch-lsb` then exited 0, reported 83 packages and showed 5.62 of 11.42 GiB in use.
 
 ### Run a package repair in Fish
 
@@ -90,8 +155,8 @@ dpkg --audit
 apt-get check
 ```
 
-For the 1900 bootstrap, the proposed repair removes `shshd` and `snaputil` and installs `openssh-client`, `openssh-sftp-server`,
-`openssh-server` and `libkrw0-tfp0`. OpenSSH's stock job requests ports 22 and 2222. To reproduce the device test, use a copy of the
+For an older installation with the original 1900 package selection, the observed repair removed `shshd` and `snaputil` and installed
+`openssh-client`, `openssh-sftp-server`, `openssh-server` and `libkrw0-tfp0`. OpenSSH's stock job requests ports 22 and 2222. To reproduce the device test, use a copy of the
 bootstrap under guest data. Set `DPKG_ROOT` to the copy and `APT_CONFIG` to a config whose package database, archives and dpkg root
 all point into the copy. Stage its `com.openssh.sshd.plist` before confirming the repair. Set the job's program to an inert guest
 executable and both sockets to `127.0.0.1` on distinct unused high ports. Add

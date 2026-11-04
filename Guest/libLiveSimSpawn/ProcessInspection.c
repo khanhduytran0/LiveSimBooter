@@ -8,6 +8,7 @@
 #include "../../ProcessSupport/GuestExecutablePath.h"
 #include <errno.h>
 #include <limits.h>
+#include <mach-o/dyld.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -79,6 +80,71 @@ static int copyOutput(void *output, size_t *length, const void *bytes, size_t re
     return 0;
 }
 
+// XNU sysctl_oidfmt returns a uint32_t kind followed immediately by the NUL-terminated format string.
+typedef struct { uint32_t kind; char format[sizeof("S,timeval")]; } InspectionOIDFormat;
+_Static_assert(offsetof(InspectionOIDFormat, format) == sizeof(uint32_t), "sysctl OIDFMT layout");
+enum { InspectionOIDName = 1, InspectionOIDFmt = 4, InspectionInternalPages = 3, InspectionPurgeablePages = 4 };
+static struct {
+    const char *name;
+    int group;
+    InspectionOIDFormat format;
+    int oid;
+} metrics[] = {
+    // Type and read-only flags measured from the native Darwin 25 sysctl tree on 23B50. OID_AUTO numbers are looked up on the running kernel.
+    {"kern.boottime", CTL_KERN, {0x81e00005, "S,timeval"}, 0},
+    {"hw.pagesize", CTL_HW, {0x81e00004, "Q"}, 0},
+    {"hw.memsize", CTL_HW, {0x81e00004, "Q"}, 0},
+    [InspectionInternalPages] = {"vm.page_pageable_internal_count", CTL_VM, {0x80e00002, "IU"}, 0},
+    [InspectionPurgeablePages] = {"vm.page_purgeable_count", CTL_VM, {0x80e00002, "I"}, 0}
+};
+static pthread_once_t metricOnce = PTHREAD_ONCE_INIT;
+
+static void initializeMetricOIDs(void) {
+    const LSBGuestRuntimeDirectories *dirs;
+    char path[PATH_MAX];
+    uint32_t capacity = sizeof(path);
+    if (LSBGetRuntimeDirectories(&dirs) || !dirs->bootstrapLength || _NSGetExecutablePath(path, &capacity) ||
+        !LSBGuestPathInBootstrap(dirs->runtime, path)) return;
+    const char *suffix = path + strlen(LSBGuestStorageRootSpelling(dirs->bootstrap, path));
+    if (strcmp(suffix, "/usr/sbin/sysctl") && strcmp(suffix, "/sbin/sysctl")) return;
+    for (unsigned i = 0; i < sizeof(metrics) / sizeof(*metrics); ++i) {
+        int oid[CTL_MAXNAME];
+        size_t n = CTL_MAXNAME;
+        if (!sysctlnametomib(metrics[i].name, oid, &n) && n == 2 && oid[0] == metrics[i].group && oid[1] > 0) metrics[i].oid = oid[1];
+    }
+}
+
+static int readMetric(int *mib, u_int count, void *output, size_t *length) {
+    int saved = errno;
+    int result = sysctl(mib, count, output, length, NULL, 0);
+    if (result != -1 || errno != EPERM) return result;
+    pthread_once(&metricOnce, initializeMetricOIDs);
+    const int *key = mib + count - 2;
+    for (unsigned i = 0; i < sizeof(metrics) / sizeof(*metrics); ++i) {
+        if (!metrics[i].oid || key[0] != metrics[i].group || key[1] != metrics[i].oid) continue;
+        if (count == 4) {
+            const InspectionOIDFormat *format = &metrics[i].format;
+            const char *name = metrics[i].name;
+            result = mib[1] == InspectionOIDName ? copyOutput(output, length, name, strlen(name) + 1, 1) :
+                     copyOutput(output, length, format, sizeof(format->kind) + strlen(format->format) + 1, 1);
+        } else {
+            vm_statistics64_data_t vm;
+            mach_msg_type_number_t words = HOST_VM_INFO64_COUNT;
+            host_t host = mach_host_self();
+            kern_return_t kr = host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm, &words);
+            mach_port_deallocate(mach_task_self(), host);
+            if (kr || words * sizeof(integer_t) < offsetof(vm_statistics64_data_t, internal_page_count) + sizeof(vm.internal_page_count)) break;
+            // XNU host_statistics64 reports internal pages including the local queue. Its purgeable count is the same global VM counter.
+            uint32_t pages = i == InspectionInternalPages ? vm.internal_page_count : vm.purgeable_count;
+            result = copyOutput(output, length, &pages, sizeof(pages), sizeof(pages));
+        }
+        if (!result) errno = saved;
+        return result;
+    }
+    errno = EPERM;
+    return -1;
+}
+
 int LSBInspectionUnsupportedPID(int pid) {
     if (!atomic_load_explicit(&hasProcessSnapshot, memory_order_acquire)) return 0;
     if (pid > 0 && pid == LSBGuestPID()) return 0;
@@ -146,7 +212,12 @@ static int inspectionSysctl(int *name, u_int count, void *output, size_t *length
     if (!atomic_load_explicit(&inspectionReady, memory_order_acquire) || (count != 2 && count != 3 && count != 4))
         return sysctl(name, count, output, length, input, inputSize);
     int mib[4] = {0};
-    if (!readBytes(name, mib, count * sizeof(*mib)) || mib[0] != CTL_KERN)
+    if (!readBytes(name, mib, count * sizeof(*mib)))
+        return sysctl(name, count, output, length, input, inputSize);
+    if (!input && !inputSize && ((count == 2 && mib[0] == CTL_VM) ||
+        (count == 4 && mib[0] == CTL_UNSPEC && (mib[1] == InspectionOIDName || mib[1] == InspectionOIDFmt) &&
+         (mib[2] == CTL_KERN || mib[2] == CTL_HW || mib[2] == CTL_VM)))) return readMetric(mib, count, output, length);
+    if (mib[0] != CTL_KERN)
         return sysctl(name, count, output, length, input, inputSize);
     if (count == 4 && mib[1] == KERN_PROC && mib[2] == KERN_PROC_PID && mib[3] > 0 &&
         (mib[3] == LSBGuestPID() || mib[3] == LSBNativePID()) && !LSBInspectionUnsupportedPID(mib[3])) {

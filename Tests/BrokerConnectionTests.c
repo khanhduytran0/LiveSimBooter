@@ -37,6 +37,10 @@ static audit_token_t selfAudit(void) {
 
 #ifdef LSB_GUEST_RUNTIME
 #include "../Guest/libLiveSimSpawn/BrokerConnection.h"
+static mach_port_t broker;
+static mach_port_urefs_t initialReferences;
+static void seedBrokerEndpoint(void);
+
 __attribute__((constructor(100))) static void earlyBrokerCall(void) {
     xpc_object_t reply = (xpc_object_t)(uintptr_t)1;
     assert(LSBBrokerConnectionCall(MACH_PORT_NULL, NULL, &reply) == ENOTSUP && !reply);
@@ -53,8 +57,9 @@ __attribute__((constructor(100))) static void earlyBrokerCall(void) {
     unsigned char *entitlements = (unsigned char *)(uintptr_t)1;
     size = 1;
     assert(LSBTransportCopyEntitlements(&target, 16, &entitlements, &size) == ENOTSUP && !entitlements && !size);
+    // The native loader ordinarily supplies this before the first guest constructor.
+    seedBrokerEndpoint();
 }
-static mach_port_t broker;
 static mach_port_t argumentPort;
 static int argumentFD;
 static unsigned descriptorCount(void) {
@@ -67,27 +72,44 @@ static mach_port_urefs_t sendReferences(mach_port_t port) {
     assert(!mach_port_get_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND, &count));
     return count;
 }
-static void validateInheritedBrokerPort(void) {
+static void seedBrokerEndpoint(void) {
+    const char *invalid = getenv("LSB_TEST_INVALID_BROKER");
+    if (invalid) {
+        if (strcmp(invalid, "receive-only")) return;
+        mach_port_t receiveOnly;
+        assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &receiveOnly));
+        char name[16]; snprintf(name, sizeof(name), "%u", receiveOnly);
+        assert(!setenv(LSB_BROKER_PORT_ENV, name, 1));
+        return;
+    }
+    mach_port_array_t ports = NULL; mach_msg_type_number_t count = 0;
+    assert(!mach_ports_lookup(mach_task_self(), &ports, &count) && count >= 1 && MACH_PORT_VALID(ports[0]));
+    broker = ports[0];
+    for (unsigned i = 1; i < count; ++i) if (MACH_PORT_VALID(ports[i])) assert(!mach_port_deallocate(mach_task_self(), ports[i]));
+    assert(!vm_deallocate(mach_task_self(), (vm_address_t)ports, count * sizeof(*ports)));
+    initialReferences = sendReferences(broker);
+    char name[16]; snprintf(name, sizeof(name), "%u", broker);
+    assert(!setenv(LSB_BROKER_PORT_ENV, name, 1));
+}
+
+static void validateCapturedBrokerPort(void) {
     mach_port_t copy = MACH_PORT_NULL;
     assert(LSBTransportCopyBrokerPort(NULL) == EINVAL);
-    assert(!unsetenv(LSB_BROKER_PORT_ENV));
-    assert(LSBTransportCopyBrokerPort(&copy) == ENOENT && copy == MACH_PORT_NULL);
-    const char *invalid[] = {"", "0", "-1", "+1", " 1", "1x", "4294967295", "4294967296", "100000000000000000000000"};
-    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
-        assert(!setenv(LSB_BROKER_PORT_ENV, invalid[i], 1));
-        assert(LSBTransportCopyBrokerPort(&copy) == EINVAL && copy == MACH_PORT_NULL);
-    }
-    mach_port_t receiveOnly;
-    assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &receiveOnly));
-    char value[16]; snprintf(value, sizeof(value), "%u", receiveOnly);
-    assert(!setenv(LSB_BROKER_PORT_ENV, value, 1));
-    assert(LSBTransportCopyBrokerPort(&copy) == EACCES && copy == MACH_PORT_NULL);
-    assert(!mach_port_mod_refs(mach_task_self(), receiveOnly, MACH_PORT_RIGHT_RECEIVE, -1));
-    snprintf(value, sizeof(value), "%u", broker);
-    assert(!setenv(LSB_BROKER_PORT_ENV, value, 1));
     mach_port_urefs_t before = sendReferences(broker);
+    assert(before == initialReferences + 1); // The shim owns one lifetime reference before XPC starts.
+    assert(!unsetenv(LSB_BROKER_PORT_ENV));
     assert(!LSBTransportCopyBrokerPort(&copy) && copy == broker && sendReferences(broker) == before + 1);
     assert(!mach_port_deallocate(mach_task_self(), copy) && sendReferences(broker) == before);
+    // A shell can rebuild environ from an old task's exports. Even a valid local send right must not redirect the next RPC.
+    mach_port_t other;
+    assert(!mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &other));
+    assert(!mach_port_insert_right(mach_task_self(), other, other, MACH_MSG_TYPE_MAKE_SEND));
+    char name[16]; snprintf(name, sizeof(name), "%u", other);
+    assert(!setenv(LSB_BROKER_PORT_ENV, name, 1));
+    assert(!LSBTransportCopyBrokerPort(&copy) && copy == broker && sendReferences(other) == 1);
+    assert(!mach_port_deallocate(mach_task_self(), copy) && sendReferences(broker) == before);
+    assert(!mach_port_deallocate(mach_task_self(), other));
+    assert(!mach_port_mod_refs(mach_task_self(), other, MACH_PORT_RIGHT_RECEIVE, -1));
 }
 
 static void *spawnWorker(void *context) {
@@ -182,15 +204,16 @@ static void forkTransport(void) {
         xpc_release(reply); xpc_release(request);
     }
 }
-int main(void) {
+int main(int argc, char **argv) {
     alarm(30);
-    assert(!LSBRequireSingleThread()); // Native pre-handoff IPC is covered separately; guest construction has not started workers yet.
-    mach_port_array_t ports = NULL; mach_msg_type_number_t count = 0;
-    assert(!mach_ports_lookup(mach_task_self(), &ports, &count) && count >= 1 && MACH_PORT_VALID(ports[0]));
-    broker = ports[0];
-    for (unsigned i = 1; i < count; ++i) if (MACH_PORT_VALID(ports[i])) assert(!mach_port_deallocate(mach_task_self(), ports[i]));
-    assert(!vm_deallocate(mach_task_self(), (vm_address_t)ports, count * sizeof(*ports)));
-    validateInheritedBrokerPort();
+    assert(!LSBRequireSingleThread()); // Capturing a Mach reference at startup did not start an XPC worker.
+    if (argc == 2) {
+        mach_port_t copy = MACH_PORT_DEAD;
+        int error = atoi(argv[1]);
+        assert(error && LSBTransportCopyBrokerPort(&copy) == error && copy == MACH_PORT_NULL);
+        return 0;
+    }
+    validateCapturedBrokerPort();
     mach_port_urefs_t inheritedReferences = sendReferences(broker);
     assert(!LSBTransportKill(42, 0)); // Lazy initialization through the actual production callBroker path.
     // The endpoint constructor consumes its input reference. A separate copy must keep our inherited caller reference alive.
@@ -211,7 +234,7 @@ int main(void) {
     assert(sendReferences(argumentPort) == 1);
     mach_port_t task = MACH_PORT_NULL;
     assert(!LSBTransportCopyProcessTask(42, &task) && MACH_PORT_VALID(task));
-    audit_token_t returned = {{0}}; count = TASK_AUDIT_TOKEN_COUNT;
+    audit_token_t returned = {{0}}; mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
     assert(!task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&returned, &count));
     assert(!memcmp(&returned, &brokerAudit, sizeof(returned)) && !mach_port_deallocate(mach_task_self(), task));
     malformedRequests();
@@ -306,8 +329,25 @@ static void receiveRequest(xpc_object_t event, xpc_connection_t peer, dispatch_q
     }
     LSBTransportDisposeMessage(message); free(message);
 }
+static void testInvalidBrokerStarts(char *client) {
+    const char *invalid[] = {NULL, "", "0", "-1", "+1", " 1", "1x", "4294967295", "4294967296", "100000000000000000000000", "receive-only"};
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        char value[64], error[16];
+        bool receiveOnly = invalid[i] && !strcmp(invalid[i], "receive-only");
+        snprintf(value, sizeof(value), LSB_BROKER_PORT_ENV "=%s", invalid[i] ? invalid[i] : "");
+        snprintf(error, sizeof(error), "%d", !invalid[i] ? ENOENT : receiveOnly ? EACCES : EINVAL);
+        char *env[] = {receiveOnly ? "LSB_TEST_INVALID_BROKER=receive-only" : "LSB_TEST_INVALID_BROKER=1", invalid[i] ? value : NULL, NULL};
+        char *args[] = {client, error, NULL};
+        pid_t child;
+        assert(!posix_spawn(&child, client, NULL, NULL, args, env));
+        int status;
+        assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
+    }
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2); alarm(40);
+    testInvalidBrokerStarts(argv[1]);
     assert(!task_name_for_pid(mach_task_self(), getpid(), &taskName));
     dispatch_queue_t queue = dispatch_queue_create("test.broker.connection", DISPATCH_QUEUE_SERIAL);
     xpc_connection_t listener = xpc_connection_create(NULL, queue); assert(listener);

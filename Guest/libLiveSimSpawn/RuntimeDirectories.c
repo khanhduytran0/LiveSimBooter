@@ -1,6 +1,7 @@
 #include "RuntimeDirectories.h"
 #include "../../ProcessSupport/GuestExecutablePath.h"
 
+#include <mach-o/dyld.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
 
@@ -41,6 +42,20 @@ int LSBGetRuntimeDirectories(const LSBGuestRuntimeDirectories **result) {
     if (!atomic_load_explicit(&directoriesReady, memory_order_acquire)) return EACCES;
     if (directoriesError) return directoriesError;
     *result = &directories;
+    return 0;
+}
+
+int LSBProjectBootstrapSystemVersion(const char **path, char translated[PATH_MAX]) {
+    const LSBGuestRuntimeDirectories *dirs;
+    if (LSBGetRuntimeDirectories(&dirs) || !dirs->bootstrapLength) return 0;
+    char executable[PATH_MAX];
+    uint32_t capacity = sizeof(executable);
+    if (_NSGetExecutablePath(executable, &capacity) || !LSBGuestPathInBootstrap(dirs->runtime, executable)) return 0;
+    size_t rootBytes = strlen(dirs->runtime);
+    if (rootBytes + sizeof(LSB_SYSTEM_VERSION_PATH) > PATH_MAX) return ENAMETOOLONG;
+    memcpy(translated, dirs->runtime, rootBytes);
+    memcpy(translated + rootBytes, LSB_SYSTEM_VERSION_PATH, sizeof(LSB_SYSTEM_VERSION_PATH));
+    *path = translated;
     return 0;
 }
 

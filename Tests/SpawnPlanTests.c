@@ -648,6 +648,8 @@ static void execNeverReturns(void) {
 
 static void directExecve(void) {
     CHECK(!setenv("DYLD_ROOT_PATH", workingDirectory, 1) && !chdir(workingDirectory));
+    LSBResetExecutableAccessForTesting();
+    CHECK(!unsetenv("DYLD_ROOT_PATH")); // exec still uses the runtime selected at guest startup if the caller rebuilds environ.
     char *argv[] = {"custom-name", "two words", NULL};
     CHECK(LSBExecve("", argv, NULL) == -1 && errno == ENOENT);
     CHECK(LSBExecve("/missing", argv, NULL) == -1 && errno == ENOENT);

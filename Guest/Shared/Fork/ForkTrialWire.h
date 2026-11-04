@@ -12,8 +12,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-// In v21 the donor guarantees that a TrialResumeGuest stack range covers its full pthread stack.
-enum { TrialWireVersion = 21, TrialMaxDepth = 4, TrialSlicedStack = 1, TrialRestoreAllocator = 4, TrialResumeGuest = 8, TrialVfork = 16,
+// A general resume offers the full pthread stack. In v22 descriptor numbers may exceed the packet's limit on the count of rights.
+enum { TrialWireVersion = 22, TrialMaxDepth = 4, TrialSlicedStack = 1, TrialRestoreAllocator = 4, TrialResumeGuest = 8, TrialVfork = 16,
        TrialStackHeadroom = 256 * 1024, TrialWitnessSize = 128 };
 typedef enum { TrialSnapshot, TrialDF, TrialExec, TrialShell } TrialMode;
 

@@ -23,6 +23,15 @@ static mode_t expectedMode;
 static int expectedFlags;
 static struct stat *expectedStatus;
 static bool realFilesystem;
+static const char *reportedExecutable;
+static unsigned executableQueries;
+
+int _NSGetExecutablePath(char *buffer, uint32_t *size) {
+    ++executableQueries;
+    if (!reportedExecutable || strlen(reportedExecutable) >= *size) return -1;
+    strcpy(buffer, reportedExecutable);
+    return 0;
+}
 
 static void checkPath(const char *path, const char *expected) {
     assert((!path && !expected) || (path && expected && !strcmp(path, expected)));
@@ -370,6 +379,45 @@ static void testFilesystem(void) {
     startWithLaunchdSetting(LSB_SIMULATOR_LAUNCHD_ENV, NULL);
 }
 
+static void testBootstrapSystemVersion(const char *root, const char *data) {
+    char executable[PATH_MAX], version[PATH_MAX];
+    snprintf(executable, sizeof(executable), "%s/var/jb/usr/bin/gawk", data);
+    snprintf(version, sizeof(version), "%s%s", root, LSB_SYSTEM_VERSION_PATH);
+    reportedExecutable = executable;
+    expectedFlags = O_RDONLY | O_CLOEXEC;
+    expectedPath = version;
+    assert(LSBLaunchdOpen(LSB_SYSTEM_VERSION_PATH, expectedFlags) == -1 && errno == EACCES);
+    expectedFileMode = "rb";
+    assert(!LSBLaunchdFopen(LSB_SYSTEM_VERSION_PATH, expectedFileMode) && errno == EACCES);
+    unsigned reads = executableQueries;
+    expectedPath = LSB_SYSTEM_VERSION_PATH;
+    const int writes[] = {O_RDONLY | O_TRUNC, O_WRONLY, O_RDWR, O_RDONLY | O_APPEND};
+    for (size_t i = 0; i < sizeof(writes)/sizeof(*writes); ++i) {
+        expectedFlags = writes[i];
+        assert(LSBLaunchdOpen(LSB_SYSTEM_VERSION_PATH, expectedFlags) == -1 && errno == EACCES);
+    }
+    expectedFileMode = "r+b";
+    assert(!LSBLaunchdFopen(LSB_SYSTEM_VERSION_PATH, expectedFileMode));
+    expectedFlags = O_RDONLY;
+    expectedPath = LSB_SYSTEM_VERSION_PATH ".other";
+    assert(LSBLaunchdOpen(expectedPath, expectedFlags) == -1 && executableQueries == reads);
+    reportedExecutable = "/System/Library/TestExecutable";
+    expectedPath = LSB_SYSTEM_VERSION_PATH;
+    assert(LSBLaunchdOpen(expectedPath, expectedFlags) == -1 && executableQueries == reads + 1);
+
+    // Exercise libSystem's unlimited-streams symbol through the same ABI imported by Procursus gawk.
+    reportedExecutable = executable;
+    assert(!mkdir("RuntimeRoot/System", 0700) && !mkdir("RuntimeRoot/System/Library", 0700) && !mkdir("RuntimeRoot/System/Library/CoreServices", 0700));
+    FILE *f = fopen(version, "w");
+    assert(f && fputs("guest version\n", f) >= 0 && !fclose(f));
+    f = LSBDpkgConfigFopen(LSB_SYSTEM_VERSION_PATH, "r");
+    char text[32];
+    assert(f && fgets(text, sizeof(text), f) && !strcmp(text, "guest version\n") && !fclose(f));
+    assert(!unlink(version) && !LSBDpkgConfigFopen(LSB_SYSTEM_VERSION_PATH, "r") && errno == ENOENT);
+    assert(!rmdir("RuntimeRoot/System/Library/CoreServices") && !rmdir("RuntimeRoot/System/Library") && !rmdir("RuntimeRoot/System"));
+    reportedExecutable = NULL;
+}
+
 static void testBootstrapStat(void) {
     char temporary[] = "/tmp/LSB-bootstrap-stat.XXXXXX", cwd[PATH_MAX], root[PATH_MAX], data[PATH_MAX];
     assert(getcwd(cwd, sizeof(cwd)) && mkdtemp(temporary) && !chdir(temporary));
@@ -385,7 +433,14 @@ static void testBootstrapStat(void) {
     assert(!LSBLaunchdStat("/var/jb/test-command", &guest) && source.st_dev == guest.st_dev && source.st_ino == guest.st_ino);
     assert(!LSBLaunchdStat("/private/var/jb/test-command", &guest) && source.st_dev == guest.st_dev && source.st_ino == guest.st_ino);
     assert(LSBLaunchdStat("/var/jb/missing-command", &guest) == -1 && errno == ENOENT);
+    assert(!symlink("/var/jb/test-command", "data/var/jb/alternative") && !symlink("/var/jb/alternative", "data/var/jb/alias"));
+    char alias[PATH_MAX];
+    assert(snprintf(alias, sizeof(alias), "%s/var/jb/alias", data) > 0);
+    assert(!LSBLaunchdStat(alias, &guest) && source.st_dev == guest.st_dev && source.st_ino == guest.st_ino);
+    assert(!unlink("data/var/jb/alternative") && LSBLaunchdStat(alias, &guest) == -1 && errno == ENOENT);
+    assert(!unlink("data/var/jb/alias"));
     realFilesystem = false;
+    testBootstrapSystemVersion(root, data);
     assert(!unsetenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY"));
     assert(!unlink("data/var/jb/test-command") && !rmdir("data/var/jb") && !rmdir("data/var") && !rmdir("data") && !rmdir("RuntimeRoot"));
     assert(!chdir(cwd) && !rmdir(temporary));

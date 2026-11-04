@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import plistlib
 import pwd
+import re
 import stat
 import subprocess
 import sys
@@ -14,6 +15,14 @@ import tempfile
 
 APT_FILES = {"usr/lib/libapt-pkg.6.0.0.dylib", "usr/libexec/apt/methods/gpgv"}
 BUILD = "23A343"
+# The pinned 1900 bootstrap has no retained package depending on these four. Verify its status and ownership lists before pruning a fresh copy.
+STOCK_STATUS_SHA256 = "d351eb63d0f58fd8eb87f2c9bd9e595edb0c19ed58a1c12dd96b3e2a053cc62e"
+CLI_OMISSIONS = {
+    "essential": "0d5d8a16131f581e25e58a1f04788f1f1d8cb95f287c9bacd2124733242c46df",
+    "shshd": "39db381753dfd0b0c5ce8b3e1adfb9c7e2e2b39042b6bdb6ce418105129fd87a",
+    "libdimentio0": "65d17c9821499a44fa1a34eebfc549bffd70e71502cf3405295c591dcaf01906",
+    "libkrw0": "8f4d48b720837de72c791dd763c2f3db5f5a8182c8078b153eb9402337e0834c",
+}
 
 
 def require(condition, message):
@@ -98,6 +107,80 @@ def stock_images(stage, staged):
     return stock
 
 
+def configure_fresh_bootstrap(root, staged):
+    with (root / "System/Library/CoreServices/SystemVersion.plist").open("rb") as source:
+        runtime = plistlib.load(source)
+    version = runtime.get("ProductVersion")
+    require(runtime.get("ProductBuildVersion") == BUILD and isinstance(version, str) and re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,2}", version),
+            "Expected the pinned guest firmware version")
+    db = staged / "Library/dpkg"
+    info, status = db / "info", db / "status"
+    require(real_directory(info) and sha256(status) == STOCK_STATUS_SHA256, "Fresh installation requires the original 1900 package database")
+    require(real_directory(db / "updates") and not any((db / "updates").iterdir()) and
+            not os.path.lexists(db / "status-old") and not os.path.lexists(db / "triggers"),
+            "Unexpected dpkg transaction in prepared bootstrap")
+    declaration = info / "uikittools.triggers"
+    require(list(info.glob("*.triggers")) == [declaration] and declaration.resolve() == declaration and declaration.is_file() and
+            declaration.read_bytes() == b"interest /var/jb/Applications\n", "Unexpected 1900 package trigger declarations")
+    apps = staged / "Applications"
+    require(not os.path.lexists(apps) or (real_directory(apps) and not any(apps.iterdir())), "Expected an empty fresh package Applications directory")
+    cache = staged / "var/cache/apt"
+    require(real_directory(cache) and not any(os.path.lexists(cache / name) for name in ("pkgcache.bin", "srcpkgcache.bin")),
+            "Expected a fresh APT cache")
+    apt = staged / "etc/apt"
+    require(real_directory(apt), "Expected a real guest APT configuration directory")
+    parts = apt / "apt.conf.d"
+    parts.mkdir(exist_ok=True)
+    require(real_directory(parts), "Redirected guest APT configuration directory")
+    # APT would otherwise reintroduce the omitted Essential metapackage during a full upgrade.
+    with (parts / "50livesimbooter-cli").open("x") as config:
+        config.write('pkgCacheGen::Essential "installed";\n')
+
+    omitted, retained = set(), set()
+    for listing in info.glob("*.list"):
+        require(listing.resolve() == listing and listing.is_file(), f"Redirected package file list: {listing.name}")
+        paths = listing.read_text().splitlines()
+        if listing.stem in CLI_OMISSIONS:
+            require(sha256(listing) == CLI_OMISSIONS[listing.stem], f"Unexpected stock file list: {listing.name}")
+            omitted.update(paths)
+        else:
+            retained.update(paths)
+    require(all((info / (n + ".list")).is_file() for n in CLI_OMISSIONS), "Missing stock package file list")
+    for name in sorted(omitted - {"/.", "/var", "/var/jb"}, key=lambda item: -item.count("/")):
+        relative = name[len("/var/jb/"):]
+        require(name.startswith("/var/jb/") and not any(p in ("", ".", "..") for p in relative.split("/")), f"Invalid package path: {name}")
+        path = staged / relative
+        require(path.resolve() == path, f"Redirected package path: {name}")
+        if path.is_dir():
+            if name not in retained:
+                path.rmdir()
+        else:
+            require(path.is_file() and name not in retained, f"Missing or shared package file: {name}")
+            path.unlink()
+    for package in CLI_OMISSIONS:
+        for metadata in info.glob(package + ".*"):
+            require(metadata.resolve() == metadata and metadata.is_file(), f"Invalid package metadata: {metadata.name}")
+            metadata.unlink()
+    # darwintools generates this zero-payload package and /. file list directly in dpkg's database.
+    # Read the guest OS version instead of running its native-path firmware or user-account setup scripts.
+    omitted_headers = {"Package: " + name for name in CLI_OMISSIONS}
+    records = [p for p in status.read_text().strip().split("\n\n") if p.partition("\n")[0] not in omitted_headers]
+    records.append(f"Package: firmware\nStatus: install ok installed\nEssential: yes\nPriority: required\nSection: System\n"
+                   f"Architecture: all\nVersion: {version}\nInstalled-Size: 0\nMaintainer: LiveSimBooter <guest@localhost>\nDescription: Simulator OS firmware")
+    with (info / "firmware.list").open("x") as listing:
+        listing.write("/.\n")
+    (info / "firmware.md5sums").touch(exist_ok=False)
+    status.unlink()
+    with status.open("x") as output:
+        output.write("\n\n".join(records) + "\n\n")
+    # dpkg 1.22.6 trig_incorporate() treats a missing Unincorp as a pre-trigger database and activates all declared interests.
+    # With no package apps to register, record the existing file interest and an empty deferred queue.
+    triggers = db / "triggers"
+    triggers.mkdir()
+    (triggers / "File").write_bytes(b"/var/jb/Applications uikittools\n")
+    (triggers / "Unincorp").touch(exist_ok=False)
+
+
 def plan_patch(staged, jb, stock):
     changes, preserved = [], 0
     for name, original in stock.items():
@@ -140,6 +223,8 @@ def activate(root, stage, expected_mode):
     changes, preserved = [], 0
     if mode == "patch":
         changes, preserved = plan_patch(staged, jb, stock)
+    else:
+        configure_fresh_bootstrap(root, staged)
     backup = Path(tempfile.mkdtemp(dir=root.parent, prefix="procursus-backup-")) if changes else None
     applied, added_alias = [], False
     try:

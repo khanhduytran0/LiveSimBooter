@@ -16,6 +16,12 @@ static BashWordList *wordList(const char *text, BashWordList *next) {
 }
 
 int main(void) {
+    assert(bashTerminalInvocation((char *[]){"bash", NULL}));
+    assert(bashTerminalInvocation((char *[]){"-bash", "--noprofile", "--norc", "-i", NULL}));
+    assert(!bashTerminalInvocation((char *[]){"bash", "/var/jb/usr/bin/script", "-i", NULL}));
+    assert(!bashTerminalInvocation((char *[]){"bash", "--rcfile", "file", "-O", "extglob", "-xc", "echo hi", NULL}));
+    assert(!bashTerminalInvocation((char *[]){"bash", "--", "-i", NULL}));
+    assert(bashTerminalInvocation((char *[]){"bash", "-s", "argument", NULL}));
     uint8_t *image = bashFixture();
     const uintptr_t header = (uintptr_t)image;
     struct uuid_command *id = (void *)(image + sizeof(struct mach_header_64));

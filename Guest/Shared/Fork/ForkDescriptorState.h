@@ -183,7 +183,7 @@ static inline int forkDescriptorList(pid_t pid, int socket, int wake, int watch,
         if (detail.info.status & 8) continue; // FP_CLOFORK is not reported by F_GETFD on 23B50.
         if ((detail.info.status & 4) || detail.info.guards) return ENOTSUP; // Sending a guarded fd can terminate the donor.
         if (flavor != 1 && flavor != 3 && flavor != 6) return ENOTSUP;
-        if (fd >= LSB_MAX_FDS || packet->count >= LSB_MAX_FDS) return E2BIG;
+        if (fd > UINT16_MAX || packet->count >= LSB_MAX_FDS) return E2BIG;
         if (flavor == 1) {
             struct stat st;
             if (forkFDOperations.statFD(fd, &st)) return errno;
@@ -312,17 +312,27 @@ static inline int forkDescriptorReceiveReport(int socket, int wake, int watch, u
     if (!error) error = forkDescriptorBytes(socket, &packet, sizeof(packet), false);
     if (!error && (packet.magic != ForkSDRightsMagic || packet.count != count)) error = EPROTO;
     unsigned stdioToClose = bootstrapStdioMask;
-    int stagedMinimum = !error && count ? (int)packet.entries[count - 1].number + 1 : 3;
     for (unsigned i = 0; !error && i < count; ++i) {
         int target = packet.entries[i].number;
-        if (target >= LSB_MAX_FDS || (i && packet.entries[i-1].number >= target) || (packet.entries[i].flags & ~FD_CLOEXEC)) { error = EPROTO; break; }
+        if ((i && packet.entries[i-1].number >= target) || (packet.entries[i].flags & ~FD_CLOEXEC)) { error = EPROTO; break; }
         if (target == socket || target == wake || target == watch) {
             forkDescriptorDescribe(issue, target == socket ? ForkFDControlCollision : target == wake ? ForkFDWakeCollision : ForkFDWatchCollision, target);
             error = EBUSY; break;
         }
         if (target <= 2) stdioToClose &= ~(1u << target);
-        staged[i] = fcntl(received[i], F_DUPFD_CLOEXEC, stagedMinimum);
-        if (staged[i] < 0) { error = errno; forkDescriptorDescribe(issue, ForkFDStage, received[i]); }
+    }
+    // A shell can keep its script at the last allowed fd. Stage rights in unused holes without occupying any replay destination.
+    unsigned targetIndex = 0;
+    int minimum = 3;
+    for (unsigned i = 0; !error && i < count;) {
+        int fd = fcntl(received[i], F_DUPFD_CLOEXEC, minimum);
+        if (fd < 0) { error = errno; forkDescriptorDescribe(issue, ForkFDStage, received[i]); break; }
+        minimum = fd + 1;
+        while (targetIndex < count && packet.entries[targetIndex].number < fd) ++targetIndex;
+        if (targetIndex < count && packet.entries[targetIndex].number == fd) {
+            close(fd);
+            while (++targetIndex < count && packet.entries[targetIndex].number == minimum) ++minimum;
+        } else staged[i++] = fd;
     }
     for (unsigned i = 0; i < count; ++i) close(received[i]);
     for (unsigned i = 0; !error && i < count; ++i) {

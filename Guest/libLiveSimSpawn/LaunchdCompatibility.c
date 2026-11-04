@@ -1,5 +1,6 @@
 #include "LaunchdCompatibility.h"
 #include "ExecutableAccess.h"
+#include "RuntimeDirectories.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -138,6 +139,8 @@ int LSBLaunchdMkdir(const char *path, mode_t mode) {
 int LSBLaunchdOpen(const char *path, int flags, ...) {
     char translated[PATH_MAX];
     int error = launchdStatePath(path, translated, &path);
+    if (!error && !(flags & (O_ACCMODE | O_CREAT | O_TRUNC | O_APPEND | O_EXCL | O_EVTONLY | O_SYMLINK)) && LSBIsSystemVersionPath(path))
+        error = LSBProjectBootstrapSystemVersion(&path, translated);
     if (error) { errno = error; return -1; }
     if (!(flags & O_CREAT)) return open(path, flags);
     va_list arguments;
@@ -150,6 +153,7 @@ int LSBLaunchdOpen(const char *path, int flags, ...) {
 FILE *LSBLaunchdFopen(const char *path, const char *mode) {
     char translated[PATH_MAX];
     int error = launchdStatePath(path, translated, &path);
+    if (!error && LSBIsSystemVersionFopen(path, mode)) error = LSBProjectBootstrapSystemVersion(&path, translated);
     if (error) { errno = error; return NULL; }
     return fopen(path, mode);
 }
@@ -172,8 +176,8 @@ int LSBLaunchdUnlink(const char *path) {
 int LSBLaunchdStat(const char *path, struct stat *status) {
     char translated[PATH_MAX];
     int error = launchdStatePath(path, translated, &path);
-    // Fish calls stat after access(X_OK) while resolving each command. Both must inspect the same guest file.
-    if (!error) error = LSBTranslateBootstrapAccessPath(&path, translated, false);
+    // Shells stat physical PATH entries too. An alternatives link there may point back into the guest's virtual /var/jb.
+    if (!error && path && path[0] == '/') error = LSBResolveBootstrapAccess(LSBGuestVirtualBootstrapPath(path), &path, translated, false);
     if (error) { errno = error; return -1; }
     return stat(path, status);
 }

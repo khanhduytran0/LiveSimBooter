@@ -1,11 +1,13 @@
 #include "BrokerConnection.h"
 #include "../../ProcessSupport/PrivateXPC.h"
+#include "../../ProcessSupport/SpawnTransport.h"
 
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 static atomic_bool guestInitialized;
@@ -13,15 +15,44 @@ static atomic_int connectionError;
 static pthread_mutex_t connectionLock = PTHREAD_MUTEX_INITIALIZER;
 static xpc_connection_t brokerConnection;
 static mach_port_t brokerEndpoint;
+static int brokerEndpointError;
 static _Thread_local bool creatingConnection;
+
+static int captureBrokerEndpoint(const char *text) {
+    if (!text) return ENOENT;
+    uint64_t value = 0;
+    for (unsigned i = 0; text[i]; ++i) {
+        if (i >= 10 || text[i] < '0' || text[i] > '9') return EINVAL;
+        value = value * 10 + (unsigned)(text[i] - '0');
+        if (value >= UINT32_MAX) return EINVAL;
+    }
+    if (!value) return EINVAL;
+    // Taking a send reference validates its right type and pins the task-local name for the lifetime of the guest shim.
+    mach_port_t port = (mach_port_t)value;
+    if (mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND, 1)) return EACCES;
+    brokerEndpoint = port;
+    return 0;
+}
 
 // libSystem initialization precedes inserted-dylib constructors. No native XPC object is carried into this image.
 __attribute__((constructor(101))) static void enableBrokerConnection(void) {
+    // A resumed shell can rebuild its exported environment from copied donor state, including another task's Mach name.
+    brokerEndpointError = captureBrokerEndpoint(getenv(LSB_BROKER_PORT_ENV));
     atomic_store_explicit(&guestInitialized, true, memory_order_release);
 }
 
 bool LSBBrokerConnectionIsReady(void) {
     return atomic_load_explicit(&guestInitialized, memory_order_acquire);
+}
+
+int LSBBrokerConnectionCopyPort(mach_port_t *port) {
+    if (!port) return EINVAL;
+    *port = MACH_PORT_NULL;
+    if (!LSBBrokerConnectionIsReady()) return ENOTSUP;
+    if (brokerEndpointError) return brokerEndpointError;
+    if (mach_port_mod_refs(mach_task_self(), brokerEndpoint, MACH_PORT_RIGHT_SEND, 1)) return EACCES;
+    *port = brokerEndpoint;
+    return 0;
 }
 
 static int copyConnection(mach_port_t port, xpc_connection_t *result) {
@@ -31,7 +62,6 @@ static int copyConnection(mach_port_t port, xpc_connection_t *result) {
     int error = pthread_mutex_lock(&connectionLock);
     if (error) { creatingConnection = false; return error; }
     error = atomic_load_explicit(&connectionError, memory_order_acquire);
-    if (!error && brokerConnection && port != brokerEndpoint) error = EINVAL;
     if (!error && !brokerConnection) {
         // The private endpoint constructor consumes its send reference; our caller retains ownership of the supplied one.
         if (mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND, 1)) error = EACCES;
@@ -49,7 +79,6 @@ static int copyConnection(mach_port_t port, xpc_connection_t *result) {
                 }
             });
             // Publish exactly one connection. Guest dispatch owns its event handling; no lock remains held during a synchronous request.
-            brokerEndpoint = port;
             brokerConnection = connection;
             xpc_connection_activate(connection);
         }
@@ -65,7 +94,8 @@ int LSBBrokerConnectionCall(mach_port_t port, xpc_object_t request, xpc_object_t
     *reply = NULL;
     // Entitlement interposers can be reached before guest TLS is usable. Keep this guard ahead of pthread/XPC calls.
     if (!LSBBrokerConnectionIsReady()) return ENOTSUP;
-    if (!MACH_PORT_VALID(port) || !request || xpc_get_type(request) != XPC_TYPE_DICTIONARY) return EINVAL;
+    if (brokerEndpointError) return brokerEndpointError;
+    if (port != brokerEndpoint || !request || xpc_get_type(request) != XPC_TYPE_DICTIONARY) return EINVAL;
     xpc_connection_t connection = NULL;
     int error = copyConnection(port, &connection);
     if (error) return error;

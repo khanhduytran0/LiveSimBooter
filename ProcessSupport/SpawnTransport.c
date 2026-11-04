@@ -305,25 +305,7 @@ int LSBTransportCopyBrokerPort(mach_port_t *port) {
     if (!port) return EINVAL;
     *port = MACH_PORT_NULL;
 #if defined(LSB_GUEST_RUNTIME)
-    if (!LSBBrokerConnectionIsReady()) return ENOTSUP;
-    // This is the connection endpoint supplied by native CHECKIN, not the native startup pipe.
-    // Its owned send reference survives the in-process dyld handoff without carrying a native XPC object.
-    const char *text = getenv(LSB_BROKER_PORT_ENV);
-    if (!text) return ENOENT;
-    uint64_t value = 0;
-    if (!*text) return EINVAL;
-    for (unsigned i = 0; text[i]; ++i) {
-        if (i >= 10 || text[i] < '0' || text[i] > '9') return EINVAL;
-        value = value * 10 + (unsigned)(text[i] - '0');
-        if (value >= UINT32_MAX) return EINVAL;
-    }
-    if (!value) return EINVAL;
-    mach_port_t candidate = (mach_port_t)value;
-    mach_port_type_t type = 0;
-    if (mach_port_type(mach_task_self(), candidate, &type) || !(type & MACH_PORT_TYPE_SEND)) return EACCES;
-    if (mach_port_mod_refs(mach_task_self(), candidate, MACH_PORT_RIGHT_SEND, 1)) return EACCES;
-    *port = candidate;
-    return 0;
+    return LSBBrokerConnectionCopyPort(port);
 #elif defined(LSB_TRANSPORT_TESTING)
     extern int LSBTestCopyBrokerPort(mach_port_t *port);
     return LSBTestCopyBrokerPort(port);

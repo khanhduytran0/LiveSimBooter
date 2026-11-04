@@ -37,7 +37,8 @@ audited against that runtime's host-support libkernel. Recheck those layouts bef
    restores its prior thread exception handler before simulator initialization. Native Metal roles skip this exchange; see
    [task-port capture and authorization](process-inspection.md#managed-task-ports).
 6. The authenticated check-in also supplies a separate guest broker connection endpoint for simulator roles only. The native child
-   passes that raw send right's numeric name in `LSB_BROKER_PORT`, replacing any inherited value. It separately retains the native
+   passes that raw send right's numeric name in `LSB_BROKER_PORT`, replacing any inherited value. The guest shim retains a reference in
+   its first constructor. A shell that later rebuilds its environment cannot switch RPCs to a port name inherited from its fork donor. The native child separately retains the native
    pipe's broker right through READY, even after installing simulator bootstrap ports. READY reports preparation success or errno;
    the native pipe right and all native XPC objects are then released. The child checks its thread count, performs the fresh-TSD
    handoff, and enters dyld_sim. The default retains the native cache with hardware workqueue redirection; diagnostic detachment
@@ -382,13 +383,15 @@ also have logical sessions and process groups. The opt-in Bash fork trial suppor
 
 [ExecutableAccess.c](../Guest/libLiveSimSpawn/ExecutableAccess.c) interposes `access` and `faccessat` for the guest's executable preflight.
 It first performs the native query. Only an `EPERM` result for a valid mode containing `X_OK` can use the fallback: the
-canonical file must be strictly inside canonical `DYLD_ROOT_PATH`, be a readable regular plain-arm64 `MH_EXECUTE` with
-`MH_PIE` and bounded load commands, and have the applicable owner/group/other execute bit. `access` uses real IDs;
+canonical file must be in an allowed guest executable location, be a readable regular plain-arm64 `MH_EXECUTE` with
+`MH_PIE` and bounded load commands, and have the applicable owner/group/other execute bit. The Procursus bootstrap also
+accepts executable scripts with a bounded shebang and an absolute interpreter path. The spawn plan runs the guest interpreter
+with the canonical script path and the caller's remaining arguments. `access` uses real IDs;
 `faccessat` with `AT_EACCESS` uses effective IDs. Supplementary groups are included, and native read/write checks remain
 required for the requested mode, with readability also required by the loader.
 
 The `faccessat` fallback supports absolute paths or paths relative to `AT_FDCWD`, with flags 0 or `AT_EACCESS`. Unsupported
-relative directory FDs/flags, other errors, paths outside RuntimeRoot, escaping symlinks, scripts, dylibs, and ineligible
+relative directory FDs/flags, other errors, paths outside the allowed roots, escaping symlinks, scripts outside the bootstrap, dylibs, and ineligible
 permissions retain the original failure. This supplies executable preflight for manual loading; it does not approve native
 exec or skip the broker/loader's subsequent image and code-signature validation. The [unmodified Fish test](fish.md) passed
 with these runtime checks and the accepted standard wait options; general filesystem-path virtualization is still absent.

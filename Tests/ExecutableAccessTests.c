@@ -1,5 +1,3 @@
-#include "../Guest/libLiveSimSpawn/ExecutableAccess.h"
-
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -225,6 +223,54 @@ static void testDpkgConfig(const char *jb, const char *outside) {
     assert(!realpathCalls && !getenvCalls);
 }
 
+static void writeScript(const char *path, const char *contents) {
+    FILE *f = fopen(path, "w");
+    assert(f && fputs(contents, f) >= 0 && !fclose(f) && !chmod(path, 0755));
+}
+
+static void testBootstrapScripts(const char *root, const char *jb, const struct mach_header_64 *header) {
+    char script[PATH_MAX], interpreter[PATH_MAX], expected[PATH_MAX], argument[PATH_MAX], usr[PATH_MAX], bin[PATH_MAX];
+    snprintf(script, sizeof(script), "%s/bin/report", jb);
+    snprintf(usr, sizeof(usr), "%s/usr", jb); snprintf(bin, sizeof(bin), "%s/bin", usr);
+    assert(!mkdir(usr, 0755) && !mkdir(bin, 0755));
+    snprintf(interpreter, sizeof(interpreter), "%s/env", bin); writeImage(interpreter, header);
+    writeScript(script, "#! \t/usr/bin/env  bash\t-u # comment\ntrue\n");
+    assert(realpath(script, argument) && realpath(interpreter, expected));
+    reset(); assert(!LSBAccess(script, X_OK) && !LSBFAccessAt(AT_FDCWD, "/var/jb/bin/report", X_OK, AT_EACCESS));
+    LSBSpawnPlan original = {.version = LSB_PLAN_VERSION, .argc = 2, .envc = 1};
+    assert(!LSBPlanAddString(&original, "/var/jb/bin/report", &original.path) && !LSBPlanAddString(&original, root, &original.cwd));
+    assert(!LSBPlanAddString(&original, "arbitrary argv zero", original.argv) && !LSBPlanAddString(&original, "arg 1", original.argv + 1));
+    assert(!LSBPlanAddString(&original, "FOO=bar", original.envp));
+    LSBSpawnPlan plan = original;
+    char alias[PATH_MAX];
+    snprintf(alias, sizeof(alias), "%s/env-alias", bin);
+    assert(!symlink("/var/jb/usr/bin/env", alias) && !LSBPlanAddString(&plan, alias, &plan.path) && !LSBProjectBootstrapScript(&plan));
+    assert(plan.argc == 2 && !strcmp(plan.strings + plan.argv[0], "arbitrary argv zero") && !strcmp(plan.strings + plan.path, expected));
+    plan = original;
+    assert(!LSBProjectBootstrapScript(&plan) && !LSBValidateSpawnPlan(&plan) && plan.argc == 5 && !strcmp(plan.strings + plan.path, expected));
+    const char *args[] = {"/usr/bin/env", "bash", "-u", argument, "arg 1"};
+    for (unsigned i = 0; i < plan.argc; ++i) assert(!strcmp(plan.strings + plan.argv[i], args[i]));
+    assert(plan.envc == 1 && !strcmp(plan.strings + plan.envp[0], "FOO=bar"));
+    char runtimeUsr[PATH_MAX], runtimeBin[PATH_MAX], runtimeEnv[PATH_MAX];
+    snprintf(runtimeUsr, sizeof(runtimeUsr), "%s/usr", root); snprintf(runtimeBin, sizeof(runtimeBin), "%s/bin", runtimeUsr);
+    snprintf(runtimeEnv, sizeof(runtimeEnv), "%s/env", runtimeBin);
+    assert(!mkdir(runtimeUsr, 0755) && !mkdir(runtimeBin, 0755)); writeImage(runtimeEnv, header);
+    plan = original; assert(!LSBProjectBootstrapScript(&plan) && realpath(runtimeEnv, expected) && !strcmp(plan.strings + plan.path, expected));
+    writeScript(runtimeEnv, "#!/bin/other\n"); expectDenied(runtimeEnv); // Script treatment is confined to the guest bootstrap.
+    assert(!unlink(runtimeEnv) && !rmdir(runtimeBin) && !rmdir(runtimeUsr));
+    plan = original; plan.argc = LSB_MAX_VECTOR; assert(LSBProjectBootstrapScript(&plan) == E2BIG);
+    plan = original; assert(!chmod(script, 0644)); expectDenied(script); assert(LSBProjectBootstrapScript(&plan) == EACCES);
+    writeScript(script, "#!/bin/other\n"); assert(!LSBProjectBootstrapScript(&plan) && !LSBValidateSpawnPlan(&plan));
+    snprintf(interpreter, sizeof(interpreter), "%s/bin/other", root);
+    assert(realpath(interpreter, expected) && !strcmp(plan.strings + plan.path, expected));
+    plan = original; writeScript(script, "#!/bin/no-such-interpreter\n"); assert(LSBProjectBootstrapScript(&plan) == ENOENT);
+    writeScript(script, "#!bash\n"); expectDenied(script); assert(LSBProjectBootstrapScript(&plan) == ENOEXEC);
+    writeScript(script, "#!/bin/other"); expectDenied(script); assert(LSBProjectBootstrapScript(&plan) == ENOEXEC);
+    char longLine[LSBShebangBytes + 20];
+    memset(longLine, 'x', sizeof(longLine)); memcpy(longLine, "#!/", 3); longLine[sizeof(longLine)-2] = '\n'; longLine[sizeof(longLine)-1] = 0;
+    writeScript(script, longLine); expectDenied(script); assert(LSBProjectBootstrapScript(&plan) == ENOEXEC);
+}
+
 static void testBootstrap(const char *base, const char *data, const struct mach_header_64 *header) {
     char var[PATH_MAX], jb[PATH_MAX], bin[PATH_MAX], image[PATH_MAX], link[PATH_MAX], systemImage[PATH_MAX], expected[PATH_MAX];
     snprintf(var, sizeof(var), "%s/var", data);
@@ -244,13 +290,19 @@ static void testBootstrap(const char *base, const char *data, const struct mach_
     reset(); assert(!LSBAccess(image, X_OK));
     reset(); assert(!LSBFAccessAt(AT_FDCWD, image, X_OK, AT_EACCESS));
 
+    char alternative[PATH_MAX];
+    snprintf(alternative, sizeof(alternative), "%s/alternative", jb);
+    assert(!symlink("/private/var/jb/bin/tool", alternative) && !unlink(link) && !symlink("/var/jb/alternative", link));
+    reset(); assert(!LSBAccess(link, X_OK) && !strcmp(lastPath, expected));
+    reset(); assert(!LSBFAccessAt(AT_FDCWD, "/var/jb/bin/link", X_OK, AT_EACCESS) && !strcmp(lastPath, expected));
+
     reset(); nativeResult = 0;
     assert(LSBAccess("/var/jb/bin/missing", X_OK) == -1 && errno == ENOENT && !accessCalls);
     assert(LSBAccess("/var/jb/bin/../bin/tool", X_OK) == -1 && errno == EINVAL && !accessCalls);
     assert(!LSBAccess("/var/jb-other/tool", X_OK) && !strcmp(lastPath, "/var/jb-other/tool"));
     assert(!unlink(link) && !symlink(systemImage, link));
     reset(); assert(LSBAccess("/var/jb/bin/link", R_OK) == -1 && errno == EACCES && !accessCalls);
-    reset(); expectDenied(link); assert(!openCalls);
+    reset(); assert(LSBAccess(link, X_OK) == -1 && errno == EACCES && !openCalls); // Physical PATH entries use the same contained lookup.
     // Checking the link itself keeps the real no-follow target, even when its referent is elsewhere or absent.
     reset(); assert(!LSBFAccessAt(AT_FDCWD, "/var/jb/bin/link", F_OK, AT_SYMLINK_NOFOLLOW) && lastFlags == AT_SYMLINK_NOFOLLOW);
     assert(realpath(bin, expected) && strlcat(expected, "/link", sizeof(expected)) < sizeof(expected) && !strcmp(expected, lastPath));
@@ -269,6 +321,7 @@ static void testBootstrap(const char *base, const char *data, const struct mach_
     assert(!getenvCalls && !realpathCalls && !statCalls);
     atomic_store_explicit(&directoriesReady, true, memory_order_release);
     testDpkgConfig(jb, systemImage);
+    testBootstrapScripts(directories.runtime, jb, header);
     assert(!unlink(systemImage));
 }
 

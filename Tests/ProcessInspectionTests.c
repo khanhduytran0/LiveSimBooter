@@ -11,6 +11,12 @@ static int testRusage(int, int, rusage_info_t *);
 static kern_return_t testTaskForPID(mach_port_name_t, int, mach_port_name_t *);
 static kern_return_t testPortModRefs(ipc_space_t, mach_port_name_t, mach_port_right_t, mach_port_delta_t);
 static void *testKinfoAlloc(size_t, size_t);
+static int metricExecutable(char *, uint32_t *);
+static int metricNameToMIB(const char *, int *, size_t *);
+static kern_return_t metricHostStatistics(host_t, host_flavor_t, host_info64_t, mach_msg_type_number_t *);
+#define _NSGetExecutablePath metricExecutable
+#define sysctlnametomib metricNameToMIB
+#define host_statistics64 metricHostStatistics
 #define sysctl testSysctl
 #define proc_pid_rusage testRusage
 #define task_for_pid testTaskForPID
@@ -24,6 +30,9 @@ static void *testKinfoAlloc(size_t, size_t);
 #undef task_for_pid
 #undef mach_port_mod_refs
 #undef calloc
+#undef _NSGetExecutablePath
+#undef sysctlnametomib
+#undef host_statistics64
 
 static unsigned kinfoAllocations;
 static bool failKinfoAllocation;
@@ -173,6 +182,74 @@ static void testValidation(void) {
     memset(list->records[1].executablePath, 'x', sizeof(list->records[1].executablePath));
     assert(LSBValidateProcessList(list, size) == EPROTO);
     free(list);
+}
+
+static const char *testMetricExecutable = "/usr/bin/other";
+static unsigned metricLookups, vmReads;
+static kern_return_t metricHostError;
+static int metricExecutable(char *path, uint32_t *capacity) {
+    assert(strlen(testMetricExecutable) < *capacity);
+    strcpy(path, testMetricExecutable);
+    return 0;
+}
+static int metricNameToMIB(const char *name, int *oid, size_t *words) {
+    ++metricLookups;
+    assert(*words >= 2);
+    for (unsigned i = 0; i < sizeof(metrics)/sizeof(*metrics); ++i) if (!strcmp(name, metrics[i].name)) {
+        oid[0] = metrics[i].group;
+        oid[1] = (int)i + 500;
+        *words = 2;
+        return 0;
+    }
+    errno = ENOENT;
+    return -1;
+}
+static kern_return_t metricHostStatistics(host_t host, host_flavor_t flavor, host_info64_t data, mach_msg_type_number_t *words) {
+    assert(host != MACH_PORT_NULL && flavor == HOST_VM_INFO64 && *words == HOST_VM_INFO64_COUNT);
+    ++vmReads;
+    vm_statistics64_data_t *vm = (void *)data;
+    vm->internal_page_count = 123;
+    vm->purgeable_count = 17;
+    return metricHostError;
+}
+static void testMetricCompatibility(void) {
+    strcpy(directories.runtime, "/test/RuntimeRoot");
+    strcpy(directories.bootstrap, "/test/data/var/jb");
+    directories.bootstrapLength = strlen(directories.bootstrap);
+    directoriesError = 0;
+    initializeMetricOIDs();
+    assert(!metricLookups);
+    testMetricExecutable = "/test/data/var/jb/usr/sbin/sysctl";
+    int fmt[] = {0, 4, CTL_KERN, 500}, internal[] = {CTL_VM, 503}, purgeable[] = {CTL_VM, 504}, unknown[] = {CTL_VM, 987};
+    InspectionOIDFormat format = {0};
+    size_t size = sizeof(format);
+    nativeError = EPERM;
+    atomic_store(&inspectionReady, false);
+    assert(inspectionSysctl(fmt, 4, &format, &size, NULL, 0) == -1 && errno == EPERM && !metricLookups);
+    atomic_store(&inspectionReady, true);
+    nativeError = 0;
+    assert(!inspectionSysctl(fmt, 4, &format, &size, NULL, 0) && !metricLookups);
+    nativeError = EPERM;
+    assert(!inspectionSysctl(fmt, 4, &format, &size, NULL, 0) && metricLookups == 5 && size == 14);
+    assert(format.kind == 0x81e00005 && !strcmp(format.format, "S,timeval"));
+    fmt[1] = 1; size = 0;
+    assert(!inspectionSysctl(fmt, 4, NULL, &size, NULL, 0) && size == sizeof("kern.boottime"));
+    char name[32];
+    assert(!inspectionSysctl(fmt, 4, name, &size, NULL, 0) && !strcmp(name, "kern.boottime"));
+    uint32_t pages = 0;
+    size = 1;
+    assert(inspectionSysctl(internal, 2, &pages, &size, NULL, 0) == -1 && errno == ENOMEM && !size && !pages);
+    vmReads = 0;
+    size = sizeof(pages);
+    assert(!inspectionSysctl(internal, 2, &pages, &size, NULL, 0) && pages == 123 && size == 4);
+    assert(!inspectionSysctl(purgeable, 2, &pages, &size, NULL, 0) && pages == 17 && vmReads == 2);
+    assert(inspectionSysctl(internal, 2, &pages, &size, &pages, size) == -1 && errno == EPERM && vmReads == 2);
+    assert(inspectionSysctl(unknown, 2, &pages, &size, NULL, 0) == -1 && errno == EPERM && vmReads == 2);
+    nativeError = EACCES;
+    assert(inspectionSysctl(purgeable, 2, &pages, &size, NULL, 0) == -1 && errno == EACCES && vmReads == 2);
+    nativeError = EPERM;
+    metricHostError = KERN_FAILURE;
+    assert(inspectionSysctl(internal, 2, &pages, &size, NULL, 0) == -1 && errno == EPERM && vmReads == 3 && metricLookups == 5);
 }
 
 static void expectRootError(const char *root, int error) {
@@ -339,6 +416,7 @@ int main(void) {
     assert(!mach_port_deallocate(mach_task_self(), testTask));
     assert(!mach_port_mod_refs(mach_task_self(), testTask, MACH_PORT_RIGHT_RECEIVE, -1));
     assert(!rmdir(temporary));
+    testMetricCompatibility();
     puts("ProcessInspectionTests: bounded guest list, logical identities, real self translation, native forwarding and output faults passed");
     return 0;
 }

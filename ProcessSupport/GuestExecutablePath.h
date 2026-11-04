@@ -8,6 +8,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/param.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 // Path classification alone does not verify the opened executable. The broker also checks its descriptor and inode.
 static inline bool LSBGuestPathIsCanonical(const char *path) {
@@ -63,8 +66,14 @@ static inline const char *LSBGuestInstalledApplicationPath(const char *root, con
 // Exact guest prefix, including the directory itself. Never probe the native phone's /var/jb for an executable.
 static inline const char *LSBGuestVirtualBootstrapPath(const char *path) {
     if (!path || path[0] != '/') return NULL;
-    if (path[1] == 'p' && !strncmp(path, "/private/", 9)) path += 8;
-    return !strncmp(path, "/var/jb", 7) && (!path[7] || path[7] == '/') ? path : NULL;
+    if (path[1] == 'p') {
+        if (strncmp(path, "/private/var/jb", sizeof("/private/var/jb") - 1)) return NULL;
+        path += sizeof("/private") - 1;
+    } else if (path[1] != 'v' || strncmp(path, "/var/jb", sizeof("/var/jb") - 1)) {
+        return NULL;
+    }
+    char boundary = path[sizeof("/var/jb") - 1];
+    return !boundary || boundary == '/' ? path : NULL;
 }
 
 static inline const char *LSBGuestStorageRootSpelling(const char *root, const char *path) {
@@ -81,6 +90,78 @@ static inline bool LSBGuestPathInBootstrap(const char *root, const char *path) {
     static const char suffix[] = "/data/var/jb";
     return !strncmp(path, root, parent) && !strncmp(path + parent, suffix, sizeof(suffix) - 1) &&
            (!path[parent + sizeof(suffix) - 1] || path[parent + sizeof(suffix) - 1] == '/');
+}
+
+// Procursus update-alternatives writes absolute /var/jb links inside the guest package tree.
+// Run this walk only when ordinary realpath could not produce a path inside that same bootstrap.
+static inline int LSBWalkBootstrapLinks(const char *root, const char *path, char resolved[PATH_MAX]) {
+    const char *spelling = LSBGuestStorageRootSpelling(root, path);
+    size_t baseLength = (size_t)(strrchr(spelling, '/') - spelling) + sizeof("/data/var/jb") - 1;
+    char pending[PATH_MAX], target[PATH_MAX];
+    if (baseLength >= sizeof(target) || strlen(path) < baseLength || strlcpy(pending, path + baseLength, sizeof(pending)) >= sizeof(pending)) return ENAMETOOLONG;
+    memcpy(target, path, baseLength);
+    target[baseLength] = 0;
+    if (!realpath(target, resolved)) return errno;
+    if (!LSBGuestPathInBootstrap(root, resolved)) return EACCES;
+    baseLength = strlen(resolved);
+    unsigned links = 0;
+    for (char *part = pending; *part;) {
+        if (*part == '/') { ++part; continue; }
+        size_t length = strcspn(part, "/");
+        char *rest = part + length;
+        if (length == 1 && *part == '.') { part = rest; continue; }
+        if (length == 2 && !memcmp(part, "..", 2)) {
+            if (strlen(resolved) <= baseLength) return EACCES;
+            *strrchr(resolved, '/') = 0;
+            part = rest;
+            continue;
+        }
+        size_t parent = strlen(resolved);
+        if (length + 2 > PATH_MAX - parent) return ENAMETOOLONG;
+        resolved[parent] = '/';
+        memcpy(resolved + parent + 1, part, length);
+        resolved[parent + length + 1] = 0;
+        struct stat info;
+        if (lstat(resolved, &info)) return errno;
+        if (!S_ISLNK(info.st_mode)) {
+            if (*rest && !S_ISDIR(info.st_mode)) return ENOTDIR;
+            part = rest;
+            continue;
+        }
+        if (++links > MAXSYMLINKS) return ELOOP;
+        ssize_t n = readlink(resolved, target, sizeof(target));
+        if (n < 0) return errno;
+        if ((size_t)n == sizeof(target)) return ENAMETOOLONG;
+        target[n] = 0;
+        resolved[parent] = 0;
+        const char *replacement = target;
+        if (target[0] == '/') {
+            const char *guest = LSBGuestVirtualBootstrapPath(target);
+            resolved[baseLength] = 0;
+            if (guest) replacement = guest + sizeof("/var/jb") - 1;
+            else {
+                const char *base = LSBGuestStorageRootSpelling(resolved, target);
+                size_t bytes = strlen(base);
+                if (strncmp(target, base, bytes) || (target[bytes] && target[bytes] != '/')) return EACCES;
+                replacement = target + bytes;
+            }
+        }
+        size_t prefix = strlen(replacement), tail = strlen(rest);
+        if (prefix + tail >= sizeof(pending)) return ENAMETOOLONG;
+        memmove(pending + prefix, rest, tail + 1);
+        memcpy(pending, replacement, prefix);
+        part = pending;
+    }
+    // Repeat the canonical containment check in case a directory was replaced during the walk.
+    if (!realpath(resolved, target)) return errno;
+    if (!LSBGuestPathInBootstrap(root, target) || !LSBGuestPathIsCanonical(target)) return EACCES;
+    strcpy(resolved, target);
+    return 0;
+}
+
+static inline int LSBRealpathBootstrap(const char *root, const char *path, char resolved[PATH_MAX]) {
+    if (realpath(path, resolved) && LSBGuestPathInBootstrap(root, resolved)) return LSBGuestPathIsCanonical(resolved) ? 0 : EACCES;
+    return LSBWalkBootstrapLinks(root, path, resolved);
 }
 
 static inline int LSBResolveBootstrapPath(const char *root, const char *path, char resolved[PATH_MAX], bool *handled) {
@@ -100,8 +181,7 @@ static inline int LSBResolveBootstrapPath(const char *root, const char *path, ch
         if (length < 0 || (size_t)length >= sizeof(candidate)) return ENAMETOOLONG;
         path = candidate;
     }
-    if (!realpath(path, resolved)) return errno;
-    return LSBGuestPathIsCanonical(resolved) && LSBGuestPathInBootstrap(root, resolved) ? 0 : EACCES;
+    return LSBRealpathBootstrap(root, path, resolved);
 }
 
 static inline bool LSBGuestExecutableIsContained(const char *root, const char *path) {

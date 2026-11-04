@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -39,6 +40,39 @@ static void makeDirectories(const char *path) {
         *part = 0; assert(!mkdir(copy, 0700) || errno == EEXIST); *part = '/';
     }
     assert(!mkdir(copy, 0700) || errno == EEXIST);
+}
+
+static void testVirtualBootstrapPath(void) {
+    static const struct { const char *path; int offset; } cases[] = {
+        {"/var/jb", 0}, {"/var/jb/", 0}, {"/var/jb/usr/bin/dpkg", 0},
+        {"/private/var/jb", 8}, {"/private/var/jb/", 8}, {"/private/var/jb/usr/bin/dpkg", 8},
+        {"/var/jbx", -1}, {"/private/var/jb-other", -1}, {"/private//var/jb", -1}, {"//var/jb", -1},
+        {"var/jb", -1}, {"/usr/bin", -1}, {"/var/mobile", -1}, {"/private/var/mobile", -1}
+    };
+    long pageSize = sysconf(_SC_PAGESIZE);
+    assert(pageSize > 0);
+    char *pages = mmap(NULL, 2 * (size_t)pageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    assert(pages != MAP_FAILED && !mprotect(pages + pageSize, (size_t)pageSize, PROT_NONE));
+    assert(LSBGuestVirtualBootstrapPath(NULL) == NULL);
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
+        size_t length = strlen(cases[i].path);
+        char *path = pages + pageSize - length - 1;
+        memcpy(path, cases[i].path, length + 1);
+        const char *expected = cases[i].offset < 0 ? NULL : path + cases[i].offset;
+        assert(LSBGuestVirtualBootstrapPath(path) == expected);
+    }
+    // Put the NUL immediately before the guard for every shorter spelling, including the empty string.
+    const char *roots[] = {"/var/jb", "/private/var/jb"};
+    for (size_t i = 0; i < sizeof(roots) / sizeof(*roots); ++i) {
+        for (size_t length = 0; length < strlen(roots[i]); ++length) {
+            char *path = pages + pageSize - length - 1;
+            memcpy(path, roots[i], length);
+            path[length] = 0;
+            assert(LSBGuestVirtualBootstrapPath(path) == NULL);
+        }
+    }
+    assert(!munmap(pages, 2 * (size_t)pageSize));
 }
 
 static void testDataExecutables(const char *base, const char *root) {
@@ -88,6 +122,17 @@ static void testDataExecutables(const char *base, const char *root) {
     resolves(root, "/private/var/jb/usr/bin/example", tool);
     join(path, root, "/var/jb/usr/bin/example"); resolves(root, path, tool); // launchd prefixes RuntimeRoot + "/"
     join(path, jb, "internal"); assert(!symlink("usr/bin/example", path)); resolves(root, "/var/jb/internal", tool);
+    char alternatives[PATH_MAX], awk[PATH_MAX], choice[PATH_MAX];
+    join(alternatives, jb, "etc/alternatives"); makeDirectories(alternatives);
+    join(choice, alternatives, "awk"); assert(!symlink("/private/var/jb/usr/bin/example", choice));
+    join(awk, jb, "usr/bin/awk"); assert(!symlink("/var/jb/etc/alternatives/awk", awk));
+    resolves(root, awk, tool); resolves(root, "/var/jb/usr/bin/awk", tool);
+    join(path, jb, "usr-alias"); assert(!symlink("/var/jb/usr", path)); resolves(root, "/private/var/jb/usr-alias/bin/awk", tool);
+    assert(!unlink(choice) && !symlink("../../usr/bin/example", choice)); resolves(root, awk, tool);
+    assert(!unlink(choice) && !symlink("../../../outside", choice)); fails(root, awk, EACCES);
+    assert(!unlink(choice) && !symlink("/bin/df", choice)); fails(root, awk, EACCES);
+    assert(!unlink(choice) && !symlink("/var/jb/usr/bin/awk", choice)); fails(root, awk, ELOOP);
+    assert(!unlink(choice)); fails(root, awk, ENOENT);
     join(path, jb, "bad:name"); makeFile(path); fails(root, "/var/jb/bad:name", EACCES);
     join(runtimeFile, root, "bin/df");
     join(path, jb, "system"); assert(!symlink(runtimeFile, path)); fails(root, path, EACCES);
@@ -113,6 +158,7 @@ static void testDataExecutables(const char *base, const char *root) {
 }
 
 int main(void) {
+    testVirtualBootstrapPath();
     const char *runtime = "/private/var/group/LSB/iOS/23A343/RuntimeRoot";
     const char *package = "/var/group/LSB/iOS/23A343/data/var/jb/usr/bin/example";
     assert(LSBUseForkDonorLayout(runtime, package, NULL));

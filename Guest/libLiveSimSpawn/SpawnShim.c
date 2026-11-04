@@ -332,6 +332,7 @@ static int spawnOne(pid_t *pid, const char *path, const posix_spawn_file_actions
     replace |= (plan->spawnFlags & POSIX_SPAWN_SETEXEC) != 0;
     plan->spawnFlags &= ~POSIX_SPAWN_SETEXEC;
     SPAWN_STAGE("actions", readActions(plan, actions, temporaryFDs));
+    SPAWN_STAGE("script", LSBProjectBootstrapScript(plan));
     SPAWN_STAGE("fds", snapshotFDs(plan, descriptors));
     SPAWN_STAGE("validate", LSBValidateSpawnPlan(plan));
     pid_t child = -1;
@@ -396,10 +397,16 @@ static int LSBExecve(const char *path, char *const argv[], char *const envp[]) {
     if (!path) { errno = EFAULT; return -1; }
     if (!path[0]) { errno = ENOENT; return -1; }
     // The guest launch ABI needs argv[0]. Darwin accepts a null envp as an empty environment.
-    if (!argv || !argv[0]) { errno = EINVAL; return -1; }
+    if (!argv || !argv[0]) { SPAWN_TRACE("[spawn-trace] execve missing argv0 path=%.1024s\n", path); errno = EINVAL; return -1; }
     char executable[PATH_MAX];
-    int error = LSBResolveGuestExecutable(getenv("DYLD_ROOT_PATH"), path, executable);
-    if (!error && LSBFAccessAt(AT_FDCWD, executable, X_OK, AT_EACCESS)) error = errno;
+    const LSBGuestRuntimeDirectories *directories;
+    int error = LSBGetRuntimeDirectories(&directories);
+    if (!error) error = LSBResolveGuestExecutable(directories->runtime, path, executable);
+    if (error) SPAWN_TRACE("[spawn-trace] execve resolve error=%d path=%.1024s\n", error, path);
+    if (!error && LSBFAccessAt(AT_FDCWD, executable, X_OK, AT_EACCESS)) {
+        error = errno;
+        SPAWN_TRACE("[spawn-trace] execve access error=%d path=%.1024s\n", error, executable);
+    }
     char *const emptyEnvironment[] = {NULL};
     if (!error) error = spawnOne(NULL, executable, NULL, NULL, argv, envp ? envp : emptyEnvironment, true);
     // A successful replacement never returns. The original process is still usable after a rejected request.

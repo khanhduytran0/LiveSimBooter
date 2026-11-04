@@ -15,6 +15,7 @@
 - (void)resizeRows:(NSUInteger)rows columns:(NSUInteger)columns;
 - (void)consume:(NSData *)data;
 - (NSString *)text;
+- (NSString *)textIncludingCursor:(BOOL)includeCursor;
 - (NSString *)pasteSequenceForText:(NSString *)text;
 @end
 
@@ -294,14 +295,16 @@
     if (data.length) [self invalidatePresentation];
 }
 
-- (NSString *)text {
+- (NSString *)text { return [self textIncludingCursor:YES]; }
+
+- (NSString *)textIncludingCursor:(BOOL)includeCursor {
     NSMutableString *text = [NSMutableString new];
     for (NSString *line in _history) [text appendFormat:@"%@\n", line];
     NSUInteger last = self.row;
     for (NSUInteger row = self.row + 1; row < self.rows; ++row) if ([self lineText:_lines[row]].length) last = row;
     for (NSUInteger row = 0; row <= last; ++row) {
         NSString *line = [self lineText:_lines[row]];
-        if (row == self.row) {
+        if (includeCursor && row == self.row) {
             NSUInteger prefix = 0;
             for (NSUInteger index = 0; index < self.column; ++index) prefix += _lines[row][index].length;
             while (line.length <= prefix) line = [line stringByAppendingString:@" "];
@@ -410,6 +413,7 @@
     LSBTerminalInputField *_inputField;
     UILabel *_status;
     UIScrollView *_controls;
+    NSMutableArray<UIButton *> *_inputButtons;
     LSBTerminalScreen *_screen;
     UIFont *_font;
     CGFloat _cellWidth, _cellHeight;
@@ -471,8 +475,6 @@
     // Keep shortcuts inside the terminal's safe-area/keyboard constraints. A system inputAccessoryView can sit under a floating tab bar.
     UIScrollView *controls = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 0, 400, 44)];
     controls.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1];
-    controls.userInteractionEnabled = NO;
-    controls.alpha = 0.5;
     controls.pagingEnabled = YES;
     controls.directionalLockEnabled = YES;
     controls.showsVerticalScrollIndicator = NO;
@@ -480,9 +482,11 @@
     controls.accessibilityLabel = NSLocalizedString(@"Terminal shortcuts", @"Accessibility label for the terminal keyboard shortcut bar");
     NSArray *labels = @[NSLocalizedString(@"Esc", @"Terminal shortcut sending the Escape key"),
         NSLocalizedString(@"Tab", @"Terminal shortcut sending the Tab key"), @"^C", @"^D", @"^Z", @"←", @"↓", @"↑", @"→", @"↵",
-        NSLocalizedString(@"Paste", @"Terminal shortcut that pastes clipboard text")];
+        NSLocalizedString(@"Paste", @"Terminal shortcut that pastes clipboard text"),
+        NSLocalizedString(@"Copy output", @"Copy the terminal screen and retained scrollback as plain text")];
+    _inputButtons = [NSMutableArray new];
     UIStackView *previous = nil;
-    for (NSArray<NSNumber *> *indices in @[@[@0, @1, @2, @3, @9, @10], @[@4, @5, @6, @7, @8]]) {
+    for (NSArray<NSNumber *> *indices in @[@[@0, @1, @2, @3, @9, @10], @[@4, @5, @6, @7, @8, @11]]) {
         UIStackView *page = [UIStackView new];
         page.translatesAutoresizingMaskIntoConstraints = NO;
         page.distribution = UIStackViewDistributionFillEqually;
@@ -491,9 +495,18 @@
             [button setTitle:labels[index.unsignedIntegerValue] forState:UIControlStateNormal];
             button.titleLabel.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightMedium];
             button.tag = index.integerValue;
-            // Try Paste on demand even before UIKit has discovered clipboard text, including a remote clipboard.
-            [button addTarget:self action:index.unsignedIntegerValue == 10 ? @selector(paste:) : @selector(controlPressed:)
-                forControlEvents:UIControlEventTouchUpInside];
+            SEL action;
+            if (button.tag == 11) {
+                action = @selector(copyOutput:);
+                button.titleLabel.numberOfLines = 2;
+                button.titleLabel.textAlignment = NSTextAlignmentCenter;
+            } else {
+                // Try Paste on demand even before UIKit has discovered clipboard text, including a remote clipboard.
+                action = button.tag == 10 ? @selector(paste:) : @selector(controlPressed:);
+                button.enabled = self.inputHandler != nil;
+                [_inputButtons addObject:button];
+            }
+            [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
             [page addArrangedSubview:button];
         }
         [controls addSubview:page];
@@ -583,6 +596,12 @@
     }
 }
 
+- (void)copyOutput:(id)sender {
+    (void)sender;
+    NSString *output = [_screen textIncludingCursor:NO];
+    if (output.length) UIPasteboard.generalPasteboard.string = output;
+}
+
 - (void)controlPressed:(UIButton *)button {
     NSArray *sequences = @[@"\033", @"\t", @"\003", @"\004", @"\032", @"\033[D", @"\033[B", @"\033[A", @"\033[C", @"\r"];
     if ((NSUInteger)button.tag < sequences.count) [self sendString:sequences[(NSUInteger)button.tag]];
@@ -660,8 +679,7 @@
 
 - (void)setInputHandler:(void (^)(NSData *data))inputHandler {
     _inputHandler = [inputHandler copy];
-    _controls.userInteractionEnabled = _inputHandler != nil;
-    _controls.alpha = _inputHandler ? 1 : 0.5;
+    for (UIButton *button in _inputButtons) button.enabled = _inputHandler != nil;
     if (!_inputHandler) { [self resignFirstResponder]; _inputField.text = @""; }
 }
 

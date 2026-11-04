@@ -92,12 +92,14 @@ int main(void) {
         assert(editing.row == 1 && editing.column == 4);
         feed(editing, @"\033[2J\033[H");
         assert([[editing text] isEqualToString:@" "] && !editing.row && !editing.column);
+        assert(![editing textIncludingCursor:NO].length);
 
         LSBTerminalScreen *wrapping = screen(3, 4);
         feed(wrapping, @"ABCD\033[31mE\033[0m");
         assert([[wrapping text] isEqualToString:@"ABCD\nE "] && wrapping.row == 1 && wrapping.column == 1);
         feed(wrapping, @"\r\nF\r\nG");
         assert([[wrapping text] isEqualToString:@"ABCD\nE\nF\nG "]);
+        assert([[wrapping textIncludingCursor:NO] isEqualToString:@"ABCD\nE\nF\nG"]);
 
         LSBTerminalScreen *whole = screen(4, 20), *split = screen(4, 20);
         NSString *sequence = @"hello é 🙂 e\u0301\033[2;2Hxyz\033]0;ignored title\033\\!\033Pignored query\033\\\033[2D!";

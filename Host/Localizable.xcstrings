@@ -232,6 +232,17 @@
         }
       }
     },
+    "Copy output": {
+      "comment": "Copy the terminal screen and retained scrollback as plain text",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy output"
+          }
+        }
+      }
+    },
     "Copying IPA…": {
       "comment": "IPA import is copying the selected document into simulator staging.",
       "localizations": {

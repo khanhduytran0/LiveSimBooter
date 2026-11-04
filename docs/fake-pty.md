@@ -152,7 +152,10 @@ custom-stack pthread ABI; the separate [launchd workqueue bridge](launchd.md) ha
 ## Native display and input
 
 `Host/TerminalView.m` provides software-keyboard input, hardware arrow/control keys, and two horizontally paged shortcut groups:
-Escape, Tab, Ctrl-C, Ctrl-D, Return and Paste on the first page, and Ctrl-Z and arrows on the second. The row is inside the terminal view, whose bottom stays above both the safe-area bottom
+Escape, Tab, Ctrl-C, Ctrl-D, Return and Paste on the first page, and Ctrl-Z, arrows and **Copy output** on the second.
+Copy output puts the current screen and retained scrollback on the clipboard as plain text. On iPhone 17 the user copied
+a command and its output into Notes. The button also stays available after Fish exits.
+The row is inside the terminal view, whose bottom stays above both the safe-area bottom
 and keyboard top; it no longer uses an `inputAccessoryView` that can overlap the floating tab bar. A separate lifecycle
 label changes from waiting to attached or closed without polluting the guest's output. The controller rechecks its binding
 when the tab appears, retains failure output after EOF, and disables keyboard focus without a live input handler. These

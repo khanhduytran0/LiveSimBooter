@@ -9,13 +9,14 @@ sh Tests/GenericForkBuild.sh macosx "$test_directory/generic-fork"
 "$test_directory/generic-fork/fork-fixture"
 "$test_directory/generic-fork/fork-fixture" --vfork
 "$test_directory/generic-fork/fork-resolver" "$(id -un)"
+"$test_directory/generic-fork/fork-stack-bounds"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ForkMapPlan.c ProcessSupport/ForkMapPlan.c -o "$test_directory/ForkMapPlan"
 "$test_directory/ForkMapPlan"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ForkSnapshotBroker.c Host/ForkSnapshotBroker.c -o "$test_directory/ForkSnapshotBroker"
 "$test_directory/ForkSnapshotBroker"
-for test_name in ForkBashCommand ForkBashRedirect ForkBashTraps ForkBashEarlyHeap ForkBashPipeline ForkBashSubshell ForkBashSubstitution ForkProcursusBashCommand; do
+for test_name in ForkOffer ForkBashCommand ForkBashRedirect ForkBashTraps ForkBashEarlyHeap ForkBashPipeline ForkBashSubshell ForkBashSubstitution ForkProcursusBashCommand; do
     xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -Wl,-dead_strip "Tests/${test_name}Tests.c" \
     Guest/libLiveSimSpawn/RuntimeDirectories.c -o "$test_directory/$test_name"
     "$test_directory/$test_name"
@@ -42,7 +43,9 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_TRANSP
 xcrun --sdk macosx clang -fblocks -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_AUDIO_OUTPUT_TESTING \
     Guest/libLiveSimAudio/AudioOutputCompatibility.c Tests/AudioOutputCompatibilityTests.c -framework CoreFoundation \
     -o "$test_directory/AudioOutputCompatibility"
-"$test_directory/AudioOutputCompatibility"
+env -u LSB_AUDIO_OUTPUT "$test_directory/AudioOutputCompatibility" disabled
+LSB_AUDIO_OUTPUT=true "$test_directory/AudioOutputCompatibility" disabled
+LSB_AUDIO_OUTPUT=1 "$test_directory/AudioOutputCompatibility"
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
     Tests/HapticRelayTests.m -framework Foundation -framework AVFAudio -o "$test_directory/HapticRelay"
 "$test_directory/HapticRelay"
@@ -256,7 +259,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib 
     Guest/libLiveSimSpawn/FrameworkBundleCompatibility.c -framework CoreFoundation -o "$test_directory/libFrameworkBundleCompatibility.dylib"
 xcrun --sdk macosx clang -std=c11 -fobjc-arc -Wall -Wextra -Werror -arch arm64 -DLSB_FRAMEWORK_BUNDLE_INTERPOSE_TESTING \
     Tests/FrameworkBundleCompatibilityTests.m -framework Foundation -framework QuartzCore -o "$test_directory/FrameworkBundleCompatibilityInterpose"
-DYLD_INSERT_LIBRARIES="$test_directory/libFrameworkBundleCompatibility.dylib" "$test_directory/FrameworkBundleCompatibilityInterpose"
+LSB_SIMULATE_FRAMEWORK_BUNDLES=1 DYLD_INSERT_LIBRARIES="$test_directory/libFrameworkBundleCompatibility.dylib" "$test_directory/FrameworkBundleCompatibilityInterpose"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/SharedCachePathCompatibilityTests.c -o "$test_directory/SharedCachePathCompatibility"
 "$test_directory/SharedCachePathCompatibility"
@@ -341,7 +344,7 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -dynamiclib 
     Guest/libLiveSimSpawn/NotificationSharedMemory.c -o "$test_directory/libNotificationSharedMemory.dylib"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_NOTIFICATION_SHM_INTERPOSE_TESTING \
     Tests/NotificationSharedMemoryTests.c -o "$test_directory/NotificationSharedMemoryInterpose"
-DYLD_INSERT_LIBRARIES="$test_directory/libNotificationSharedMemory.dylib" "$test_directory/NotificationSharedMemoryInterpose"
+LSB_SIMULATE_NOTIFICATION_SHM=1 DYLD_INSERT_LIBRARIES="$test_directory/libNotificationSharedMemory.dylib" "$test_directory/NotificationSharedMemoryInterpose"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/CodeSigningCompatibilityTests.c -framework CoreFoundation -o "$test_directory/CodeSigningCompatibility"
 "$test_directory/CodeSigningCompatibility"
@@ -429,7 +432,7 @@ xcrun --sdk macosx clang -std=c11 -fblocks -Wall -Wextra -Werror -arch arm64 -DL
     -o "$test_directory/BrokerConnectionClient"
 XPC_FLAGS=0x2 "$test_directory/BrokerConnectionServer" "$test_directory/BrokerConnectionClient"
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 -IProcessSupport -IHost \
-    Tests/BrokerTests.m Host/SessionControlQueue.c Host/TerminalSession.m Host/LaunchdConfiguration.m ProcessSupport/NativeCacheLayout.c \
+    Tests/BrokerTests.m Host/LiveProcessPool.m Host/SessionControlQueue.c Host/TerminalSession.m Host/LaunchdConfiguration.m ProcessSupport/NativeCacheLayout.c \
     ProcessSupport/SlidableCache.c \
     ProcessSupport/LaunchdHandshake.c ProcessSupport/LaunchdProbe.c \
     Host/IndigoHIDServer.m Host/FramebufferServer.m Host/IOSurfaceServer.m ProcessSupport/LaunchdEndpoint.c \
@@ -519,6 +522,9 @@ xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
     Tests/ExtensionLauncherTests.m -framework Foundation -o "$test_directory/ExtensionLauncher"
 "$test_directory/ExtensionLauncher"
+xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
+    Tests/LiveProcessPoolTests.m -framework Foundation -o "$test_directory/LiveProcessPool"
+"$test_directory/LiveProcessPool"
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
     Tests/RunningBoardMonitorTests.m -framework Foundation -o "$test_directory/RunningBoardMonitor"
 "$test_directory/RunningBoardMonitor"

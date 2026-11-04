@@ -1,4 +1,5 @@
 #include "FrameworkBundleCompatibility.h"
+#include "../Shared/LaunchFlag.h"
 
 #include <limits.h>
 #include <stdbool.h>
@@ -9,6 +10,11 @@
 #include <unistd.h>
 
 static _Thread_local bool resolvingBundle;
+static LSBLaunchFlag frameworkBundles = {.name = LSB_FRAMEWORK_BUNDLE_ENABLE_ENV};
+
+__attribute__((constructor)) static void initializeFrameworkBundles(void) {
+    LSBCaptureLaunchFlag(&frameworkBundles);
+}
 
 static bool systemFrameworkPath(const char *path) {
     static const char *const prefixes[] = {"/System/Library/Frameworks/", "/System/Library/PrivateFrameworks/"};
@@ -70,9 +76,7 @@ static CFURLRef copyRuntimeFrameworkURL(CFURLRef url) {
 }
 
 CFBundleRef LSBFrameworkBundleCreate(CFAllocatorRef allocator, CFURLRef url) {
-    if (resolvingBundle) return CFBundleCreate(allocator, url);
-    const char *enabled = getenv(LSB_FRAMEWORK_BUNDLE_ENABLE_ENV);
-    if (!enabled || strcmp(enabled, "1")) return CFBundleCreate(allocator, url);
+    if (resolvingBundle || !LSBLaunchFlagEnabled(&frameworkBundles)) return CFBundleCreate(allocator, url);
     // CF URL/bundle initialization can reenter Foundation. Each thread suppresses only its own recursive translations.
     resolvingBundle = true;
     CFURLRef redirected = copyRuntimeFrameworkURL(url);

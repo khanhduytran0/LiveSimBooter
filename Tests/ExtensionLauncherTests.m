@@ -144,6 +144,102 @@ static void Record(uint64_t requestID, pid_t pid, int error, void *context) {
 static void Drain(void) { [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]]; }
 static void Ready(void) { testReady(nil, @[@4242], @[testPluginUUID]); }
 
+static int jobContext;
+static void RecordClaimed(uint64_t requestID, pid_t pid, int error, void *context) {
+    assert(pthread_main_np() && context == &jobContext);
+    Record(requestID, pid, error, &expectedContext);
+}
+
+static void TestWarmClaim(void) {
+    unsigned events = count, acquisitions = assertionAcquireCount, releases = assertionReleaseCount;
+    dispatch_semaphore_t checked = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+        assert(LSBLaunchWarmExtension("test", 21, Record, &expectedContext) == EDEADLK);
+        assert(LSBClaimWarmExtension(21, 22, 4242, RecordClaimed, &jobContext) == EDEADLK);
+        assert(LSBCancelWarmExtension(21) == EDEADLK);
+        dispatch_semaphore_signal(checked);
+    });
+    assert(!dispatch_semaphore_wait(checked, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)));
+    assert(!LSBLaunchWarmExtension("test", 21, Record, &expectedContext));
+    assert(LSBClaimWarmExtension(21, 22, 4242, RecordClaimed, &jobContext) == EAGAIN);
+    Ready();
+    Drain();
+    NSUUID *instance = lastInstanceUUID;
+    assert(count == events + 1 && lastRequest == 21 && lastPID == 4242 && LSBExtensionProcessIdentifier(21) == 4242);
+    assert(LSBClaimWarmExtension(21, 22, 1234, RecordClaimed, &jobContext) == ESRCH);
+    assert(!LSBLaunchExtension("test", 22, Record, &expectedContext));
+    assert(LSBClaimWarmExtension(21, 22, 4242, RecordClaimed, &jobContext) == EEXIST);
+    assert(LSBCancelWarmExtension(22) == EINVAL);
+    LSBReleaseExtension(22);
+    assert(!LSBClaimWarmExtension(21, 22, 4242, RecordClaimed, &jobContext));
+    assert(!LSBExtensionProcessIdentifier(21) && LSBExtensionProcessIdentifier(22) == 4242);
+    assert(LSBSignalExtension(21, SIGTERM) == ESRCH && LSBCancelWarmExtension(21) == ESRCH && LSBCancelWarmExtension(22) == EINVAL);
+    assert(LSBClaimWarmExtension(22, 23, 4242, Record, &expectedContext) == EINVAL);
+    LSBReleaseExtension(21);
+    assert(count == events + 1 && assertionAcquireCount == acquisitions + 1 && assertionReleaseCount == releases);
+    assert(!LSBSignalExtension(22, SIGTERM) && [signaledInstance isEqual:instance] && signaledSignal == SIGTERM);
+    testInvalidation();
+    Drain();
+    assert(count == events + 2 && lastRequest == 22 && lastError == ECANCELED);
+    LSBReleaseExtension(22);
+    assert(assertionReleaseCount == releases + 1);
+}
+
+static void TestWarmCancellation(void) {
+    unsigned events = count, signals = signalCount;
+    assert(!LSBLaunchWarmExtension("test", 31, Record, &expectedContext));
+    NSUUID *cancelled = lastInstanceUUID;
+    void (^oldReady)(NSError *, NSArray *, NSArray *) = testReady;
+    assert(!LSBCancelWarmExtension(31) && LSBCancelWarmExtension(31) == ESRCH && signalCount == signals);
+    assert(!LSBLaunchExtension("test", 31, Record, &expectedContext)); // Reuse the ID while pkd still has the old completion.
+    oldReady(nil, @[@4242], @[[NSUUID UUID]]);
+    oldReady(nil, @[@0], @[testPluginUUID]);
+    oldReady([NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:nil], @[@4242], nil);
+    Drain();
+    assert(count == events && signalCount == signals);
+    oldReady(nil, @[@4242], nil);
+    oldReady(nil, @[@4242], nil);
+    Ready();
+    Drain();
+    assert(count == events + 1 && lastRequest == 31 && !lastError);
+    assert(signalCount == ++signals && signaledSignal == SIGKILL && [signaledInstance isEqual:cancelled]);
+    assert(LSBExtensionProcessIdentifier(31) == 4242);
+    LSBReleaseExtension(31);
+
+    testMode = 2;
+    assert(!LSBLaunchWarmExtension("test", 32, Record, &expectedContext));
+    Ready();
+    Drain();
+    assert(lastError == EACCES && LSBClaimWarmExtension(32, 33, 4242, RecordClaimed, &jobContext) == ESRCH);
+    assert(!LSBCancelWarmExtension(32) && signalCount == ++signals && [signaledInstance isEqual:lastInstanceUUID]);
+    testMode = 0;
+    assert(!LSBLaunchWarmExtension("test", 33, Record, &expectedContext));
+    Ready();
+    Drain();
+    signals = signalCount;
+    signalAllocationFails = YES;
+    assert(LSBCancelWarmExtension(33) == ENOMEM && signalCount == signals);
+    assert(LSBClaimWarmExtension(33, 34, 4242, RecordClaimed, &jobContext) == ESRCH);
+    signalAllocationFails = NO;
+    assert(!LSBCancelWarmExtension(33));
+    assert(signalCount == ++signals && [signaledInstance isEqual:lastInstanceUUID]);
+    testMode = 1; // Synchronous pkd completion followed by an exception during submission; no callback or stranded process.
+    events = count;
+    assert(LSBLaunchWarmExtension("test", 34, Record, &expectedContext) == EIO);
+    Drain();
+    assert(count == events && signalCount == signals + 1 && [signaledInstance isEqual:lastInstanceUUID]);
+    testMode = 0;
+    assert(!LSBLaunchWarmExtension("test", 35, Record, &expectedContext));
+    oldReady = testReady;
+    oldReady([NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:nil], nil, nil);
+    Drain();
+    signals = signalCount;
+    assert(lastError == EIO && !LSBCancelWarmExtension(35) && signalCount == signals);
+    oldReady(nil, @[@4242], @[testPluginUUID]);
+    Drain();
+    assert(signalCount == signals + 1 && signaledSignal == SIGKILL && [signaledInstance isEqual:lastInstanceUUID]);
+}
+
 int main(void) {
     @autoreleasepool {
         TestNativeConnectionCleanup();
@@ -266,6 +362,8 @@ int main(void) {
         Drain();
         assert(lastRequest == 12 && !lastError && lastPID == 4242);
         LSBReleaseExtension(12);
+        TestWarmClaim();
+        TestWarmCancellation();
         puts("launcher lifecycle tests passed");
     }
     return 0;

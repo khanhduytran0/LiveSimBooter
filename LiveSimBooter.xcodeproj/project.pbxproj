@@ -54,7 +54,7 @@
 		A9B7C410000000000000000D /* Exceptions for "LiveSimBooter" folder in "LiveProcess" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			additionalCompilerFlagsByRelativePath = {
-				CompactImageInfo.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
+				CompactImageInfo.cpp = "-Os -fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				DebuggerBridge.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LazySignatureClient.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LocalMach.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
@@ -94,6 +94,7 @@
 				IndigoHIDServer.m = "-fobjc-arc";
 				LaunchdConfiguration.m = "-fobjc-arc";
 				LazySigning.m = "-fobjc-arc";
+				LiveProcessPool.m = "-fobjc-arc";
 				MetalDisplayRenderer.m = "-fobjc-arc";
 				RunningBoardMonitor.m = "-fobjc-arc";
 				RuntimeStorage.m = "-fobjc-arc";
@@ -114,7 +115,7 @@
 		E19AD562308A56D300634F93 /* Exceptions for "LiveSimBooter" folder in "LiveSimBooter" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			additionalCompilerFlagsByRelativePath = {
-				CompactImageInfo.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
+				CompactImageInfo.cpp = "-Os -fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				DebuggerBridge.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LazySignatureClient.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LocalMach.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";

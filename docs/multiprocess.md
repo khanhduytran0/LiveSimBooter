@@ -48,6 +48,78 @@ audited against that runtime's host-support libkernel. Recheck those layouts bef
    Guest RPC uses that connection's synchronous request/reply API. Its wait interposer reads the shared status table directly,
    without guest XPC or a helper thread.
 
+### Prelaunched LiveProcess workers
+
+After the root simulator launchd reaches READY in a graphical or CLI session, the native broker targets ten fresh
+LiveProcess instances, with at most two speculative launches in flight. Each worker sleeps in its first synchronous XPC
+check-in. At that point it has no guest executable, logical PID, descriptors or simulator mappings. Idle workers are
+absent from the guest process list.
+
+For an ordinary simulator spawn or fork child, the broker verifies the parked worker's task identity again and transfers
+its existing PlugInKit assertion to the job. The reply to the held check-in delivers the job's normal bootstrap plan.
+Each worker runs one guest. A pool miss takes the existing cold launch path immediately. Simulator launchd, native Metal
+and the signing service always use their own launches. Power Off and userspace reboot drain the idle workers as well as
+the active guests before completing.
+
+On native-support runtimes, a fork donor supplies its required stack interval when it spawns the snapshot helper.
+The broker compares it with the native main-stack bounds and VM floor reported by each parked worker at check-in.
+It prefers disjoint stacks, including room for their guards. If necessary it can choose a lower overlap for the
+existing scratch-stack handoff. A worker whose live stack top would be overwritten is ineligible for this fork.
+An ordinary spawn preferentially uses a worker that conflicts with the most recent donor, keeping a compatible worker
+available if the same shell forks again.
+If a full pool contains only incompatible workers, the current request starts cold and the pool replaces one idle worker
+in the background. The selected worker still checks the actual VM layout before the broker maps the parent's stack at its original address.
+
+Set `LSB_LIVEPROCESS_POOL_SIZE` in the native host launch environment to select 0–10 workers. Zero disables prelaunching.
+`LSB_TRACE_LIVEPROCESS_POOL=1` reports parked PIDs, claims, misses and retirements for timing and memory measurements.
+
+On iPhone 17 (host 24A435, guest 23A343), ten parked workers had a combined physical footprint of 10.1 MiB and combined
+RSS of 15.9 MiB. They showed 0.0% aggregate CPU over a five-second idle sample. With the same native build in a CLI session,
+the launchd-owned Fish terminal produced these wall times. Each command exited 0.
+
+| Fish workload | Pool disabled | Ten workers |
+| --- | --- | --- |
+| `neofetch-lsb` | 12.24 s, 12.41 s | 11.74 s, 12.10 s |
+| Eight sequential `awk 'BEGIN {exit 0}'` invocations, median of six batches | 0.805 s | 0.729 s |
+
+All 309 launch requests during the two pooled Neofetch runs used a parked worker. Fork snapshot preparation, address
+collision retries and per-process guest initialization still run after dispatch.
+On a guest userspace reboot, all ten old workers exited. Of the previously sampled native process identities, only the
+host survived, and Fish started in the fresh session.
+
+With stack-aware selection on the same iPhone 17, two traced Neofetch runs completed 119 fork preflights each. All 228
+selected warm workers succeeded, including 28 whose lower stacks the existing scratch path reclaimed. The first run used
+only warm workers. In the second run the pool missed 14 times, and four cold workers hit the stack-top check and were
+retried. Ordinary spawns consumed 10 and 17 workers, respectively, that would have conflicted with Bash. Both runs
+exited zero. Six separate fork checks verified the child's guard, pthread bounds and stack write, and the parent’s
+unchanged stack local and wait status 37.
+
+### Time spent after worker dispatch
+
+On iPhone 17 (24A435, guest 23A343, native-support cache at `0x7180000000`), a diagnostic build measured a median
+51 ms from native READY to entry into the fork helper’s guest `main` over six launches. With guest audio and haptics
+enabled, the helper loaded 270 images. About 28 ms elapsed between completing native cache binding and dyld’s
+before-initializers notification, and guest initializers took a further 8.5 ms. The filesystem probes account for
+part of the former interval. No-op Bash builtins in an already-running process took only a few microseconds each.
+
+The donor now inventories its mappings while its worker starts guest dyld. It validates the worker’s reply before
+sending the offer and rechecks allocator coverage at registration and while libc holds its fork locks. The spawn path
+enumerates live descriptors, with a dense scan fallback for unavailable or incomplete kernel results. The loader also
+uses hardware checksums when available to publish debugger image metadata in the same format.
+
+The following wall times came from the launchd-owned Fish terminal with the same settings and guest tools. Each shell
+operation is the mean of two batches of 12. Neofetch times are the individual runs.
+
+| Workload | Before | After |
+| --- | ---: | ---: |
+| Bash subshell `( : )` | 92.7 ms | 76.9 ms |
+| Bash substitution `x=$(printf x)` | 97.1 ms | 77.7 ms |
+| Fish spawning `df -P .` | 83.8 ms | 68.3 ms |
+| Bash forking and executing `awk` | 211.5 ms | 154.9 ms |
+| `neofetch-lsb` | 12.20, 12.35 s | 10.10, 10.41, 10.52 s |
+
+Each final Neofetch run still made 117 fork-helper requests. These timings cover the combined runtime changes.
+
 The host calls declared private methods using normal Objective-C syntax. The narrow declarations live in
 [FoundationPrivate.h](../Host/Private/FoundationPrivate.h), [PlugInKitPrivate.h](../Host/Private/PlugInKitPrivate.h), and
 [RunningBoardPrivate.h](../Host/Private/RunningBoardPrivate.h).
@@ -144,7 +216,7 @@ terminal-state file alongside RuntimeRoot. Device-platform executables/dylibs ad
 
 ## Native startup pipes and guest connections
 
-The spawn transport (ABI 12) separates native startup (bootstrap ABI 7) from guest RPC. Both ends retain the same owned spawn plans,
+The spawn transport (ABI 12) separates native startup (bootstrap ABI 8) from guest RPC. Both ends retain the same owned spawn plans,
 descriptor transfer and full audit-token authorization. The guest endpoint is supplied only by authenticated native check-in;
 native Metal roles cannot receive or select it. Failed preparation releases both endpoints. The native pipe right is released
 after READY; only the guest endpoint's send reference survives a successful handoff.

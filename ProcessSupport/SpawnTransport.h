@@ -15,7 +15,7 @@
 #define LSB_TRANSPORT_VERSION 12
 
 // Bootstrap-only metadata is versioned independently from the outer transport envelope.
-#define LSB_BOOTSTRAP_VERSION 7
+#define LSB_BOOTSTRAP_VERSION 8
 enum LSBExecutionRole {
     LSB_EXECUTION_SIMULATOR = 0, LSB_EXECUTION_NATIVE_METAL_PROBE = 1, LSB_EXECUTION_NATIVE_METAL_SERVICE = 2, LSB_EXECUTION_NATIVE_SIGNER = 3
 };
@@ -32,10 +32,14 @@ enum LSBRequestKind {
 typedef enum { LSB_TERMINAL_READ = 1, LSB_TERMINAL_WRITE, LSB_TERMINAL_CONTROL } LSBTerminalAccess;
 enum { LSB_MAX_FORK_RANGES = 64, LSB_MAX_FORK_BYTES = 128 * 1024 * 1024 };
 typedef struct { uint64_t start, size; } LSBForkWireRange;
+// Optional native CHECKIN placement hint. The observer still checks its own VM before it touches any donor range.
+typedef struct { uint64_t bottom, top, vmFloor; } LSBWorkerStackGeometry;
 #ifdef __cplusplus
 static_assert(sizeof(LSBForkWireRange) == 16, "fork range wire layout");
+static_assert(sizeof(LSBWorkerStackGeometry) == 24, "native worker stack wire layout");
 #else
 _Static_assert(sizeof(LSBForkWireRange) == 16, "fork range wire layout");
+_Static_assert(sizeof(LSBWorkerStackGeometry) == 24, "native worker stack wire layout");
 #endif
 typedef struct {
     uint64_t requestID;
@@ -85,6 +89,7 @@ typedef struct {
     uint32_t forkRangeCount;
     LSBForkWireRange forkRanges[LSB_MAX_FORK_RANGES]; // OFFER only. Server validates ownership and reads the actual VM attributes.
     LSBPeerProcessIdentity peerIdentity; // CHECKIN owns its taskName; audit comes from the kernel and path remains empty.
+    LSBWorkerStackGeometry workerStack; // CHECKIN only. Zero bounds mean unavailable; vmFloor may be unknown independently.
     mach_port_t nativeServicePort; // Owned send reference, allowed only on a native service READY request.
     mach_port_t processDebuggerPort; // Owned send reference, allowed only on REGISTER_DEBUGGER_PORT after guest initialization.
     bool activateDebuggerPort; // Second phase: endpoint becomes queryable only after the guest publishes its trusted broker audit.

@@ -167,7 +167,8 @@ static int commitFork(int fd) {
     return 0;
 }
 
-int LSBTrialResumeBash(uintptr_t header, const LSBForkContext *caller, uintptr_t stackStart, size_t stackSize, int controlFD, bool dfOnly, bool allowEarly) {
+int LSBTrialResumeBash(uintptr_t header, const LSBForkContext *caller, uintptr_t stackStart, size_t stackSize, int controlFD,
+                       bool dfOnly, bool allowEarly, bool traceEnabled) {
     bool procursus = forkTrialProcursusBashImage(header);
     if (procursus && (!allowEarly || dfOnly)) return ENOTSUP;
     unsigned site = procursus ? procursusBashForkCaller(header, caller, stackStart, stackSize) : bashForkCaller(header, caller, stackStart, stackSize);
@@ -188,7 +189,7 @@ int LSBTrialResumeBash(uintptr_t header, const LSBForkContext *caller, uintptr_t
     if (!replaced) return EPROTO;
 
     // Bash may redirect stderr after getpid. Keep instrumentation out of the command's output; closed stderr disables it.
-    const int traceFD = forkTrialTraceEnabled() ? fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, LSB_MAX_FDS + 1) : -1;
+    const int traceFD = traceEnabled ? fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, LSB_MAX_FDS + 1) : -1;
     const LSBTrialBashCalls *calls = &LSBTrialObservedCalls;
     // exit_builtin jumps to Bash's top_level. A grouped shell inherits that jump buffer from before fork,
     // including register state encoded by the parent's libc. Mirror run_one_command (+0x7158) for EXITPROG and ERREXIT.

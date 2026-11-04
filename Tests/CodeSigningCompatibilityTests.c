@@ -163,6 +163,7 @@ static void testDisabledAndOriginalResults(void) {
     for (size_t i = 0; i < sizeof(disabled) / sizeof(*disabled); ++i) {
         if (disabled[i]) assert(!setenv(LSB_CODE_SIGNING_ENABLE_ENV, disabled[i], 1));
         else assert(!unsetenv(LSB_CODE_SIGNING_ENABLE_ENV));
+        captureSigningPolicy();
         for (size_t j = 0; j < sizeof(readOperations) / sizeof(*readOperations); ++j) {
             memset(buffer, 0xa5, sizeof(buffer));
             resetCalls();
@@ -178,6 +179,7 @@ static void testDisabledAndOriginalResults(void) {
         }
     }
     assert(!setenv(LSB_CODE_SIGNING_ENABLE_ENV, "1", 1));
+    captureSigningPolicy();
     const int untouchedErrors[] = {ESRCH, EINVAL, EFAULT, ERANGE, EACCES, ENOMEM, EINTR, 0};
     for (size_t operation = 0; operation < sizeof(readOperations) / sizeof(*readOperations); ++operation) {
         if (entitlementOperation(readOperations[operation])) continue;
@@ -484,11 +486,13 @@ static void testAuditTokenValidation(void) {
         assert(LSBCSopsAuditToken(777, LSBCSOpDEREntitlementsBlob, output, sizeof(output), badTokens[i]) == -1 && errno == EFAULT);
         assert(!calls.brokerCalls && !calls.originalCalls);
         assert(!unsetenv(LSB_CODE_SIGNING_ENABLE_ENV));
+        captureSigningPolicy();
         resetCalls();
         calls.originalResult = 0; // Opt-out forwards the original pointer without reading it in the adapter.
         assert(!LSBCSopsAuditToken(777, LSBCSOpDEREntitlementsBlob, output, sizeof(output), badTokens[i]) && !calls.brokerCalls);
         assertOriginal(777, LSBCSOpDEREntitlementsBlob, output, sizeof(output), badTokens[i]);
         assert(!setenv(LSB_CODE_SIGNING_ENABLE_ENV, "1", 1));
+        captureSigningPolicy();
     }
     memcpy(pages + 1, &peer, sizeof(peer));
     assert(!mprotect(pages, (size_t)pageSize, PROT_READ));

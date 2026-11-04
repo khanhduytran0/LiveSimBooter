@@ -29,6 +29,10 @@ int main(void) {
     assert(LSBForkStackHintValid(limit, &lo, &hi));
     snprintf(limit, sizeof(limit), "%016llx:%016llx", here, here + LSB_MAX_FORK_BYTES + vm_page_size);
     assert(!LSBForkStackHintValid(limit, &lo, &hi));
+    uint64_t stackTop = (uintptr_t)pthread_get_stackaddr_np(pthread_self());
+    snprintf(overlap, sizeof(overlap), "%016llx:%016llx", stackTop - 3 * vm_page_size, stackTop - 2 * vm_page_size);
+    assert(!LSBForkNotifyStackCollision(&plan, overlap)); // The observer checks lower overlaps after guest startup.
+    snprintf(overlap, sizeof(overlap), "%016llx:%016llx", here, stackTop);
     assert(!LSBForkAcknowledgedStackCollision(EADDRINUSE, pair[0]));
     assert(LSBForkNotifyStackCollision(&plan, overlap));
     assert(!LSBForkAcknowledgedStackCollision(ENOENT, pair[0])); // This error must not consume any receipt.
@@ -41,5 +45,5 @@ int main(void) {
     close(pair[0]);
     assert(!LSBForkNotifyStackCollision(&plan, overlap)); // Delivery failure cannot trigger early rejection.
     close(control);
-    puts("Early stack collision hint validated the active native stack and accepted only a receipt on the matching failed spawn");
+    puts("Early stack hint deferred lower overlaps and rejected a collision with the native startup window");
 }

@@ -22,5 +22,6 @@ _Static_assert(offsetof(LSBTrialBashCalls, getpidSP) == LSB_BASH_GETPID_SP && of
 
 // Run only in the disposable observer, after snapshot installation and import rebinding.
 // A return is a pre-commit errno for the parent. General exec commits at the copied child getpid; df-only waits until execve.
-int LSBTrialResumeBash(uintptr_t header, const LSBForkContext *caller, uintptr_t stackStart, size_t stackSize, int controlFD, bool dfOnly, bool allowEarly);
+int LSBTrialResumeBash(uintptr_t header, const LSBForkContext *caller, uintptr_t stackStart, size_t stackSize, int controlFD,
+                       bool dfOnly, bool allowEarly, bool traceEnabled);
 #endif

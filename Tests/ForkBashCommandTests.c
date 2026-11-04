@@ -26,6 +26,16 @@ static void testStackReinventory(uintptr_t image, LSBForkContext caller, uintptr
 }
 
 int main(void) {
+    // Checkpoints retain a stable logging policy even while the shell edits its environment for its next fork.
+    assert(!unsetenv("LSB_FORK_SNAPSHOT_TRACE") && !unsetenv(LSB_FAKE_PTY_ENV));
+    assert(forkTrialCaptureTrace() == ForkTraceDefault && forkTrialTraceEnabled());
+    assert(!setenv(LSB_FAKE_PTY_ENV, "", 1) && forkTrialTraceEnabled());
+    assert(forkTrialCaptureTrace() == ForkTraceOff && !forkTrialTraceEnabled());
+    assert(!setenv("LSB_FORK_SNAPSHOT_TRACE", "1", 1) && !forkTrialTraceEnabled());
+    assert(forkTrialCaptureTrace() == ForkTraceVerbose && forkTrialTraceEnabled());
+    assert(!setenv("LSB_FORK_SNAPSHOT_TRACE", "0", 1) && forkTrialCaptureTrace() == ForkTraceOff);
+    assert(!unsetenv("LSB_FORK_SNAPSHOT_TRACE") && !unsetenv(LSB_FAKE_PTY_ENV));
+    forkTrialCaptureTrace();
     assert(!setenv("LSB_FORK_SNAPSHOT_PROBE", "exec", 1));
     assert(!LSBForkTrialEnabled()); // A different guest executable can inherit the same environment.
     assert(!unsetenv("LSB_FORK_SNAPSHOT_PROBE"));

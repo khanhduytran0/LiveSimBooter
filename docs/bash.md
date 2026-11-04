@@ -40,9 +40,11 @@ In a ten-command run on the iPhone 17 package fork path, all five rejected obser
 parent's 8 MiB main-stack range. The first occupied page was 7.98 MiB below the saved stack pointer in four
 cases, and 5.62 MiB below it in the fifth. The receipt records the start of each overlap. The general fork path
 preserves the full inheritable mapping so the child can use saved pointers and grow its stack.
-For this path, the donor now sends its required stack bounds to each prospective child. Before starting guest dyld,
-the native observer can reject a range below its VM floor or overlapping its live main stack. An acknowledged rejection
-uses one of the existing four attempts and leaves no guest PID to reap. A candidate that passes still undergoes
+For this path, the donor sends its required stack bounds to each prospective child. Before starting guest dyld,
+the native observer rejects a range below its VM floor or an overlap reaching the top of its own main stack. An acknowledged rejection
+leaves no guest PID to reap. A lower overlap can be [reclaimed from a scratch stack](procursus.md#reclaiming-the-fork-childs-stack).
+The donor stops after eight placement failures if the last one occurred at the early check,
+or after four if the last one occurred during full observer preflight. A candidate that passes still undergoes
 the full mapping checks. On iPhone 17, a diagnostic exercised both early rejection reasons. Each returned
 `EADDRINUSE`, a subsequent `waitpid(-1, …, WNOHANG)` reported `ECHILD`, and the caller received no `SIGCHLD`.
 An APT terminal run then rejected two candidates early and used the third. The shorter guarded stack used by
@@ -67,7 +69,9 @@ across the switch to its new executable. Type `exit` to return to the original F
 
 Start a long-running foreground command and press Ctrl-Z (or `^Z` on the second page of terminal shortcuts). Use `jobs -l`
 to see the stopped job, `bg %+` to continue it in the background, and `fg %+` to give it the terminal again. Ctrl-C then
-interrupts the foreground group. For snapshot and raw wait diagnostics, also set `LSB_FORK_SNAPSHOT_TRACE=1` when starting Bash.
+interrupts the foreground group. For diagnostics, set `LSB_FORK_SNAPSHOT_TRACE=1` when starting Bash. You can also
+export it from a running Bash. Each fork reads the setting before preparing its snapshot, so changing it to `0` silences
+the next fork without restarting the shell.
 
 The device test sent the suspend byte through the host input path on iPhone16,2 (host 23B50, guest 23A343).
 For logical PID 10951, Bash 10937's three wait statuses were `0x127f` (SIGTSTP), `0x137f` (SIGCONT) and

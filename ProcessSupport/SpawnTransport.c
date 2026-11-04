@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -145,6 +146,24 @@ static int captureSelfIdentity(LSBPeerProcessIdentity *identity) {
         return EACCES;
     }
     return 0;
+}
+
+static bool validWorkerStack(const LSBWorkerStackGeometry *stack) {
+    return stack->bottom && stack->bottom < stack->top && stack->vmFloor <= stack->bottom &&
+        !((stack->bottom | stack->top | stack->vmFloor) & (vm_page_size - 1));
+}
+
+static void encodeWorkerStack(xpc_object_t request) {
+    if (!pthread_main_np()) return;
+    pthread_t thread = pthread_self();
+    uint64_t top = (uintptr_t)pthread_get_stackaddr_np(thread), size = pthread_get_stacksize_np(thread);
+    uintptr_t sp = (uintptr_t)&thread;
+    if (size > top || sp < top - size || sp >= top) return;
+    LSBWorkerStackGeometry stack = { .bottom = top - size, .top = top };
+    task_vm_info_data_t vm;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (!task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &count) && count >= TASK_VM_INFO_REV2_COUNT) stack.vmFloor = vm.min_address;
+    if (validWorkerStack(&stack)) xpc_dictionary_set_data(request, "self-worker-stack", &stack, sizeof(stack));
 }
 
 static int decodeIdentity(xpc_object_t dictionary, LSBPeerProcessIdentity *identity, pid_t pid, const audit_token_t *checkinAudit) {
@@ -438,6 +457,7 @@ int LSBTransportCheckIn(LSBBootstrapReply *result, int fds[LSB_MAX_FDS]) {
     if (!error) {
         xpc_dictionary_set_data(request, "self-short-info", self.shortInfo, sizeof(self.shortInfo));
         xpc_dictionary_set_mach_send(request, "self-task-name", self.taskName);
+        encodeWorkerStack(request);
     }
     LSBPeerProcessIdentityDispose(&self);
     xpc_object_t reply = NULL;
@@ -1395,9 +1415,18 @@ static int decodeRequest(LSBReceivedMessage *message) {
             else message->entitlementOperation = (uint32_t)operation;
         } else if (!error && xpc_dictionary_get_value(request, "operation")) error = EPROTO;
         if (!error && kind == LSB_REQUEST_CHECKIN) {
-            if (xpc_dictionary_get_count(request) != 6) error = EPROTO;
-            else error = decodeIdentity(request, &message->peerIdentity, (pid_t)message->audit.val[5], &message->audit);
-        } else if (!error && (xpc_dictionary_get_value(request, "self-short-info") || xpc_dictionary_get_value(request, "self-task-name"))) error = EPROTO;
+            xpc_object_t stack = xpc_dictionary_get_value(request, "self-worker-stack");
+            if (xpc_dictionary_get_count(request) != (stack ? 7u : 6u)) error = EPROTO;
+            if (!error && stack) {
+                if (xpc_get_type(stack) != XPC_TYPE_DATA || xpc_data_get_length(stack) != sizeof(message->workerStack)) error = EPROTO;
+                else {
+                    memcpy(&message->workerStack, xpc_data_get_bytes_ptr(stack), sizeof(message->workerStack));
+                    if (!validWorkerStack(&message->workerStack)) error = EPROTO;
+                }
+            }
+            if (!error) error = decodeIdentity(request, &message->peerIdentity, (pid_t)message->audit.val[5], &message->audit);
+        } else if (!error && (xpc_dictionary_get_value(request, "self-short-info") || xpc_dictionary_get_value(request, "self-task-name") ||
+                             xpc_dictionary_get_value(request, "self-worker-stack"))) error = EPROTO;
         if (!error && (kind == LSB_REQUEST_COPY_PROCESS_IDENTITY || kind == LSB_REQUEST_RESOLVE_NATIVE_CHILD_PID ||
                        kind == LSB_REQUEST_COPY_DEBUGGER_INFO || kind == LSB_REQUEST_COPY_PROCESS_TASK)) {
             int64_t target = 0;

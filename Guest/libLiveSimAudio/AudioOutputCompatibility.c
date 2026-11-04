@@ -1,5 +1,6 @@
 #include "AudioOutputCompatibility.h"
 #include "AudioOutputTransport.h"
+#include "../Shared/LaunchFlag.h"
 #include <errno.h>
 #include <mach/mach_time.h>
 #include <math.h>
@@ -33,10 +34,16 @@ static void *outputStream;
 static uint64_t outputEpoch;
 static _Atomic(uint32_t) runningCount;
 static _Atomic(unsigned) traceEvents;
+static LSBLaunchFlag audioOutput = { .name = LSB_AUDIO_OUTPUT_ENABLE_ENV };
+static LSBLaunchFlag audioTrace = { .name = "LSB_AUDIO_TRACE" };
+
+__attribute__((constructor)) static void captureAudioSettings(void) {
+    LSBCaptureLaunchFlag(&audioOutput);
+    LSBCaptureLaunchFlag(&audioTrace);
+}
 
 static bool enabled(void) {
-    const char *value = getenv(LSB_AUDIO_OUTPUT_ENABLE_ENV);
-    return value && !strcmp(value, "1");
+    return LSBLaunchFlagEnabled(&audioOutput);
 }
 static bool aggregateObject(AudioObjectID object) { return object >= LSB_AUDIO_OUTPUT_AGGREGATE_FIRST && object < LSB_AUDIO_OUTPUT_AGGREGATE_LIMIT; }
 static bool device(AudioObjectID object) { return object == LSB_AUDIO_OUTPUT_DEVICE || (aggregateObject(object) && !(object & 1)); }
@@ -56,8 +63,7 @@ static bool objectExists(AudioObjectID object) {
 }
 
 static void traceProperty(const char *operation, AudioObjectID object, const AudioObjectPropertyAddress *address, OSStatus status) {
-    const char *trace = getenv("LSB_AUDIO_TRACE");
-    if (!trace || strcmp(trace, "1") || atomic_fetch_add(&traceEvents, 1) >= 96) return;
+    if (!LSBLaunchFlagEnabled(&audioTrace) || atomic_fetch_add(&traceEvents, 1) >= 96) return;
     UInt32 selector = address ? address->mSelector : 0, scope = address ? address->mScope : 0;
     char text[5];
     for (unsigned i = 0; i < 4; ++i) { unsigned byte = (selector >> ((3 - i) * 8)) & 255; text[i] = byte >= 32 && byte < 127 ? byte : '.'; }

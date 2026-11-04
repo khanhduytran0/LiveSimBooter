@@ -24,7 +24,7 @@ enum {
     MissingPath, PathEmpty, PathRelative, PathLong, PathType, MissingTask, TaskNull, TaskType, TaskFD, TaskAudit,
     ExtraFD, ExtraPort, ErrorWithIdentity, ReplyCount
 };
-enum { BadRequestCount = 12, BadCheckInCount = 12 };
+enum { BadRequestCount = 13, BadCheckInCount = 17 };
 enum {
     ResolveSame, ResolveDifferent, ResolveMissing, ResolveDenied, ResolveVersion, ResolveErrorType, ResolveRequestID,
     ResolveMissingPID, ResolveZeroPID, ResolveNegativePID, ResolveUnsignedPID, ResolveOverflowPID, ResolveErrorPID,
@@ -165,7 +165,7 @@ static void resolveReplyVariant(LSBReceivedMessage *message, mach_port_t task, u
     xpc_release(reply);
 }
 
-static void malformedRequest(const LSBPeerProcessIdentity *identity, unsigned variant, unsigned kind) {
+static void checkRequest(const LSBPeerProcessIdentity *identity, unsigned variant, unsigned kind) {
     bool checkin = kind == LSB_REQUEST_CHECKIN;
     mach_port_t broker = MACH_PORT_NULL;
     assert(!LSBTestCopyBrokerPort(&broker));
@@ -180,6 +180,7 @@ static void malformedRequest(const LSBPeerProcessIdentity *identity, unsigned va
         xpc_dictionary_set_mach_send(request, "self-task-name", identity->taskName);
         unsigned char info[LSB_PEER_SHORT_INFO_BYTES + 1] = {0};
         memcpy(info, identity->shortInfo, sizeof(identity->shortInfo));
+        LSBWorkerStackGeometry stack = { .bottom = 8 * vm_page_size, .top = 16 * vm_page_size };
         switch (variant) {
             case 0: xpc_dictionary_set_value(request, "self-short-info", NULL); break;
             case 1: xpc_dictionary_set_data(request, "self-short-info", info, sizeof(info) - 2); break;
@@ -193,6 +194,12 @@ static void malformedRequest(const LSBPeerProcessIdentity *identity, unsigned va
             case 9: addFD(request, "extra"); break;
             case 10: xpc_dictionary_set_data(request, "peer-audit", &identity->audit, sizeof(identity->audit)); break;
             case 11: xpc_dictionary_set_int64(request, "error", EPERM); break;
+            case 12: addFD(request, "self-worker-stack"); break;
+            case 13: xpc_dictionary_set_data(request, "self-worker-stack", &stack, sizeof(stack) - 1); break;
+            case 14: ++stack.top; xpc_dictionary_set_data(request, "self-worker-stack", &stack, sizeof(stack)); break;
+            case 15: stack.top = stack.bottom; xpc_dictionary_set_data(request, "self-worker-stack", &stack, sizeof(stack)); break;
+            case 16: stack.vmFloor = stack.top; xpc_dictionary_set_data(request, "self-worker-stack", &stack, sizeof(stack)); break;
+            case BadCheckInCount: break; // Geometry unavailable; normal authenticated check-in is still possible.
             default: abort();
         }
     } else {
@@ -210,11 +217,12 @@ static void malformedRequest(const LSBPeerProcessIdentity *identity, unsigned va
             case 9: xpc_dictionary_set_data(request, "target-audit", &identity->audit, sizeof(identity->audit)); break;
             case 10: xpc_dictionary_set_uint64(request, "execution-role", 0); break;
             case 11: xpc_dictionary_set_uint64(request, "operation", 16); break;
+            case 12: xpc_dictionary_set_uint64(request, "self-worker-stack", 0); break;
             default: abort();
         }
     }
     assert(!xpc_pipe_routine(pipe, request, &reply));
-    assert(reply && xpc_dictionary_get_int64(reply, "error") == EPROTO);
+    assert(reply && xpc_dictionary_get_int64(reply, "error") == (checkin && variant == BadCheckInCount ? EAGAIN : EPROTO));
     xpc_release(reply); xpc_release(request); xpc_release(pipe);
     mach_port_deallocate(mach_task_self(), broker);
 }
@@ -272,9 +280,9 @@ static int client(void) {
     }
     LSBPeerProcessIdentity self = selfIdentity();
     mach_port_urefs_t before = references(self.taskName);
-    for (unsigned variant = 0; variant < BadRequestCount; ++variant) malformedRequest(&self, variant, LSB_REQUEST_COPY_PROCESS_IDENTITY);
-    for (unsigned variant = 0; variant < BadRequestCount; ++variant) malformedRequest(&self, variant, LSB_REQUEST_RESOLVE_NATIVE_CHILD_PID);
-    for (unsigned variant = 0; variant < BadCheckInCount; ++variant) malformedRequest(&self, variant, LSB_REQUEST_CHECKIN);
+    for (unsigned variant = 0; variant < BadRequestCount; ++variant) checkRequest(&self, variant, LSB_REQUEST_COPY_PROCESS_IDENTITY);
+    for (unsigned variant = 0; variant < BadRequestCount; ++variant) checkRequest(&self, variant, LSB_REQUEST_RESOLVE_NATIVE_CHILD_PID);
+    for (unsigned variant = 0; variant <= BadCheckInCount; ++variant) checkRequest(&self, variant, LSB_REQUEST_CHECKIN);
     assert(references(self.taskName) == before);
     LSBPeerProcessIdentityDispose(&self);
     assert(!LSBRequireSingleThread());
@@ -298,6 +306,7 @@ int main(int argc, char **argv) {
     LSBReceivedMessage message;
     assert(!LSBTransportReceive(broker, &message) && message.kind == LSB_REQUEST_CHECKIN);
     assert(message.audit.val[5] == (unsigned)child && !memcmp(&message.audit, &message.peerIdentity.audit, sizeof(message.audit)));
+    assert(message.workerStack.bottom && message.workerStack.top > message.workerStack.bottom && message.workerStack.vmFloor <= message.workerStack.bottom);
     assert(LSBPeerProcessIdentityPID(&message.peerIdentity) == (unsigned)child && !message.peerIdentity.executablePath[0]);
     audit_token_t actual;
     mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
@@ -331,6 +340,10 @@ int main(int argc, char **argv) {
         assert(references(childIdentity.taskName) == childReferences);
         assert(descriptorCount() == descriptors);
     }
+    assert(!LSBTransportReceive(broker, &message) && message.kind == LSB_REQUEST_CHECKIN);
+    assert(!message.workerStack.bottom && !message.workerStack.top && !message.workerStack.vmFloor && message.audit.val[5] == (unsigned)child);
+    assert(!LSBTransportReply(&message, EAGAIN, 0, 0, NULL, NULL, NULL));
+    LSBTransportDisposeMessage(&message);
     int status = 0;
     assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
     LSBPeerProcessIdentityDispose(&childIdentity);

@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #include "HostApplication.h"
 #include "Broker.h"
+#import "DeviceConfiguration.h"
 #import "ViewController.h"
 #include <stdio.h>
 #include <string.h>
@@ -74,5 +75,6 @@ int LSBRunHostApplication(int argc, const char *argv[], const char *envp[]) {
     launchArgumentCount = argc;
     launchArguments = argv;
     launchEnvironment = envp;
+    LSBCaptureDeviceLaunchOverrides(envp);
     @autoreleasepool { return UIApplicationMain(argc, (char **)argv, nil, NSStringFromClass(LSBHostApplicationDelegate.class)); }
 }

@@ -233,7 +233,13 @@ uintptr_t LSBThreadSignPC(uintptr_t start, uint32_t flags) {
 #undef pthread_mach_thread_np
 #undef pthread_detach
 
+static void resetWorkqueueMetadata(void) {
+    metadataOnce = (pthread_once_t)PTHREAD_ONCE_INIT;
+    nativeFeatures = 0;
+}
+
 static void reset(void) {
+    resetWorkqueueMetadata();
     initializeInspectionWorker = false;
     workerCreateCalls = workerDetachCalls = portMoveCalls = portInsertCalls = 0;
     workerFunction = NULL;
@@ -311,17 +317,23 @@ static void metadataTests(void) {
     unsetenv(LSB_HOST_WORKQUEUE_START_ENV);
     unsetenv(LSB_HOST_WORKQUEUE_FEATURES_ENV);
     assert(!LSBWorkqueueSupported());
+    unsigned reads = environmentReads;
     setenv(LSB_HOST_WORKQUEUE_START_ENV, "0x2321218a74", 1);
     setenv(LSB_HOST_WORKQUEUE_FEATURES_ENV, "0xff", 1);
+    assert(!LSBWorkqueueSupported() && environmentReads == reads);
+    resetWorkqueueMetadata();
     errno = EDOM;
     assert(LSBWorkqueueSupported() == 0xff && errno == EDOM && originalCalls == 2);
     const char *invalid[] = {"", "-1", "0", "0x2321218a75", "0x2321218a74junk", "18446744073709551616"};
     for (unsigned i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
         setenv(LSB_HOST_WORKQUEUE_START_ENV, invalid[i], 1);
+        if (!i) assert(LSBWorkqueueSupported() == 0xff && environmentReads == reads + 2);
+        resetWorkqueueMetadata();
         assert(!LSBWorkqueueSupported());
     }
     setenv(LSB_HOST_WORKQUEUE_START_ENV, "0x2321218a74", 1);
     setenv(LSB_HOST_WORKQUEUE_FEATURES_ENV, "0x80000000", 1);
+    resetWorkqueueMetadata();
     assert(!LSBWorkqueueSupported());
 }
 

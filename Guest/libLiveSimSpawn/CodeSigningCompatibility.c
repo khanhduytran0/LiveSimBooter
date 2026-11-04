@@ -1,4 +1,5 @@
 #include "CodeSigningCompatibility.h"
+#include "../Shared/LaunchFlag.h"
 #include "../../ProcessSupport/GuestEntitlements.h"
 #include "../../ProcessSupport/SpawnTransport.h"
 
@@ -14,6 +15,12 @@ extern kern_return_t mach_vm_write(vm_map_t task, mach_vm_address_t address, vm_
 
 extern kern_return_t mach_vm_read_overwrite(vm_map_t task, mach_vm_address_t address, mach_vm_size_t size,
                                             mach_vm_address_t destination, mach_vm_size_t *copied);
+
+static LSBLaunchFlag simulateSigning = { .name = LSB_CODE_SIGNING_ENABLE_ENV };
+
+__attribute__((constructor)) static void captureSigningPolicy(void) {
+    LSBCaptureLaunchFlag(&simulateSigning);
+}
 
 static int currentAuditToken(audit_token_t *token) {
     mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
@@ -107,19 +114,17 @@ static bool supportedRead(unsigned int operation) {
 int LSBCSopsAuditToken(pid_t pid, unsigned int operation, void *buffer, size_t size, audit_token_t *token) {
     int incomingErrno = errno;
     if (operation == LSBCSOpEntitlementsBlob || operation == LSBCSOpDEREntitlementsBlob) {
-        const char *enabled = getenv(LSB_CODE_SIGNING_ENABLE_ENV);
         // Native self reads describe LiveProcess, not the mapped guest. Security caches EINVAL/empty success as no entitlements,
         // so these two opted-in operations must use the registered image snapshot even when the kernel would not return EPERM.
         // The broker authenticates the complete target audit token; missing, stale or unknown guest identities never fall back.
-        if (enabled && !strcmp(enabled, "1")) return copyGuestEntitlements(pid, operation, buffer, size, token, incomingErrno);
+        if (LSBLaunchFlagEnabled(&simulateSigning)) return copyGuestEntitlements(pid, operation, buffer, size, token, incomingErrno);
         errno = incomingErrno;
     }
     int result = csops_audittoken(pid, operation, buffer, size, token);
     int originalErrno = errno;
     if (result != -1 || originalErrno != EPERM || !supportedRead(operation)) return result;
 
-    const char *enabled = getenv(LSB_CODE_SIGNING_ENABLE_ENV);
-    if (!enabled || strcmp(enabled, "1")) {
+    if (!LSBLaunchFlagEnabled(&simulateSigning)) {
         errno = originalErrno;
         return result;
     }

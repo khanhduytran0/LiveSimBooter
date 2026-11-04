@@ -1,11 +1,13 @@
 #include "SpawnDiagnostics.h"
 #include "../../ProcessSupport/SpawnTransport.h"
+#include "../../ProcessSupport/OpenFDs.h"
 #include "ChildWait.h"
 #include "CreationMask.h"
 #include "ExecutableAccess.h"
 #include "FakePTY.h"
 #include "SpawnAttributes.h"
 #include "ProcessSession.h"
+#include "ProcessIdentity.h"
 #include "ProcursusMaintscript.h"
 #include "../../LiveProcess/ExecutablePath.h"
 
@@ -255,7 +257,9 @@ static int snapshotFDs(LSBSpawnPlan *plan, int descriptors[LSB_MAX_FDS]) {
     int terminalWatchFD = LSBGuestFakePTYWatchFD();
     int highest = 2;
     bool omittedClose[LSB_MAX_ACTIONS] = {0};
-    for (int fd = 0; fd < limit; ++fd) {
+    LSBOpenFDScan scan;
+    LSBBeginOpenFDScan(&scan, LSBNativePID(), limit);
+    for (int fd; (fd = LSBNextOpenFD(&scan)) >= 0;) {
         if (fd == wakeFD || fd == terminalWatchFD) continue;
         int flags = fcntl(fd, F_GETFD);
         if (flags < 0) { if (errno == EBADF) continue; return errno; }

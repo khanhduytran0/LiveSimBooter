@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #include "Broker.h"
 #include "ExtensionLauncher.h"
+#import "LiveProcessPool.h"
 #include "ChildMonitor.h"
 #include "TerminalJobState.h"
 #include <sys/event.h>
@@ -20,6 +21,8 @@
 #include "SpawnTransport.h"
 #include "ForkSnapshotBroker.h"
 #include "../ProcessSupport/ForkRendezvous.h"
+#include "../ProcessSupport/ForkStackHint.h"
+#include "../ProcessSupport/GuestImagePlacement.h"
 #include "SlidableCache.h"
 #include "PrivateXPC.h"
 #include "LaunchdHandshake.h"
@@ -57,6 +60,7 @@ enum { JobQueued, JobStarting, JobDispatched, JobRunning };
 @property BOOL executed;
 @property uint32_t pidVersion;
 @property pid_t extensionPID;
+@property BOOL claimedWarmProcess;
 @property LSBReceivedMessage *request;
 @property dispatch_source_t exitMonitor;
 @property (nonatomic, strong) LSBRunningBoardMonitor *runningBoardMonitor;
@@ -156,6 +160,8 @@ static mach_port_t guestBrokerPort;
 static NSMutableArray<LSBPendingAdoption *> *pendingAdoptions;
 static dispatch_source_t adoptionRetrySource;
 static LSBJob *startingJob;
+static LSBLiveProcessPool *liveProcessPool;
+static BOOL poolDraining;
 static NSString *runtimeRoot;
 static uint64_t sessionCacheBase;
 static BOOL sessionNativeSupport;
@@ -195,6 +201,7 @@ static LSBRetiredIdentity retiredIdentities[RetiredIdentityCapacity];
 static unsigned retiredIdentityCount, auditResolutionLogs;
 static unsigned peerIdentityLogs;
 static unsigned cooperativeDebuggerLogs;
+static BOOL tracePeerDebuggerState;
 static unsigned guestEntitlementErrorLogs;
 static unsigned guestProxySigningErrorLogs;
 static BOOL retiredIdentitiesFull;
@@ -216,6 +223,30 @@ static void registerReplacementSpringBoardMetal(LSBJob *active, LSBJob *helper);
 static void finishJob(LSBJob *job, int error);
 static void handleMessage(LSBReceivedMessage *message);
 static int snapshotSavedSessionConfiguration(void);
+
+static NSUInteger liveProcessPoolCapacity(void) {
+    const char *value = getenv("LSB_LIVEPROCESS_POOL_SIZE");
+    if (!value) return 10;
+    if (!strcmp(value, "10")) return 10;
+    return value[0] >= '0' && value[0] <= '9' && !value[1] ? (NSUInteger)(value[0] - '0') : 0;
+}
+
+static void drainLiveProcessPool(void) {
+    if (!liveProcessPool || poolDraining) return;
+    poolDraining = YES;
+    [liveProcessPool drain:^(int error) {
+        // A pool with no pending processes can complete inline while the broker is still assembling its death monitors.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            liveProcessPool = nil;
+            poolDraining = NO;
+            if (error) {
+                rebootDrainFailed = YES;
+                fprintf(stderr, "[broker] Idle LiveProcess teardown failed: %s\n", strerror(error));
+            }
+            if (sessionDraining) completeUserspaceReboot(rebootGeneration);
+        });
+    }];
+}
 
 static void notifySessionStateChanged(void) {
     if (sessionStateNotificationScheduled) return;
@@ -897,10 +928,14 @@ static void finishJob(LSBJob *job, int error) {
         fprintf(stderr, "[broker] request=%llu pid=%d finished error=%d program=%s\n", job.identifier, job.pid, error, program);
     } else fprintf(stderr, "[broker] request=%llu pid=%d finished error=%d\n", job.identifier, job.pid, error);
     // A timed-out launch can still start later. Never let that unbound child claim another request's plan.
-    if (job.phase == JobStarting && !job.pid) {
+    if (job.claimedWarmProcess && job.phase == JobStarting && !job.pid) {
+        // Its pkd session is already bound to the checked-in worker. Terminate that instance if the handoff failed.
+        LSBSignalExtension(job.identifier, SIGKILL);
+    } else if (job.phase == JobStarting && !job.pid) {
         launchLaneFailed = YES;
         fprintf(stderr, "[broker] Unbound extension launch failed; restart host before submitting another launch\n");
     }
+    if (launchLaneFailed || (job.simulatorLaunchd && !job.parentIdentifier)) drainLiveProcessPool();
     if (job.request) {
         if (job.request->object) LSBTransportReply(job.request, error ? error : ECHILD, 0, job.identifier, NULL, NULL, NULL);
         disposeMessage(job.request);
@@ -1089,6 +1124,23 @@ static void extensionEvent(uint64_t identifier, pid_t pid, int error, void *cont
     finishJob(job, error);
 }
 
+static LSBReceivedMessage *takeParkedProcess(LSBJob *job) {
+    if (!liveProcessPool || job.executionRole != LSB_EXECUTION_SIMULATOR || job.simulatorLaunchd) return NULL;
+    uint64_t bottom = 0, top = 0;
+    const LSBSpawnPlan *plan = &job.request->plan;
+    // The fork donor uses this absolute guest path. Other executables cannot steer placement through inherited environment entries.
+    if (sessionNativeSupport && !strcmp(plan->strings + plan->path, LSB_FORK_BOOTSTRAP_EXECUTABLE)) {
+        static const char prefix[] = LSB_FORK_STACK_HINT_ENV "=";
+        for (unsigned i = 0; i < plan->envc; ++i) {
+            const char *entry = plan->strings + plan->envp[i];
+            if (strncmp(entry, prefix, sizeof(prefix) - 1)) continue;
+            if (!LSBForkStackHintValid(entry + sizeof(prefix) - 1, &bottom, &top)) bottom = top = 0;
+            break; // The worker also reads the first matching entry.
+        }
+    }
+    return [liveProcessPool takeForRequest:job.identifier donorStackBottom:bottom top:top event:extensionEvent context:NULL];
+}
+
 static void startNextJob(void) {
     // Coalesce recursive queue transitions and notify UIKit after the main-thread transaction has settled.
     notifySessionStateChanged();
@@ -1155,13 +1207,16 @@ static void startNextJob(void) {
         uint64_t identifier = job.identifier;
         uint32_t launchOptions = job.executionRole == LSB_EXECUTION_NATIVE_METAL_PROBE || job.executionRole == LSB_EXECUTION_NATIVE_METAL_SERVICE
             ? LSB_EXTENSION_LAUNCH_GPU : 0;
-        int error = LSBLaunchExtensionWithOptions(LSB_EXTENSION_IDENTIFIER, identifier, launchOptions, extensionEvent, NULL);
+        LSBReceivedMessage *parked = takeParkedProcess(job);
+        job.claimedWarmProcess = parked != NULL;
+        int error = parked ? 0 : LSBLaunchExtensionWithOptions(LSB_EXTENSION_IDENTIFIER, identifier, launchOptions, extensionEvent, NULL);
         if (error) { job.phase = JobQueued; finishJob(job, error); return; }
-        fprintf(stderr, "[broker] extension request=%llu submitted\n", identifier);
+        fprintf(stderr, "[broker] extension request=%llu %s\n", identifier, parked ? "claimed" : "submitted");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (sessionLazySigningEnabled ? 180 : 30) * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             LSBJob *pending = findJob(identifier);
             if (pending && pending.phase != JobRunning) finishJob(pending, ETIMEDOUT);
         });
+        if (parked) handleMessage(parked);
         return;
     }
 }
@@ -2023,8 +2078,7 @@ static int handleForkRequest(LSBJob *sender, const LSBReceivedMessage *message) 
 }
 
 static BOOL traceCooperativeDebugger(void) {
-    const char *enabled = getenv("LSB_TRACE_PEER_DEBUGGER_STATE");
-    if (!enabled || strcmp(enabled, "1") || cooperativeDebuggerLogs >= 128) return NO;
+    if (!tracePeerDebuggerState || cooperativeDebuggerLogs >= 128) return NO;
     ++cooperativeDebuggerLogs;
     return YES;
 }
@@ -2547,6 +2601,13 @@ static void handleMessage(LSBReceivedMessage *message) {
             if (sender.terminalSession) observeTerminalJob(sender);
             fprintf(stderr, "[broker] spawn ready guest=%d native=%d request=%llu\n", sender.guestPID, pid, sender.identifier);
             startingJob = nil;
+            if (sender.simulatorLaunchd && !sender.parentIdentifier && !sessionControlRequested && !liveProcessPool && (cliSession || enableIndigo)) {
+                NSUInteger capacity = liveProcessPoolCapacity();
+                if (capacity) {
+                    liveProcessPool = [[LSBLiveProcessPool alloc] initWithCapacity:capacity validatePeer:validatePeerTaskIdentity];
+                    [liveProcessPool start];
+                }
+            }
             if (nativeService) for (LSBJob *owner in jobs) {
                 if (owner.phase == JobRunning && owner.springBoardMetalServiceIdentifier == sender.identifier &&
                     owner.springBoardMetalPending && !owner.springBoardMetalError) registerReplacementSpringBoardMetal(owner, sender);
@@ -2878,7 +2939,7 @@ static int snapshotSavedSessionConfiguration(void) {
 }
 
 static void completeUserspaceReboot(uint64_t generation) {
-    if (!sessionDraining || generation != rebootGeneration || finishingDepth || rebootPendingDeaths.count) return;
+    if (!sessionDraining || generation != rebootGeneration || finishingDepth || poolDraining || rebootPendingDeaths.count) return;
     for (LSBRunningBoardMonitor *monitor in rebootDeathMonitors) LSBRunningBoardMonitorCancel(monitor);
     rebootDeathMonitors = nil;
     for (dispatch_source_t source in rebootExitSources) dispatch_source_cancel(source);
@@ -2967,6 +3028,7 @@ static void beginUserspaceReboot(LSBJob *exitedLaunchd) {
     rebootPendingDeaths = [NSMutableSet new];
     rebootDeathMonitors = [NSMutableArray new];
     rebootExitSources = [NSMutableArray new];
+    drainLiveProcessPool();
     NSArray<LSBJob *> *oldJobs = [jobs copy];
     // Transfer existing death monitors out of finishJob's recursive cleanup, preserving already queued death evidence.
     // Removing a job or accepting a signal does not prove exit. Never overlap services from two generations.
@@ -3064,6 +3126,7 @@ int LSBStartHost(int argc, const char *argv[], const char *envp[]) {
         if (error) { disposeMessage(initial); fprintf(stderr, "[broker] Invalid initial plan: %s\n", strerror(error)); return failSessionStart(error); }
         if (!jobs) {
             // Registration and its receiver live for the native host lifetime, including powered-off intervals.
+            tracePeerDebuggerState = LSBRuntimeBooleanEnvironment(envp, "LSB_TRACE_PEER_DEBUGGER_STATE", false);
             mach_port_t service = MACH_PORT_NULL;
             char serviceName[LSB_BROKER_SERVICE_BYTES];
             error = LSBStoreBrokerServiceName(LSBRuntimeStorage.sharedStorage.appGroupIdentifier.UTF8String, serviceName);
@@ -3098,8 +3161,13 @@ int LSBStartHost(int argc, const char *argv[], const char *envp[]) {
                     receiveFailures = 0;
                     dispatch_async(dispatch_get_main_queue(), ^{ @autoreleasepool {
                         // This registered pipe is solely the native, single-threaded bootstrap. Guest operations use the mode-2 listener.
-                        if (message->kind != LSB_REQUEST_CHECKIN && message->kind != LSB_REQUEST_READY) replyError(message, EACCES);
-                        else handleMessage(message);
+                        if (message->kind == LSB_REQUEST_CHECKIN && liveProcessPool) {
+                            pid_t cold = startingJob.extensionPID;
+                            if (!cold && startingJob) cold = LSBExtensionProcessIdentifier(startingJob.identifier);
+                            if ([liveProcessPool handleCheckIn:message coldPID:cold]) return;
+                        }
+                        if (message->kind == LSB_REQUEST_CHECKIN || message->kind == LSB_REQUEST_READY) handleMessage(message);
+                        else replyError(message, EACCES);
                     } });
                 }
             });

@@ -1,6 +1,6 @@
 // Disposable fork trial: transfer actual kernel open-file descriptions only at libc's prepared checkpoint.
 #pragma once
-#include "../../../ProcessSupport/SpawnPlan.h"
+#include "../../../ProcessSupport/OpenFDs.h"
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -13,17 +13,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-extern int __proc_info(int, int, unsigned, uint64_t, void *, int);
 extern ssize_t __sendmsg_nocancel(int, const struct msghdr *, int);
 extern ssize_t __read_nocancel(int, void *, size_t);
 extern ssize_t __write_nocancel(int, const void *, size_t);
 
 typedef struct { uintptr_t machReturn, workqReturn, keventReturn; uint64_t stopWitnessThread; dev_t nullDevice; } ForkDescriptorTraps;
-typedef struct { int32_t fd; uint32_t type; } ForkDescriptorInfo;
 typedef struct { uint32_t openFlags, status; int64_t offset; int32_t type; uint32_t guards; } ForkFileInfo;
 typedef struct { uint16_t number, flags; } ForkDescriptorEntry;
 typedef struct { uint32_t magic, count; ForkDescriptorEntry entries[LSB_MAX_FDS]; } ForkDescriptorPacket;
-_Static_assert(sizeof(ForkFileInfo) == 24 && sizeof(ForkDescriptorEntry) == 4 && sizeof(ForkDescriptorInfo) == 8, "XNU file info and fork rights layout");
+_Static_assert(sizeof(ForkFileInfo) == 24 && sizeof(ForkDescriptorEntry) == 4, "XNU file info and fork rights layout");
 
 enum { ForkSDRightsMagic = 0x46445331, ForkSDMarker = 0xd7, ForkSDGetConfined = 96, ForkFDMaxPeers = 8 };
 typedef union { struct cmsghdr alignment; unsigned char bytes[CMSG_SPACE(sizeof(int) * LSB_MAX_FDS)]; } ForkAncillary;
@@ -156,7 +154,7 @@ static inline int forkDescriptorUnpark(ForkDescriptorPeers *peers) {
 
 // XNU proc_info.h, PROC_PIDLISTFDS and the PROC_PIDFD*INFO flavors. Each type-specific result starts with struct proc_fileinfo.
 static inline int forkDescriptorList(pid_t pid, int socket, int wake, int watch, dev_t nullDevice, ForkDescriptorPacket *packet, int fds[LSB_MAX_FDS]) {
-    ForkDescriptorInfo list[LSB_MAX_FDS + 4];
+    LSBProcFDInfo list[LSB_MAX_FDS + 4];
     int bytes = forkFDOperations.procInfo(2, pid, 1, 0, list, sizeof(list));
     if (bytes < 0) return errno;
     if (bytes >= (int)sizeof(list) || bytes % sizeof(*list)) return E2BIG;
@@ -264,7 +262,7 @@ static inline void forkDescriptorDescribe(ForkDescriptorIssue *issue, int phase,
     audit_token_t audit = {};
     mach_msg_type_number_t words = TASK_AUDIT_TOKEN_COUNT;
     if (task_info(mach_task_self(), TASK_AUDIT_TOKEN, (task_info_t)&audit, &words) != KERN_SUCCESS) return;
-    ForkDescriptorInfo list[LSB_MAX_FDS * 2 + 4];
+    LSBProcFDInfo list[LSB_MAX_FDS * 2 + 4];
     int n = __proc_info(2, (int)audit.val[5], 1, 0, list, sizeof(list));
     for (int i = 0; i < n / (int)sizeof(*list); ++i) if (list[i].fd == fd) {
         issue->type = (int32_t)list[i].type;

@@ -1,4 +1,5 @@
 #include "ProcessIdentity.h"
+#include "../../ProcessSupport/GuestExecutablePath.h"
 #ifdef LSB_GUEST_RUNTIME
 #include "PeerProcessCompatibility.h"
 #endif
@@ -153,27 +154,28 @@ static bool pinnedNetworkRouteImage(const struct mach_header_64 *header, intptr_
     return true;
 }
 
-static void configureNativeImagePath(char path[PATH_MAX], const char *suffix) {
-    path[0] = '\0';
+static void configureNativeImagePaths(void) {
     const char *root = getenv("DYLD_ROOT_PATH");
-    if (!root || root[0] != '/') return;
-    size_t length = strnlen(root, PATH_MAX), suffixSize = strlen(suffix) + 1;
-    if (length < 2 || suffixSize > PATH_MAX || length > PATH_MAX - suffixSize || root[length - 1] == '/' || strchr(root, ':')) return;
-    // Launchd configuration supplies a canonical host path. Reject aliases and root lists without doing filesystem work in dyld callbacks.
-    for (const char *component = root + 1; *component;) {
-        const char *end = strchr(component, '/');
-        size_t size = end ? (size_t)(end - component) : strlen(component);
-        if (!size || (size == 1 && component[0] == '.') || (size == 2 && component[0] == '.' && component[1] == '.')) return;
-        component += size + (end != NULL);
+    // Validate once before registering dyld callbacks. Every image uses the same broker-supplied root.
+    size_t rootLength = LSBGuestPathIsCanonical(root) ? strlen(root) : 0;
+    const char *notifyd = getenv("LSB_SIMULATE_NOTIFICATION_SHM");
+    const struct { char *path; const char *suffix; } images[] = {
+        {nativeNotifydPath, notifyd && !strcmp(notifyd, "1") ? "/usr/sbin/notifyd" : NULL},
+        {nativeBaseBoardPath, baseBoardInstallPath}, {nativeRunningBoardServicesPath, runningBoardServicesInstallPath},
+        {nativeFrontBoardPath, frontBoardInstallPath}, {nativeUIKitCorePath, uiKitCoreInstallPath},
+        {nativeFrontBoardServicesPath, frontBoardServicesInstallPath}, {nativeBackBoardServicesPath, backBoardServicesInstallPath},
+        {nativeExtensionFoundationPath, extensionFoundationInstallPath}, {nativeCoreServicesPath, coreServicesInstallPath},
+        {nativeCoreFoundationPath, coreFoundationInstallPath}, {nativeNetworkPath, networkInstallPath},
+    };
+    for (size_t i = 0; i < sizeof(images) / sizeof(images[0]); ++i) {
+        char *path = images[i].path;
+        path[0] = '\0';
+        if (!rootLength || !images[i].suffix) continue;
+        size_t suffixBytes = strlen(images[i].suffix) + 1;
+        if (rootLength + suffixBytes > PATH_MAX) continue;
+        memcpy(path, root, rootLength);
+        memcpy(path + rootLength, images[i].suffix, suffixBytes);
     }
-    memcpy(path, root, length);
-    memcpy(path + length, suffix, suffixSize);
-}
-
-static void configureNativeNotifydIdentity(void) {
-    nativeNotifydPath[0] = '\0';
-    const char *enabled = getenv("LSB_SIMULATE_NOTIFICATION_SHM");
-    if (enabled && !strcmp(enabled, "1")) configureNativeImagePath(nativeNotifydPath, "/usr/sbin/notifyd");
 }
 
 typedef struct { _Atomic(uintptr_t) image, begin, end; } NativeIdentityRange;
@@ -300,8 +302,7 @@ static void identityImageRemoved(const struct mach_header *image, intptr_t slide
 }
 #endif
 
-static pid_t environmentPID(const char *key) {
-    const char *text = getenv(key);
+static pid_t parseGuestPID(const char *text) {
     if (!text || !*text) return 0;
     unsigned long value = 0;
     for (const char *p = text; *p; ++p) {
@@ -312,25 +313,15 @@ static pid_t environmentPID(const char *key) {
 }
 
 __attribute__((constructor)) static void initializeIdentity(void) {
-    configureNativeNotifydIdentity();
-    configureNativeImagePath(nativeBaseBoardPath, baseBoardInstallPath);
-    configureNativeImagePath(nativeRunningBoardServicesPath, runningBoardServicesInstallPath);
-    configureNativeImagePath(nativeFrontBoardPath, frontBoardInstallPath);
-    configureNativeImagePath(nativeUIKitCorePath, uiKitCoreInstallPath);
-    configureNativeImagePath(nativeFrontBoardServicesPath, frontBoardServicesInstallPath);
-    configureNativeImagePath(nativeBackBoardServicesPath, backBoardServicesInstallPath);
-    configureNativeImagePath(nativeExtensionFoundationPath, extensionFoundationInstallPath);
-    configureNativeImagePath(nativeCoreServicesPath, coreServicesInstallPath);
-    configureNativeImagePath(nativeCoreFoundationPath, coreFoundationInstallPath);
-    configureNativeImagePath(nativeNetworkPath, networkInstallPath);
+    configureNativeImagePaths();
 #ifndef LSB_PROCESS_IDENTITY_TESTING
     // Existing images are enumerated synchronously before publishing the guest PID. Early recursive calls retain native identity.
     _dyld_register_func_for_add_image(identityImageAdded);
     _dyld_register_func_for_remove_image(identityImageRemoved);
 #endif
-    atomic_store_explicit(&guestPID, environmentPID("LSB_GUEST_PID"), memory_order_release);
-    pid_t parent = environmentPID("LSB_GUEST_PPID");
+    atomic_store_explicit(&guestPID, parseGuestPID(getenv("LSB_GUEST_PID")), memory_order_release);
     const char *text = getenv("LSB_GUEST_PPID");
+    pid_t parent = parseGuestPID(text);
     atomic_store_explicit(&parentPID, parent, memory_order_release);
     atomic_store_explicit(&parentKnown, parent > 0 || (text && text[0] == '0' && !text[1]), memory_order_release);
 }

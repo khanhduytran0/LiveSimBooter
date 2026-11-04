@@ -88,9 +88,7 @@ static void preflightTests(NSString *parent) {
 }
 
 static void hapticsProjectionTests(NSString *parent) {
-    const char *priorValue = getenv("LSB_EXPERIMENTAL_HAPTICS");
-    NSString *prior = priorValue ? @(priorValue) : nil;
-    unsetenv("LSB_EXPERIMENTAL_HAPTICS");
+    LSBCaptureDeviceLaunchOverrides(NULL);
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     NSDictionary *priorDefaults = [defaults volatileDomainForName:NSArgumentDomain];
     NSMutableDictionary *domain = [priorDefaults mutableCopy];
@@ -135,16 +133,18 @@ static void hapticsProjectionTests(NSString *parent) {
     writeProfile(stagedPath(root, device), original);
     NSData *sourceBytes = [NSData dataWithContentsOfFile:stagedPath(root, device)];
     for (NSString *disabled in @[@"", @"0", @"true", @"01", @"1 "]) {
-        assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", disabled.UTF8String, 1) && !LSBExperimentalHapticsEnabled());
+        LSBCaptureDeviceLaunchOverrides((const char *[]){[@"LSB_EXPERIMENTAL_HAPTICS=" stringByAppendingString:disabled].UTF8String, NULL});
+        assert(!LSBExperimentalHapticsEnabled());
         assert(!LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(root, original, NO));
         assert([readProfile(livePath(root)) isEqual:original]);
     }
-    assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", "1", 1) && LSBExperimentalHapticsEnabled());
+    LSBCaptureDeviceLaunchOverrides((const char *[]){"LSB_EXPERIMENTAL_HAPTICS=1", NULL});
+    assert(LSBExperimentalHapticsEnabled());
     assert(!LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(root, original, YES));
     NSDictionary *installed = readProfile(livePath(root));
     assert(CFGetTypeID((__bridge CFTypeRef)installed[@"capabilities"][@"DeviceSupportsClosedLoopHaptics"]) == CFBooleanGetTypeID());
     assert([[NSData dataWithContentsOfFile:stagedPath(root, device)] isEqual:sourceBytes]);
-    unsetenv("LSB_EXPERIMENTAL_HAPTICS");
+    LSBCaptureDeviceLaunchOverrides(NULL);
     assert(!LSBInstallGuestDeviceCapabilitiesWithNativeHaptics(root, original, NO));
     assert([readProfile(livePath(root)) isEqual:original]); // Disabling restores stock values; serialization may be normalized.
     for (id value in @[@NO, @YES, @0, @1, @"true", @{}, @[]]) {
@@ -152,22 +152,19 @@ static void hapticsProjectionTests(NSString *parent) {
         [defaults setVolatileDomain:domain forName:NSArgumentDomain];
         BOOL expected = CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() && [value boolValue];
         for (NSString *environment in @[@"", @"0", @"true", @"01", @"1 "]) {
-            assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", environment.UTF8String, 1));
+            LSBCaptureDeviceLaunchOverrides((const char *[]){[@"LSB_EXPERIMENTAL_HAPTICS=" stringByAppendingString:environment].UTF8String, NULL});
             assert(!LSBHapticsForcedByEnvironment() && LSBExperimentalHapticsEnabled() == expected);
         }
-        assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", "1", 1));
+        LSBCaptureDeviceLaunchOverrides((const char *[]){"LSB_EXPERIMENTAL_HAPTICS=1", NULL});
         assert(LSBHapticsForcedByEnvironment() && LSBExperimentalHapticsEnabled());
         assert([[defaults objectForKey:@"LSBExperimentalHapticsEnabled"] isEqual:value]);
     }
     [defaults setVolatileDomain:priorDefaults forName:NSArgumentDomain];
-    unsetenv("LSB_EXPERIMENTAL_HAPTICS");
-    if (prior) assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", prior.UTF8String, 1));
+    LSBCaptureDeviceLaunchOverrides(NULL);
 }
 
 static void audioPreferenceTests(void) {
-    const char *priorValue = getenv("LSB_AUDIO_OUTPUT");
-    NSString *prior = priorValue ? @(priorValue) : nil;
-    unsetenv("LSB_AUDIO_OUTPUT");
+    LSBCaptureDeviceLaunchOverrides(NULL);
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     NSDictionary *priorDefaults = [defaults volatileDomainForName:NSArgumentDomain];
     NSMutableDictionary *domain = [priorDefaults mutableCopy];
@@ -176,16 +173,15 @@ static void audioPreferenceTests(void) {
         [defaults setVolatileDomain:domain forName:NSArgumentDomain];
         BOOL expected = CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() && [value boolValue];
         for (NSString *environment in @[@"", @"0", @"true", @"01", @"1 "]) {
-            assert(!setenv("LSB_AUDIO_OUTPUT", environment.UTF8String, 1));
+            LSBCaptureDeviceLaunchOverrides((const char *[]){[@"LSB_AUDIO_OUTPUT=" stringByAppendingString:environment].UTF8String, NULL});
             assert(!LSBAudioOutputForcedByEnvironment() && LSBExperimentalAudioOutputEnabled() == expected);
         }
-        assert(!setenv("LSB_AUDIO_OUTPUT", "1", 1));
+        LSBCaptureDeviceLaunchOverrides((const char *[]){"LSB_AUDIO_OUTPUT=1", NULL});
         assert(LSBAudioOutputForcedByEnvironment() && LSBExperimentalAudioOutputEnabled());
         assert([[defaults objectForKey:@"LSBExperimentalAudioOutputEnabled"] isEqual:value]);
     }
     [defaults setVolatileDomain:priorDefaults forName:NSArgumentDomain];
-    unsetenv("LSB_AUDIO_OUTPUT");
-    if (prior) assert(!setenv("LSB_AUDIO_OUTPUT", prior.UTF8String, 1));
+    LSBCaptureDeviceLaunchOverrides(NULL);
 }
 
 static void feedbackSupportProjectionTests(NSString *parent) {

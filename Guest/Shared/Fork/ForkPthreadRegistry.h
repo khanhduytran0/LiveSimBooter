@@ -1,4 +1,5 @@
 #pragma once
+#include "ForkTrace.h"
 #include "ForkPthreadState.h"
 #include "ForkPthreadCacheState.h"
 #include "ForkLibcChildBranch.h"
@@ -215,8 +216,7 @@ static inline int forkPthreadFinish(ForkPthreadStage *stage) {
 }
 
 static inline void forkPthreadReport(const char *role, const ForkPthreadState *state) {
-    const char *trace = getenv("LSB_FORK_SNAPSHOT_TRACE");
-    if (!trace || strcmp(trace, "1")) return;
+    if (forkTrialTraceSetting() != ForkTraceVerbose) return;
     for (unsigned i = 0; i < state->count; ++i) for (unsigned k = 0; k < 3; ++k) {
         const ForkPthreadTarget *fn = &state->entries[i].functions[k];
         if (!fn->pc) continue;

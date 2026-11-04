@@ -1,4 +1,5 @@
 #include "SpawnPlan.h"
+#include "OpenFDs.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -140,7 +141,11 @@ int LSBApplySpawnPlanPreservingFD(const LSBSpawnPlan *plan, int receivedFDs[LSB_
     }
     closeReceived(receivedFDs, count);
     // Imports are staged above every destination, including those used by later ordered file actions.
-    for (int fd = 0; fd < limit; ++fd) if (fd != preservedFD && !containsFD(staged, count, fd)) close(fd);
+    LSBOpenFDScan scan;
+    pid_t nativePID = getpid(); // This plan is applied by the native worker before guest startup.
+    LSBBeginOpenFDScan(&scan, nativePID, limit);
+    for (int fd; (fd = LSBNextOpenFD(&scan)) >= 0;)
+        if (fd != preservedFD && !containsFD(staged, count, fd)) close(fd);
     for (uint32_t i = 0; i < count; ++i) {
         if (dup2(staged[i], plan->fds[i].number) < 0 || fcntl(plan->fds[i].number, F_SETFD, plan->fds[i].flags)) {
             error = errno;
@@ -154,7 +159,8 @@ int LSBApplySpawnPlanPreservingFD(const LSBSpawnPlan *plan, int receivedFDs[LSB_
     error = replayActions(plan);
     if (error) return error;
     // Darwin applies close-on-exec after actions. CLOEXEC_DEFAULT additionally retains only action destinations/INHERIT descriptors.
-    for (int fd = 0; fd < limit; ++fd) {
+    LSBBeginOpenFDScan(&scan, nativePID, limit);
+    for (int fd; (fd = LSBNextOpenFD(&scan)) >= 0;) {
         if (fd == preservedFD) continue;
         int flags = fcntl(fd, F_GETFD);
         if (flags >= 0 && ((flags & FD_CLOEXEC) || ((plan->spawnFlags & POSIX_SPAWN_CLOEXEC_DEFAULT) && !explicitlyInherited(plan, fd)))) close(fd);

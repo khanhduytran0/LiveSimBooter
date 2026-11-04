@@ -506,12 +506,15 @@ int LSBRunningBoardValidateIdentity(const audit_token_t *audit) {
 @end
 @implementation LSBRunningBoardMonitor
 @end
+static uint64_t testWarmIdentifier;
+static LSBRunningBoardExitHandler testWarmExit;
 int LSBRunningBoardMonitorStart(const audit_token_t *audit, LSBRunningBoardExitHandler handler, LSBRunningBoardMonitor **monitor) {
     assert(audit && handler && monitor);
     ++runningBoardStarts;
     if (runningBoardError) return runningBoardError;
     *monitor = [LSBRunningBoardMonitor new];
     (*monitor).completion = handler;
+    if (testWarmIdentifier && audit->val[5] == (uint32_t)reportedPID) testWarmExit = handler;
     return 0;
 }
 void LSBRunningBoardMonitorCancel(LSBRunningBoardMonitor *monitor) { monitor.completion = nil; ++runningBoardCancels; }
@@ -554,6 +557,22 @@ int LSBLaunchExtensionWithOptions(const char *identifier, uint64_t requestID, ui
     int error = submitError;
     submitError = 0;
     return error;
+}
+int LSBLaunchWarmExtension(const char *identifier, uint64_t requestID, LSBExtensionEvent event, void *context) {
+    assert(!strcmp(identifier, LSB_EXTENSION_IDENTIFIER) && !testWarmIdentifier);
+    testWarmIdentifier = requestID;
+    event(requestID, reportedPID, 0, context);
+    return 0;
+}
+int LSBClaimWarmExtension(uint64_t poolID, uint64_t requestID, pid_t pid, LSBExtensionEvent event, void *context) {
+    assert(poolID && poolID == testWarmIdentifier && requestID == startingJob.identifier && pid == reportedPID && event == extensionEvent && !context);
+    testWarmIdentifier = 0;
+    return 0;
+}
+int LSBCancelWarmExtension(uint64_t poolID) {
+    assert(poolID && poolID == testWarmIdentifier);
+    testWarmIdentifier = 0;
+    return 0;
 }
 pid_t LSBExtensionProcessIdentifier(uint64_t requestID) { assert(requestID); return reportedPID; }
 void LSBReleaseExtension(uint64_t requestID) { assert(requestID); ++releasedLaunches; }
@@ -712,6 +731,8 @@ void LSBTransportDisposeMessage(LSBReceivedMessage *message) {
 static void resetBroker(void) {
     // Invalidate queued timeout/death callbacks from a prior fixture instead of recycling its generation.
     ++rebootGeneration;
+    liveProcessPool = nil;
+    poolDraining = NO;
     sessionDraining = rebootDrainFailed = NO;
     simulatorPoweredOff = sessionStartFailed = sessionPowerOffRequested = sessionControlRequested = pendingDevicePreference = NO;
     sessionControlCompletion = nil;
@@ -805,6 +826,7 @@ static void resetBroker(void) {
     nativeConfigdEndpoint = MACH_PORT_NULL;
     unsetenv("LSB_EXPERIMENTAL_HAPTICS");
     unsetenv("LSB_AUDIO_OUTPUT");
+    LSBCaptureDeviceLaunchOverrides(NULL);
     hapticCreates = hapticCloses = audioCreates = audioInvalidates = 0;
     hapticCreateError = audioCreateError = audioReplySendError = 0;
     hapticMissingEndpoint = hapticCopyFailure = NO;
@@ -887,6 +909,50 @@ static unsigned planReplies(void) {
     return count;
 }
 static void assertClosed(int fd) { errno = 0; assert(fcntl(fd, F_GETFD) < 0 && errno == EBADF); }
+
+static void parkTestWorker(void) {
+    runningBoardError = 0;
+    testWarmExit = nil;
+    liveProcessPool = [[LSBLiveProcessPool alloc] initWithCapacity:1 validatePeer:validatePeerTaskIdentity];
+    [liveProcessPool start];
+    while (!testWarmIdentifier) [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.001]];
+    LSBReceivedMessage *worker = messageFor(LSB_REQUEST_CHECKIN, reportedPID, 3, 0);
+    worker->workerStack = (LSBWorkerStackGeometry){.bottom = 0x16b02c000, .top = 0x16b82c000, .vmFloor = 0x100000000};
+    testTaskAudit = worker->audit;
+    assert([liveProcessPool handleCheckIn:worker coldPID:0] && testWarmExit);
+}
+
+static void testParkedWorkerHandoff(void) {
+    resetBroker();
+    parkTestWorker();
+    assert(!replyCount && !jobs.count);
+    sessionNativeSupport = YES;
+    int fd;
+    unsigned parentObject;
+    LSBReceivedMessage *request = spawnRequest(&fd, &parentObject);
+    LSBSpawnPlan *plan = &request->plan;
+    uint32_t ordinaryPath = plan->path;
+    assert(!LSBPlanAddString(plan, LSB_FORK_STACK_HINT_ENV "=000000016b1d0000:000000016b9d0000", &plan->envp[plan->envc++]));
+    assert(!LSBPlanAddString(plan, LSB_FORK_BOOTSTRAP_EXECUTABLE, &plan->path));
+    LSBJob *forkJob = [LSBJob new];
+    forkJob.executionRole = LSB_EXECUTION_SIMULATOR;
+    forkJob.identifier = 10;
+    forkJob.request = request;
+    assert(!takeParkedProcess(forkJob) && !testWarmIdentifier); // A full one-slot pool rotates its single incompatible worker.
+    testWarmExit(SIGKILL, 0);
+    [liveProcessPool drain:nil];
+    parkTestWorker();
+    forkJob.request = NULL;
+    plan->path = ordinaryPath;
+    enqueueSpawn(request, nil); // The same hint on /bin/df has no effect on placement.
+    assert(!testWarmIdentifier && !submittedLaunches && startingJob.phase == JobDispatched && planReplies() == 1);
+    assertClosed(fd);
+    assert(!replyFor(parentObject));
+    handleMessage(messageFor(LSB_REQUEST_READY, reportedPID, 3, startingJob.identifier));
+    assert(!startingJob && jobs[0].phase == JobRunning && replyFor(parentObject)->pid == reportedPID);
+    [liveProcessPool drain:nil];
+    liveProcessPool = nil;
+}
 
 static void testIdentityAndSuccessfulHandoff(void) {
     resetBroker();
@@ -2378,7 +2444,8 @@ static void testNativeHapticsBridgeRegistration(void) {
     enum { Success, Headless, CreationFailure, RegistrationFailure, UnknownTimeout, MissingEndpoint, CopyFailure, DisplayFailure, Disabled, InvalidOptIn };
     for (unsigned test = Success; test <= InvalidOptIn; ++test) {
         resetBroker();
-        if (test != Disabled) assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", test == InvalidOptIn ? "true" : "1", 1));
+        if (test != Disabled) LSBCaptureDeviceLaunchOverrides((const char *[]){
+            test == InvalidOptIn ? "LSB_EXPERIMENTAL_HAPTICS=true" : "LSB_EXPERIMENTAL_HAPTICS=1", NULL});
         sessionHapticsEnabled = testConfiguredHaptics();
         LSBJob *launchd = runTestJob(nil, 799);
         launchd.simulatorLaunchd = YES;
@@ -2409,7 +2476,7 @@ static void testNativeHapticsBridgeRegistration(void) {
         };
         registerDisplayServices(launchd, service);
         savedHaptics = !sessionHapticsEnabled; // Preferences after capture cannot change this session's publication.
-        unsetenv("LSB_EXPERIMENTAL_HAPTICS");
+        LSBCaptureDeviceLaunchOverrides(NULL);
         runMainQueueUntil(^BOOL { return !launchd.servicesPending; });
         unsigned expectedCalls = test == Headless ? 0 : test == DisplayFailure ? 1 :
             test == Disabled || test == InvalidOptIn || test == CreationFailure || test == MissingEndpoint || test == CopyFailure ? 3 : 4;
@@ -5373,10 +5440,10 @@ static void testHapticsColdApplyRequiresStockProfile(void) {
     assert(!jobs && !submittedLaunches && [activeDeviceProfile() isEqual:projected]);
     LSBHostApplyHapticsEnabled(YES, ^(int error, BOOL restarted) { ++calls; assert(!error && !restarted); });
     assert(calls == 3 && hapticsPreferenceWrites == 1);
-    assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", "1", 1));
+    LSBCaptureDeviceLaunchOverrides((const char *[]){"LSB_EXPERIMENTAL_HAPTICS=1", NULL});
     LSBHostApplyHapticsEnabled(NO, ^(int error, BOOL restarted) { ++calls; assert(error == EPERM && !restarted); });
     assert(calls == 4 && savedHaptics && hapticsPreferenceWrites == 1);
-    unsetenv("LSB_EXPERIMENTAL_HAPTICS");
+    LSBCaptureDeviceLaunchOverrides(NULL);
     LSBHostApplyHapticsEnabled(NO, ^(int error, BOOL restarted) { ++calls; assert(!error && !restarted); });
     assert(calls == 5 && !savedHaptics && hapticsPreferenceWrites == 2 && !jobs && !submittedLaunches);
     resetBroker();
@@ -5463,10 +5530,10 @@ static void testAudioColdApplyAndForceOverride(void) {
     assert(savedHaptics && !hapticsPreferenceWrites && !jobs && !submittedLaunches);
     LSBHostApplyAudioOutputEnabled(YES, ^(int error, BOOL restarted) { ++calls; assert(!error && !restarted); });
     assert(calls == 3 && audioPreferenceWrites == 1);
-    assert(!setenv("LSB_AUDIO_OUTPUT", "1", 1));
+    LSBCaptureDeviceLaunchOverrides((const char *[]){"LSB_AUDIO_OUTPUT=1", NULL});
     LSBHostApplyAudioOutputEnabled(NO, ^(int error, BOOL restarted) { ++calls; assert(error == EPERM && !restarted); });
     assert(calls == 4 && savedAudio && audioPreferenceWrites == 1);
-    unsetenv("LSB_AUDIO_OUTPUT");
+    LSBCaptureDeviceLaunchOverrides(NULL);
     LSBHostApplyAudioOutputEnabled(NO, ^(int error, BOOL restarted) { ++calls; assert(!error && !restarted); });
     assert(calls == 5 && !savedAudio && audioPreferenceWrites == 2 && savedHaptics && !hapticsPreferenceWrites);
     resetBroker();
@@ -5726,12 +5793,11 @@ static void testSavedSettingsValidationAndRestartPreflight(void) {
     assert(!LSBHostSaveDeviceType(target) && !LSBHostSaveAudioOutputEnabled(YES));
     assert(devicePreferenceWrites == 1 && audioPreferenceWrites == 1 && !hapticsPreferenceWrites);
     assert(!jobs && !submittedLaunches && !LSBHostConfigurationNeedsRestart());
-    assert(!setenv("LSB_EXPERIMENTAL_HAPTICS", "1", 1));
+    LSBCaptureDeviceLaunchOverrides((const char *[]){"LSB_EXPERIMENTAL_HAPTICS=1", NULL});
     assert(LSBHostSaveHapticsEnabled(NO) == EPERM && !hapticsPreferenceWrites);
-    unsetenv("LSB_EXPERIMENTAL_HAPTICS");
-    assert(!setenv("LSB_AUDIO_OUTPUT", "1", 1));
+    LSBCaptureDeviceLaunchOverrides((const char *[]){"LSB_AUDIO_OUTPUT=1", NULL});
     assert(LSBHostSaveAudioOutputEnabled(NO) == EPERM && audioPreferenceWrites == 1);
-    unsetenv("LSB_AUDIO_OUTPUT");
+    LSBCaptureDeviceLaunchOverrides(NULL);
     jobs = [NSMutableArray new];
     sessionDeviceType = device;
     terminalLaunchd();
@@ -5751,6 +5817,7 @@ static void testSavedSettingsValidationAndRestartPreflight(void) {
 
 static void testPowerOffWaitsThenStartReusesBroker(void) {
     resetBroker();
+    parkTestWorker();
     NSString *directory = makeRebootRuntime();
     rememberRebootInputs();
     sessionDeviceType = LSBDefaultGuestDeviceType();
@@ -5782,6 +5849,9 @@ static void testPowerOffWaitsThenStartReusesBroker(void) {
     rootExit(SIGKILL, 0);
     assert(!calls && !LSBHostSimulatorIsOff() && rebootPendingDeaths.count == 1);
     childExit(SIGKILL, 0);
+    assert(!rebootPendingDeaths.count && poolDraining && !calls && !LSBHostSimulatorIsOff());
+    testWarmExit(SIGKILL, 0);
+    while (poolDraining) [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.001]];
     assert(calls == 1 && confirmedFrameNotifications == 1 && LSBHostSimulatorIsOff() && LSBHostCanApplyDeviceType());
     assert(!LSBHostCanControlSimulator() && !LSBHostConfigurationNeedsRestart() && !submittedLaunches && jobs == retainedJobs);
     assert(!LSBHostSaveDeviceType(target) && !LSBHostSaveAudioOutputEnabled(YES));
@@ -5918,6 +5988,8 @@ static void testQueuedSessionControlHandshakeFailure(void) {
 int main(void) {
     @autoreleasepool {
         alarm(10);
+        setenv("LSB_LIVEPROCESS_POOL_SIZE", "0", 1);
+        testParkedWorkerHandoff();
         testIdentityAndSuccessfulHandoff();
         testReadySendFailure();
         testChildReadyFailure(ENOEXEC);

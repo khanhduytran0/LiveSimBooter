@@ -56,8 +56,7 @@ int LSBTrialAdoptBash(uintptr_t image, unsigned depth) {
     return error;
 }
 
-static int forkTrialMode(void) {
-    const char *value = getenv(option);
+static int forkTrialMode(const char *value) {
     if (!value) {
         if (procursusTerminal) return TrialShell;
         return defaultResume ? TrialSnapshot : LSB_FORK_NOT_HANDLED;
@@ -70,14 +69,15 @@ static int forkTrialMode(void) {
 }
 
 bool LSBForkTrialEnabled(void) {
+    const char *selected = getenv(option);
     const char *nativeSupport = getenv("LSB_NATIVE_SUPPORT");
-    if (!getenv(option) && nativeSupport && !strcmp(nativeSupport, "1")) {
+    if (!selected && nativeSupport && !strcmp(nativeSupport, "1")) {
         char path[PATH_MAX];
         uint32_t size = sizeof(path);
         if (!_NSGetExecutablePath(path, &size)) defaultResume = LSBUseForkDonorLayout(getenv("DYLD_ROOT_PATH"), path, NULL);
     }
     // Preserve the installed interactive Bash path. Only its pinned image uses the shell-specific allocator.
-    if (!getenv(option) && getenv(LSB_FAKE_PTY_ENV)) {
+    if (!selected && getenv(LSB_FAKE_PTY_ENV)) {
         char **argv = *_NSGetArgv();
         const char *path = argv && argv[0] ? argv[0] : "";
         const char *slash = strrchr(path, '/');
@@ -85,7 +85,7 @@ bool LSBForkTrialEnabled(void) {
         if (!strcmp(name, "bash") || !strcmp(name, "-bash"))
             procursusTerminal = forkTrialProcursusBashImage((uintptr_t)_NSGetMachExecuteHeader());
     }
-    int mode = forkTrialMode();
+    int mode = forkTrialMode(selected);
     // Descendants inherit the environment. Only the pinned shell uses this foreground continuation.
     if (mode == TrialExec || mode == TrialShell) {
         uintptr_t image = (uintptr_t)_NSGetMachExecuteHeader();
@@ -404,6 +404,11 @@ static int inventory(TrialPlan *plan, const struct mach_header_64 *image, intptr
     error = readLeaf(callerSP, &stack);
     if (error) return error;
     if (!(stack.info.protection & VM_PROT_WRITE)) return EACCES;
+    if (offer->flags & TrialResumeGuest) {
+        // This checkpoint offers one writable stack leaf. Publish it as pthread's stack only if it is the caller's full stack.
+        pthread_t self = pthread_self();
+        if (stack.end != (uintptr_t)pthread_get_stackaddr_np(self) || stack.end - stack.start != pthread_get_stacksize_np(self)) return ENOTSUP;
+    }
     uint64_t start = stack.start;
     if (offer->flags & TrialSlicedStack) {
         if (offer->resume < TrialExec || stack.info.inheritance != VM_INHERIT_COPY || ((stack.start | stack.end) & (page - 1))) return ENOTSUP;
@@ -584,6 +589,46 @@ static int recheckAllocator(void *context) {
     return state->checkError;
 }
 
+static int registerAllocatorOffer(LSBForkAttempt *attempt, const audit_token_t *child, bool *grew) {
+    AllocatorAttempt *state = attempt->state;
+    audit_token_t broker = {{0}};
+    *grew = false;
+    int error = LSBTransportOfferForkSocket(child, state->offer.ranges, state->offer.rangeCount, &broker);
+    if (error) return error;
+
+    // Registering the offer via guest XPC can allocate a new malloc region. Check before the observer receives its broker token.
+    state->missingStart = state->missingBytes = 0;
+    _malloc_fork_prepare();
+    error = forkAllocatorRecheck(&state->offer.allocator, checkPreparedSpan, state);
+    _malloc_fork_parent();
+    *grew = error == EAGAIN && state->missingBytes != 0;
+    return error ? error : trialTransfer(attempt->socket, &broker, sizeof(broker), true);
+}
+
+static int reapRejectedObserver(LSBForkAttempt *attempt) {
+    // EOF aborts an observer still waiting for its broker token. The broker releases its offer when the observer exits.
+    close(attempt->socket);
+    attempt->socket = -1;
+    pid_t child;
+    do { child = LSBWaitPID(attempt->child, NULL, 0); } while (child < 0 && errno == EINTR);
+    if (child < 0 && errno != ECHILD) return errno;
+    attempt->child = 0; // The application's SIGCHLD handler can also reap this exact child.
+    return 0;
+}
+
+static bool retryPlacement(unsigned *failures, bool beforeGuestLaunch) {
+    // The native stack probe rejects a candidate before guest dyld startup. A full observer preflight is more expensive.
+    return ++*failures < (beforeGuestLaunch ? 8u : 4u);
+}
+
+static int receiveObserverReady(const LSBForkAttempt *attempt, TrialReady *ready, int inventoryError) {
+    int error = trialTransfer(attempt->socket, ready, sizeof(*ready), false);
+    if (error) return error;
+    if (ready->version != TrialWireVersion) return EPROTO;
+    if (ready->logicalPID != attempt->child) return ESRCH;
+    return inventoryError;
+}
+
 static void releaseAllocatorTrial(void *context) {
     AllocatorAttempt *state = context;
     TrialOffer *offer = &state->offer;
@@ -604,19 +649,20 @@ static void releaseAllocatorTrial(void *context) {
     munmap(context, sizeof(*state));
 }
 
-static int prepareForkTrial(LSBForkAttempt *attempt, const LSBForkContext *caller, TrialMode mode, const struct mach_header_64 *mainImage, intptr_t slide) {
+static int prepareForkTrial(LSBForkAttempt *attempt, const LSBForkContext *caller, TrialMode mode, unsigned snapshotFlags,
+                            const struct mach_header_64 *mainImage, intptr_t slide) {
+    forkTrialCaptureTrace();
     attempt->captureLibcContext = mode == TrialSnapshot;
     uintptr_t callerPC = caller->pc, callerSP = caller->sp;
     int error;
     TrialPlan plan = {};
     TrialOffer offer = {.version = TrialWireVersion, .mainHeader = (uintptr_t)mainImage, .caller = *caller, .resume = mode,
                         .depth = mode == TrialShell ? resumedDepth + 1 : 0};
-    const char *probe = getenv(option);
-    bool resumeGuest = mode == TrialSnapshot && (probe ? !strcmp(probe, "resume") : defaultResume);
+    bool resumeGuest = (snapshotFlags & TrialResumeGuest) != 0;
     if (attempt->isVfork && !resumeGuest) return LSB_FORK_NOT_HANDLED;
-    bool restoreAllocator = resumeGuest || (mode == TrialSnapshot && probe && !strcmp(probe, "allocator"));
+    bool restoreAllocator = (snapshotFlags & TrialRestoreAllocator) != 0;
     if (restoreAllocator) {
-        offer.flags = TrialRestoreAllocator | (resumeGuest ? TrialResumeGuest : 0) | (attempt->isVfork ? TrialVfork : 0);
+        offer.flags = snapshotFlags | (attempt->isVfork ? TrialVfork : 0);
         AllocatorAttempt *state = mmap(NULL, sizeof(*state), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
         if (state == MAP_FAILED) return errno;
         attempt->state = state;
@@ -635,14 +681,15 @@ static int prepareForkTrial(LSBForkAttempt *attempt, const LSBForkContext *calle
     error = restoreAllocator ? 0 : buildOffer(&plan, &offer, slide, 0);
     if (!error) error = trialToken(&offer.audit);
     if (error) { fprintf(stderr, "fork trial inventory errno=%d\n", error); return error; }
-    // Only a confirmed collision before the broker offer warrants trying a fresh observer. libc hasn't acquired its atfork locks yet.
-    const unsigned maxAttempts = 4;
+    // Placement and allocator growth have independent bounds. No libc fork callbacks have run at this point.
+    unsigned placementFailures = 0;
+    bool retriedGrowth = false;
     char stackHint[sizeof(LSB_FORK_STACK_HINT_ENV "=") + LSBForkStackHintLength] = {};
     TrialLeaf required = {};
     if (resumeGuest && !readLeaf(callerSP, &required) && required.info.inheritance == VM_INHERIT_COPY &&
         (required.info.protection & VM_PROT_WRITE) && required.end - required.start <= LSB_MAX_FORK_BYTES)
         snprintf(stackHint, sizeof(stackHint), LSB_FORK_STACK_HINT_ENV "=%016llx:%016llx", required.start, required.end);
-    for (unsigned candidate = 1; candidate <= maxAttempts; ++candidate) {
+    for (unsigned candidate = 1; ; ++candidate) {
         TrialReady ready = {};
         TrialPreflight report = {};
         bool earlyCollision = false;
@@ -652,25 +699,26 @@ static int prepareForkTrial(LSBForkAttempt *attempt, const LSBForkContext *calle
             forkTrialTrace("fork trial native stack collision candidate=%u parent=%d required=%#llx..%#llx\n", candidate, LSBGuestPID(), required.start, required.end);
             close(attempt->socket);
             attempt->socket = -1;
-            if (candidate == maxAttempts) break;
+            if (!retryPlacement(&placementFailures, true)) break;
             continue;
         }
-        if (!error) error = trialTransfer(attempt->socket, &ready, sizeof(ready), false);
-        if (!error && ready.version != TrialWireVersion) error = EPROTO;
-        if (!error && ready.logicalPID != attempt->child) error = ESRCH;
-        if (!error && restoreAllocator) {
-            // Creating the observer initializes guest XPC and may grow the parent's real heap.
-            error = buildOffer(&plan, &offer, slide, offer.flags);
-            if (!error) {
-                error = trialAllocatorCovers(&offer, offer.witness, TrialWitnessSize);
-                if (error) forkTrialTrace("fork trial missing allocator witness=%#llx zone=%p default=%#llx errno=%d\n",
-                                         offer.witness, (void *)malloc_zone_from_ptr((const void *)(uintptr_t)offer.witness), offer.allocator.zones[0], error);
+        if (error) break;
+        int inventoryError = 0;
+        if (restoreAllocator) {
+            // Spawn has initialized the donor's XPC connection. Inventory its heap while the child starts guest dyld;
+            // registerAllocatorOffer and the locked libc checkpoint still recheck coverage before accepting any mappings.
+            inventoryError = buildOffer(&plan, &offer, slide, offer.flags);
+            if (!inventoryError) {
+                inventoryError = trialAllocatorCovers(&offer, offer.witness, TrialWitnessSize);
+                if (inventoryError) forkTrialTrace("fork trial missing allocator witness=%#llx zone=%p default=%#llx errno=%d\n",
+                    offer.witness, (void *)malloc_zone_from_ptr((const void *)(uintptr_t)offer.witness), offer.allocator.zones[0], inventoryError);
             }
-            if (!error) {
+            if (!inventoryError) {
                 ((AllocatorAttempt *)attempt->state)->offer = offer;
                 attempt->checkPrepared = recheckAllocator;
             }
         }
+        error = receiveObserverReady(attempt, &ready, inventoryError);
         if (!error) error = trialTransfer(attempt->socket, &offer, sizeof(offer), true);
         if (!error) error = trialTransfer(attempt->socket, &report, sizeof(report), false);
         if (error) break; // The caller owns the final attempt's socket and child, including on any failed handshake.
@@ -679,6 +727,7 @@ static int prepareForkTrial(LSBForkAttempt *attempt, const LSBForkContext *calle
                        candidate, LSBGuestPID(), attempt->child, preflight, report.phase, report.address);
         if (preflight < 0 || preflight > ELAST || report.reserved || report.pthreadPrefix > offer.pthreads.count ||
             (!resumeGuest && report.pthreadPrefix)) { error = EPROTO; break; }
+        bool grew = false;
         if (!preflight) {
             if (resumeGuest) {
                 ForkCacheCheckpointPlan *cache = &((AllocatorAttempt *)attempt->state)->cachePlan;
@@ -687,41 +736,46 @@ static int prepareForkTrial(LSBForkAttempt *attempt, const LSBForkContext *calle
                 if (!error && attempt->isVfork && cache->count) error = ENOTSUP;
                 if (error) break;
             }
-            if (restoreAllocator) {
-                audit_token_t broker = {{0}};
-                error = LSBTransportOfferForkSocket(&ready.audit, offer.ranges, offer.rangeCount, &broker);
-                if (!error) error = trialTransfer(attempt->socket, &broker, sizeof(broker), true);
-            } else error = LSBTransportOfferFork(&ready.audit, offer.ranges, offer.rangeCount);
-            break;
+            error = restoreAllocator ? registerAllocatorOffer(attempt, &ready.audit, &grew) : LSBTransportOfferFork(&ready.audit, offer.ranges, offer.rangeCount);
+            if (!grew) break;
+            AllocatorAttempt *state = attempt->state;
+            forkTrialTrace("fork trial allocator grew during offer candidate=%u missing=%#llx bytes=%llu\n", candidate, state->missingStart, state->missingBytes);
+        } else {
+            error = preflight;
+            if (error != EADDRINUSE || !retryPlacement(&placementFailures, false)) break;
         }
-        error = preflight;
-        if (error != EADDRINUSE || candidate == maxAttempts) break;
-        close(attempt->socket);
-        attempt->socket = -1;
-        // A rejecting observer exits after replying. The application's SIGCHLD handler may win this exact-PID wait.
-        pid_t child;
-        do { child = LSBWaitPID(attempt->child, NULL, 0); } while (child < 0 && errno == EINTR);
-        if (child < 0 && errno != ECHILD) { error = errno; break; }
-        attempt->child = 0;
+        int reapError = reapRejectedObserver(attempt);
+        if (reapError) { error = reapError; break; }
+        if (grew) {
+            if (retriedGrowth) break;
+            retriedGrowth = true;
+        }
         if (mode >= TrialExec && !offer.flags) {
             error = buildOffer(&plan, &offer, slide, TrialSlicedStack);
             if (error) break;
         }
     }
-    forkTrialTrace("fork trial parent=%d observer=%d caller_pc=0x%lx caller_sp=0x%lx ranges=%zu bytes=%zu inherit_none=%zu prepare_errno=%d\n",
-            LSBGuestPID(), attempt->child, callerPC, callerSP, plan.count, plan.bytes, plan.skipped, error);
+    forkTrialTrace("fork trial parent=%d observer=%d caller_pc=0x%lx caller_sp=0x%lx ranges=%zu bytes=%zu inherit_none=%zu prepare_errno=%d"
+                   " placement_failures=%u retried_growth=%d\n",
+            LSBGuestPID(), attempt->child, callerPC, callerSP, plan.count, plan.bytes, plan.skipped, error, placementFailures, retriedGrowth);
     return error;
 }
 
 int LSBPrepareForkAttempt(LSBForkAttempt *attempt, const LSBForkContext *caller) {
-    int mode = forkTrialMode();
+    const char *probe = getenv(option);
+    int mode = forkTrialMode(probe);
     if (mode == LSB_FORK_NOT_HANDLED) return LSB_FORK_NOT_HANDLED;
+    unsigned flags = 0;
+    if (mode == TrialSnapshot) {
+        if (probe ? !strcmp(probe, "resume") : defaultResume) flags = TrialRestoreAllocator | TrialResumeGuest;
+        else if (probe && !strcmp(probe, "allocator")) flags = TrialRestoreAllocator;
+    }
     if (!caller->pc || !caller->sp) return ENOEXEC;
     const struct mach_header_64 *mainImage = NULL;
     intptr_t slide = 0;
     int error = findExecutable(caller->pc, &mainImage, &slide);
     if (error) { fprintf(stderr, "fork trial executable lookup errno=%d\n", error); return error; }
-    return prepareForkTrial(attempt, caller, mode, mainImage, slide);
+    return prepareForkTrial(attempt, caller, mode, flags, mainImage, slide);
 }
 
 static int prepareResumedBash(LSBForkAttempt *attempt, const LSBForkContext *caller) {
@@ -731,5 +785,5 @@ static int prepareResumedBash(LSBForkAttempt *attempt, const LSBForkContext *cal
     if (resumedDepth >= TrialMaxDepth) return ENOTSUP;
     // The pinned PIE's __TEXT vmaddr is 0x100000000. Its signed segments are still mapped at the original guest addresses.
     if (resumedBash < LSB_GUEST_MAIN_IMAGE_OFFSET || (!procursus && !forkTrialBashImage(resumedBash))) return ENOEXEC;
-    return prepareForkTrial(attempt, caller, TrialShell, (const void *)resumedBash, (intptr_t)(resumedBash - LSB_GUEST_MAIN_IMAGE_OFFSET));
+    return prepareForkTrial(attempt, caller, TrialShell, 0, (const void *)resumedBash, (intptr_t)(resumedBash - LSB_GUEST_MAIN_IMAGE_OFFSET));
 }

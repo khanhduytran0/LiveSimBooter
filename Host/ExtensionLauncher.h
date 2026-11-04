@@ -20,6 +20,13 @@ enum { LSB_EXTENSION_LAUNCH_GPU = 1u << 0 };
 // Unknown options fail with EINVAL. The default entry above uses no options.
 int LSBLaunchExtensionWithOptions(const char *identifier, uint64_t requestID, uint32_t options, LSBExtensionEvent event, void *context);
 
+// Main-thread pool operations for ordinary simulator launches. Claim after both pkd's PID reply and the broker's authenticated check-in.
+int LSBLaunchWarmExtension(const char *identifier, uint64_t poolID, LSBExtensionEvent event, void *context);
+// On success the existing assertion, service instance and future events belong to requestID. The launch event is not replayed.
+int LSBClaimWarmExtension(uint64_t poolID, uint64_t requestID, pid_t expectedPID, LSBExtensionEvent event, void *context);
+// Suppress callbacks and release an unclaimed launch. Send SIGKILL to its exact instance once pkd has confirmed a PID.
+int LSBCancelWarmExtension(uint64_t poolID);
+
 // Call on the main thread. Returns the PID supplied by pkd after its launch reply, or 0 if unavailable.
 pid_t LSBExtensionProcessIdentifier(uint64_t requestID);
 

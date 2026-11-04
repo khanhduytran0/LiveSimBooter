@@ -157,6 +157,9 @@ static void testNativeSupport(void) {
     for (unsigned i = 0; i != sizeof(invalidModes) / sizeof(invalidModes[0]); ++i) {
         reset();
         nativeSupportMode = invalidModes[i];
+        initializeThreadFallback();
+        assert(create(0) == (void *)-1 && errno == ENOTSUP && !createCalls && environmentReads == 1);
+        nativeSupportMode = "1";
         assert(create(0) == (void *)-1 && errno == ENOTSUP && !createCalls && environmentReads == 1);
     }
     for (unsigned suspended = 0; suspended != 2; ++suspended) {
@@ -167,6 +170,11 @@ static void testNativeSupport(void) {
         assert(LSBThreadCreate(start, NULL, pthreadStorage, pthreadStorage, flags) == pthreadStorage && errno == EDOM);
         assert(createCalls == 1 && observedFlags == flags && !registerCalls && !getCalls && !setCalls && !resumeCalls && !signCalls);
         assert(atomic_load(&registration) == RegistrationMissing && !observedWorkqueueRegistration);
+        initializeThreadFallback(); // The earlier pre-constructor create did not consume the final launch policy.
+        nativeSupportMode = NULL;
+        assert(create(flags) == pthreadStorage && createCalls == 2 && environmentReads == 2);
+        registerSimulator();
+        assert(create(0) == pthreadStorage && getCalls == 1 && resumeCalls == 1 && environmentReads == 2);
     }
     reset();
     nativeSupportMode = "1";
@@ -176,6 +184,7 @@ static void testNativeSupport(void) {
     reset();
     registerSimulator();
     nativeSupportMode = "1";
+    initializeThreadFallback();
     assert(create(0) == pthreadStorage && getCalls == 1 && setCalls == 1 && resumeCalls == 1 && !environmentReads);
     // The environment fallback cannot overwrite an already selected redirect registration.
 }

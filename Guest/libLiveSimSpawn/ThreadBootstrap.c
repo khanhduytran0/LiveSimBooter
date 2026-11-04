@@ -31,6 +31,17 @@ typedef struct __attribute__((packed)) {
 } RegistrationPrefix;
 _Static_assert(sizeof(RegistrationPrefix) == 36 && offsetof(RegistrationPrefix, machSelfOffset) == 32, "Unexpected pthread registration ABI");
 
+static unsigned unregisteredMode(void) {
+    const char *nativeSupport = getenv("LSB_NATIVE_SUPPORT");
+    return nativeSupport && !strcmp(nativeSupport, "1") ? RegistrationNative : RegistrationUnsupported;
+}
+
+__attribute__((constructor)) static void initializeThreadFallback(void) {
+    if (atomic_load_explicit(&registration, memory_order_acquire) != RegistrationMissing) return;
+    unsigned missing = RegistrationMissing;
+    atomic_compare_exchange_strong_explicit(&registration, &missing, unregisteredMode(), memory_order_release, memory_order_relaxed);
+}
+
 int LSBThreadRegister(uintptr_t start, uintptr_t workqueueStart, int pthreadSize, void *data, size_t size, uint64_t dispatchOffset) {
     RegistrationPrefix prefix = {0};
     bool valid = data && size >= sizeof(prefix) && size <= 256 && start && !(start & 3) && pthreadSize == 16384;
@@ -90,10 +101,8 @@ static void discardThread(mach_port_t port) {
 
 void *LSBThreadCreate(void *(*function)(void *), void *argument, void *stack, void *thread, unsigned flags) {
     unsigned mode = atomic_load_explicit(&registration, memory_order_acquire);
-    if (mode == RegistrationMissing) {
-        const char *nativeSupport = getenv("LSB_NATIVE_SUPPORT");
-        if (nativeSupport && !strcmp(nativeSupport, "1")) mode = RegistrationNative;
-    }
+    // Earlier guest constructors may already start threads. Don't persist a fallback from before our own initialization.
+    if (mode == RegistrationMissing) mode = unregisteredMode();
     if (mode == RegistrationNative) return __bsdthread_create(function, argument, stack, thread, flags);
     if (mode != RegistrationRedirect || !(flags & THREAD_START_CUSTOM) || !thread || !stack || (flags & THREAD_START_TSD_BASE_SET)) {
         errno = ENOTSUP;

@@ -109,7 +109,7 @@ static void testNotifydCallerIdentity(void) {
     for (unsigned i = 0; i < sizeof(disabled) / sizeof(disabled[0]); ++i) {
         if (disabled[i]) assert(!setenv("LSB_SIMULATE_NOTIFICATION_SHM", disabled[i], 1));
         else assert(!unsetenv("LSB_SIMULATE_NOTIFICATION_SHM"));
-        configureNativeNotifydIdentity();
+        configureNativeImagePaths();
         rememberNativeIdentityImage(header, 0, notifyd);
         assert(!callerNeedsNativeIdentity(0x1000));
         rememberNativeIdentityImage(header, 0, "/usr/lib/system/libxpc.dylib");
@@ -117,7 +117,7 @@ static void testNotifydCallerIdentity(void) {
         forgetNativeIdentityImage(header);
     }
     assert(!setenv("LSB_SIMULATE_NOTIFICATION_SHM", "1", 1));
-    configureNativeNotifydIdentity();
+    configureNativeImagePaths();
     const char *unrelated[] = {"/usr/sbin/notifyd", "/private/var/mobile/Group/RuntimeRoot-other/usr/sbin/notifyd",
         "/private/var/mobile/Group/RuntimeRoot/usr/bin/notifyd", "/private/var/mobile/Group/RuntimeRoot/usr/sbin/notifyd-helper",
         "/private/var/mobile/Group/RuntimeRoot/usr/sbin/../sbin/notifyd", "/usr/lib/system/libsystem_notify.dylib",
@@ -135,13 +135,13 @@ static void testNotifydCallerIdentity(void) {
     for (unsigned i = 0; i < sizeof(invalidRoots) / sizeof(invalidRoots[0]); ++i) {
         if (invalidRoots[i]) assert(!setenv("DYLD_ROOT_PATH", invalidRoots[i], 1));
         else assert(!unsetenv("DYLD_ROOT_PATH"));
-        configureNativeNotifydIdentity();
+        configureNativeImagePaths();
         assert(!nativeNotifydPath[0]);
         rememberNativeIdentityImage(header, 0, notifyd);
         assert(!callerNeedsNativeIdentity(0x1000));
     }
     assert(!unsetenv("DYLD_ROOT_PATH") && !unsetenv("LSB_SIMULATE_NOTIFICATION_SHM"));
-    configureNativeNotifydIdentity();
+    configureNativeImagePaths();
 }
 
 static void testBaseBoardCallerIdentity(void) {
@@ -155,7 +155,7 @@ static void testBaseBoardCallerIdentity(void) {
     const struct mach_header *header = (const struct mach_header *)&image;
     const char *physical = "/private/var/mobile/Group/RuntimeRoot/System/Library/PrivateFrameworks/BaseBoard.framework/BaseBoard";
     assert(!setenv("DYLD_ROOT_PATH", "/private/var/mobile/Group/RuntimeRoot", 1));
-    configureNativeImagePath(nativeBaseBoardPath, baseBoardInstallPath);
+    configureNativeImagePaths();
     assert(!strcmp(nativeBaseBoardPath, physical));
     const char *accepted[] = {baseBoardInstallPath, physical};
     for (unsigned i = 0; i < sizeof(accepted) / sizeof(accepted[0]); ++i) {
@@ -178,7 +178,7 @@ static void testBaseBoardCallerIdentity(void) {
     const char *invalidRoots[] = {"/", "relative", "/RuntimeRoot/", "/RuntimeRoot:/OtherRoot", "/RuntimeRoot/../Other", "/Runtime//Root"};
     for (unsigned i = 0; i < sizeof(invalidRoots) / sizeof(invalidRoots[0]); ++i) {
         assert(!setenv("DYLD_ROOT_PATH", invalidRoots[i], 1));
-        configureNativeImagePath(nativeBaseBoardPath, baseBoardInstallPath);
+        configureNativeImagePaths();
         assert(!nativeBaseBoardPath[0]);
         rememberNativeIdentityImage(header, 0, physical);
         assert(!callerNeedsNativeIdentity(0x1000));
@@ -187,7 +187,7 @@ static void testBaseBoardCallerIdentity(void) {
         forgetNativeIdentityImage(header);
     }
     assert(!unsetenv("DYLD_ROOT_PATH"));
-    configureNativeImagePath(nativeBaseBoardPath, baseBoardInstallPath);
+    configureNativeImagePaths();
     assert(!nativeBaseBoardPath[0]);
 }
 
@@ -228,7 +228,7 @@ static void testRunningBoardServicesCallerIdentity(void) {
     const char *invalidRoots[] = {"/", "relative", "/RuntimeRoot/", "/RuntimeRoot:/OtherRoot", "/RuntimeRoot/../Other", "/Runtime//Root"};
     for (unsigned i = 0; i < sizeof(invalidRoots) / sizeof(invalidRoots[0]); ++i) {
         assert(!setenv("DYLD_ROOT_PATH", invalidRoots[i], 1));
-        configureNativeImagePath(nativeRunningBoardServicesPath, runningBoardServicesInstallPath);
+        configureNativeImagePaths();
         assert(!nativeRunningBoardServicesPath[0]);
         rememberNativeIdentityImage(header, 0, physical);
         assert(!callerNeedsNativeIdentity(0x1000));
@@ -237,7 +237,7 @@ static void testRunningBoardServicesCallerIdentity(void) {
         forgetNativeIdentityImage(header);
     }
     assert(!unsetenv("DYLD_ROOT_PATH"));
-    configureNativeImagePath(nativeRunningBoardServicesPath, runningBoardServicesInstallPath);
+    configureNativeImagePaths();
     assert(!nativeRunningBoardServicesPath[0]);
 }
 
@@ -274,7 +274,7 @@ static void testFrontBoardCallerIdentity(void) {
     const char *invalidRoots[] = {"/", "relative", "/RuntimeRoot/", "/RuntimeRoot:/OtherRoot", "/RuntimeRoot/../Other", "/Runtime//Root"};
     for (unsigned i = 0; i < sizeof(invalidRoots) / sizeof(*invalidRoots); ++i) {
         assert(!setenv("DYLD_ROOT_PATH", invalidRoots[i], 1));
-        configureNativeImagePath(nativeFrontBoardPath, frontBoardInstallPath);
+        configureNativeImagePaths();
         assert(!nativeFrontBoardPath[0]);
         rememberNativeIdentityImage(header, 0, physical);
         assert(!callerNeedsNativeIdentity(0x1000));
@@ -283,7 +283,7 @@ static void testFrontBoardCallerIdentity(void) {
         forgetNativeIdentityImage(header);
     }
     assert(!unsetenv("DYLD_ROOT_PATH"));
-    configureNativeImagePath(nativeFrontBoardPath, frontBoardInstallPath);
+    configureNativeImagePaths();
 }
 
 static void testUIFrameworkCallerIdentity(void) {

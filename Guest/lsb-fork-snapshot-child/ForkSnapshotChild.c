@@ -70,7 +70,7 @@ static int validateOffer(const TrialOffer *offer, LSBForkWireRange *stack) {
             trialStackSliceStart(offer->fullStackStart, offer->caller.sp, page) != stack->start) return EPROTO;
     }
     if (trialNeedsStackGuard(offer)) {
-        if (stack->start - vm.min_address < page) return EPROTO;
+        if (stack->start - vm.min_address < page) { unavailableAddress = stack->start - page; return EADDRINUSE; }
         uint64_t guard = stack->start - page;
         for (unsigned i = 0; i < offer->rangeCount; ++i) {
             LSBForkWireRange r = offer->ranges[i];
@@ -202,26 +202,25 @@ static int verifyInheritedAllocation(TrialOffer *offer) {
     return intact ? 0 : EIO;
 }
 
-int main(int argc, char **argv) {
-    bool reserved = argc == 3 && !strcmp(argv[2], LSB_FORK_RECEIVE_ARG);
-    if (argc != 2 && !reserved) return 1;
-    char *end;
-    long value = strtol(argv[1], &end, 10);
-    if (!*argv[1] || *end || value < 0 || value > INT_MAX) return 1;
-    int controlFD = (int)value;
-    if (fcntl(controlFD, F_SETFD, FD_CLOEXEC) == -1) return 1;
-    TrialReady ready = {.logicalPID = getpid(), .version = TrialWireVersion};
-    int error = trialToken(&ready.audit);
-    if (!error) error = trialSocket(controlFD);
-    if (!error) error = trialTransfer(controlFD, &ready, sizeof(ready), true);
-    TrialOffer offer = {};
-    if (!error) error = trialTransfer(controlFD, &offer, sizeof(offer), false);
-    if (error) return 1;
-    LSBForkWireRange stack = {};
+typedef struct {
+    int controlFD, validation;
+    bool reserved, guarded;
+    TrialReady ready;
+    LSBForkWireRange stack;
+    TrialScratchStack scratch;
+} TrialObserver;
+static TrialOffer offer;
+
+static int runObserver(TrialObserver *observer) {
+    TrialReady ready = observer->ready;
+    int controlFD = observer->controlFD, error = 0;
+    bool reserved = observer->reserved, guarded = observer->guarded;
+    LSBForkWireRange stack = observer->stack;
+    TrialScratchStack *scratch = &observer->scratch;
+    bool reclaimed = scratch->scratch.top != 0;
+    bool guardStack = trialNeedsStackGuard(&offer);
     uint32_t phase = 1;
-    int32_t preflight = validateOffer(&offer, &stack);
-    const char *native = getenv("LSB_NATIVE_SUPPORT");
-    bool guarded = native && !strcmp(native, "1");
+    int32_t preflight = observer->validation;
     bool sliced = (offer.flags & TrialSlicedStack) != 0;
     if (!preflight && (sliced || offer.resume == TrialShell) && !guarded) preflight = ENOTSUP;
     for (unsigned fd = 0; !preflight && fd < LSB_MAX_FDS; ++fd) {
@@ -235,8 +234,9 @@ int main(int argc, char **argv) {
     if (guarded && !preflight) {
         if (bootstrap < LSB_GUEST_MAIN_IMAGE_CAPACITY || offer.mainHeader != bootstrap - LSB_GUEST_MAIN_IMAGE_CAPACITY) preflight = EPROTO;
         else if (LSBCheckForkGuard(offer.mainHeader, bootstrap, LSB_FORK_IMAGE_GUARD_TAG)) preflight = EPROTO;
+        if (!preflight && reclaimed) { phase = 2; unavailableAddress = stack.start; preflight = trialReclaimStack(scratch); }
         if (!preflight) { phase = 2; preflight = checkDestinations(&offer, ready.audit.val[5], true, "preflight"); }
-        if (!preflight) { phase = 3; unavailableAddress = stack.start; preflight = reserveStack(stack, trialNeedsStackGuard(&offer)); }
+        if (!preflight) { phase = 3; unavailableAddress = stack.start; preflight = reserveStack(stack, guardStack); }
         forkTrialTrace("fork trial observer=%d preflight_errno=%d stack=0x%llx..0x%llx sliced=%d\n",
                 ready.logicalPID, preflight, stack.start, stack.start + stack.size, sliced);
     }
@@ -283,12 +283,17 @@ int main(int argc, char **argv) {
         if (!error) error = forkDescriptorBytes(controlFD, cachePacket.bytes, cachePacket.plan.used, false);
     }
     if (!error && guarded) {
-        error = releaseStackReservation(stack, trialNeedsStackGuard(&offer));
+        error = releaseStackReservation(stack, guardStack);
         if (!error) error = LSBReleaseForkImageGuard(bootstrap, offer.mainHeader);
     }
     // The broker checks vacancy again while both tasks are suspended and installs without overwriting mappings.
     int32_t accepted = error;
     if (!accepted) accepted = offer.flags & TrialRestoreAllocator ? acceptWithoutWorkers(&ready.audit, &broker) : LSBTransportAcceptFork(&offer.audit);
+    // The caller's diagnostic fd is installed by this point. Record only after the broker has actually copied the donor range.
+    if (!accepted && reclaimed)
+        forkTrialTrace("fork trial observer=%d reclaimed_native_stack=%#lx..%#lx native_stack=%#lx..%#lx donor_stack=%#lx..%#lx scratch_sp=%p\n",
+                       ready.logicalPID, scratch->releaseStart, scratch->releaseEnd, scratch->native.bottom, scratch->native.top,
+                       scratch->donor.bottom, scratch->donor.top, (void *)&ready);
     if (!accepted && !offer.resume && !(offer.flags & TrialRestoreAllocator))
         reportForkBashState(offer.mainHeader, offer.bash.parentGetpid, offer.bash.variablesAddress, offer.bash.expectedFirstWord, ready.logicalPID);
     if (!error && accepted == EADDRINUSE) checkDestinations(&offer, ready.audit.val[5], false, "after-rejection");
@@ -310,7 +315,8 @@ int main(int argc, char **argv) {
                 if (!resumeError) resumeError = trialResolveLibcForkHandlers(libc.pc, isVfork, &handlers);
                 if (!resumeError) resumeError = LSBTrialRestoreForkSignals(&signals, &offer, trialSnapshotCovers);
                 if (!resumeError) resumeError = trialRestoreProgramVars(&offer);
-                forkTrialTrace("fork trial application state ready errno=%d\n", resumeError);
+                forkTrialTrace("fork trial application state ready errno=%d observer=%d native_stack=%#lx..%#lx donor_stack=%#lx..%#lx scratch=%d\n",
+                               resumeError, ready.logicalPID, scratch->native.bottom, scratch->native.top, scratch->donor.bottom, scratch->donor.top, reclaimed);
                 if (!resumeError) {
                     handlers.prepare(isVfork);
                     resumeError = forkCacheApplyPrepared(&registry.cache, &cachePacket);
@@ -321,7 +327,7 @@ int main(int argc, char **argv) {
                         if (forkDescriptorBytes(controlFD, &readyToRun, sizeof(readyToRun), true)) _exit(126);
                         close(controlFD);
                         if (trialRunLibcChildBranch(libc.pc)) _exit(126);
-                        trialReturnToGuest(&offer, guard);
+                        trialReturnToGuest(&offer, guard, scratch);
                     }
                     handlers.parent(isVfork);
                 }
@@ -338,8 +344,45 @@ int main(int argc, char **argv) {
             result = rebindEarlyBashImports(offer.mainHeader);
             if (!result) result = LSBTrialAdoptBash(offer.mainHeader, (unsigned)offer.depth);
         } else result = rebindBashImports(offer.mainHeader, offer.resume == TrialExec);
-        if (!result) result = LSBTrialResumeBash(offer.mainHeader, &offer.caller, stack.start, stack.size, controlFD, offer.resume == TrialDF, offer.resume == TrialShell);
+        if (!result) result = LSBTrialResumeBash(offer.mainHeader, &offer.caller, stack.start, stack.size, controlFD,
+                                                offer.resume == TrialDF, offer.resume == TrialShell, forkTrialTraceEnabled());
     }
     forkTrialTrace("fork trial syscall observer=%d snapshot_errno=%d fork_errno=%d complete=0\n", ready.logicalPID, accepted, result);
     return trialTransfer(controlFD, &result, sizeof(result), true) != 0;
+}
+
+__attribute__((noreturn)) static void runObserverOnScratch(void *context) {
+    _exit(runObserver(context));
+}
+
+int main(int argc, char **argv) {
+    forkTrialCaptureTrace();
+    bool reserved = argc == 3 && !strcmp(argv[2], LSB_FORK_RECEIVE_ARG);
+    if (argc != 2 && !reserved) return 1;
+    char *end;
+    long value = strtol(argv[1], &end, 10);
+    if (!*argv[1] || *end || value < 0 || value > INT_MAX) return 1;
+    int controlFD = (int)value;
+    if (fcntl(controlFD, F_SETFD, FD_CLOEXEC) == -1) return 1;
+    TrialReady ready = {.logicalPID = getpid(), .version = TrialWireVersion};
+    int error = trialToken(&ready.audit);
+    if (!error) error = trialSocket(controlFD);
+    if (!error) error = trialTransfer(controlFD, &ready, sizeof(ready), true);
+    if (!error) error = trialTransfer(controlFD, &offer, sizeof(offer), false);
+    if (error) return 1;
+    static TrialObserver observer;
+    observer.controlFD = controlFD;
+    observer.ready = ready;
+    observer.reserved = reserved;
+    observer.validation = validateOffer(&offer, &observer.stack);
+    const char *native = getenv("LSB_NATIVE_SUPPORT");
+    observer.guarded = native && !strcmp(native, "1");
+    if (!observer.validation && (offer.flags & TrialResumeGuest)) {
+        uintptr_t oldSP = (uintptr_t)__builtin_frame_address(0);
+        observer.validation = reserved && observer.guarded ? trialPrepareStackHandoff(&observer.scratch, observer.stack, oldSP) : ENOTSUP;
+        if (!observer.validation && trialPlanScratchStack(&observer.scratch, oldSP) &&
+            !trialAllocateScratchStack(&observer.scratch, (uintptr_t)&_mh_execute_header + LSB_GUEST_MAIN_IMAGE_CAPACITY))
+            trialPivotStack(observer.scratch.scratch.top, observer.scratch.pthreadBounds, &observer.scratch.scratch, runObserverOnScratch, &observer);
+    }
+    return runObserver(&observer);
 }

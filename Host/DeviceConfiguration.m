@@ -1,5 +1,6 @@
 #import "DeviceConfiguration.h"
 #include "Private/MobileGestaltPrivate.h"
+#include "../ProcessSupport/NativeRuntimePolicy.h"
 #include <TargetConditionals.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -170,10 +171,12 @@ static CFBooleanRef nativeHapticsCapability(void) {
     return cachedAnswer;
 }
 
-BOOL LSBHapticsForcedByEnvironment(void) {
-    const char *value = getenv("LSB_EXPERIMENTAL_HAPTICS");
-    return value && !strcmp(value, "1");
+static BOOL forceHaptics, forceAudioOutput;
+void LSBCaptureDeviceLaunchOverrides(const char *const environment[]) {
+    forceHaptics = LSBRuntimeBooleanEnvironment(environment, "LSB_EXPERIMENTAL_HAPTICS", false);
+    forceAudioOutput = LSBRuntimeBooleanEnvironment(environment, "LSB_AUDIO_OUTPUT", false);
 }
+BOOL LSBHapticsForcedByEnvironment(void) { return forceHaptics; }
 BOOL LSBExperimentalHapticsEnabled(void) {
     if (LSBHapticsForcedByEnvironment()) return YES;
     id value = [NSUserDefaults.standardUserDefaults objectForKey:HapticsPreference];
@@ -183,10 +186,7 @@ void LSBSaveConfiguredHapticsEnabled(BOOL enabled) {
     [NSUserDefaults.standardUserDefaults setObject:enabled ? @YES : @NO forKey:HapticsPreference];
 }
 
-BOOL LSBAudioOutputForcedByEnvironment(void) {
-    const char *value = getenv("LSB_AUDIO_OUTPUT");
-    return value && !strcmp(value, "1");
-}
+BOOL LSBAudioOutputForcedByEnvironment(void) { return forceAudioOutput; }
 BOOL LSBExperimentalAudioOutputEnabled(void) {
     if (LSBAudioOutputForcedByEnvironment()) return YES;
     id value = [NSUserDefaults.standardUserDefaults objectForKey:AudioOutputPreference];

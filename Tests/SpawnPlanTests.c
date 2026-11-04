@@ -193,6 +193,38 @@ static int snapshotIndex(const LSBSpawnPlan *plan, int descriptor) {
     return -1;
 }
 
+static void sparseAndFullFDTables(void) {
+    int source = open("/dev/null", O_RDONLY);
+    CHECK(source >= 0);
+    int high = fcntl(source, F_DUPFD, 192);
+    CHECK(high >= 192);
+    LSBOpenFDScan scan;
+    LSBBeginOpenFDScan(&scan, getpid(), getdtablesize());
+    CHECK(scan.listed && scan.count < high);
+    bool found = false;
+    for (int fd; (fd = LSBNextOpenFD(&scan)) >= 0;) if (fd == high) found = true;
+    CHECK(found);
+    LSBBeginOpenFDScan(&scan, INT_MAX, 8); // No kernel result. The conservative fallback must visit every possible number.
+    CHECK(!scan.listed);
+    for (int fd = 0; fd < 8; ++fd) CHECK(LSBNextOpenFD(&scan) == fd);
+    CHECK(LSBNextOpenFD(&scan) == -1);
+
+    // Fill the enumeration buffer using descriptors omitted on exec. The high inheritable FD must still reach the child.
+    int last = -1;
+    for (unsigned i = 0; i <= LSB_MAX_FDS; ++i) {
+        last = fcntl(source, F_DUPFD_CLOEXEC, 3);
+        CHECK(last >= 0 && last < high);
+    }
+    LSBBeginOpenFDScan(&scan, getpid(), getdtablesize());
+    CHECK(!scan.listed);
+    LSBSpawnPlan *plan = newPlan();
+    int received[LSB_MAX_FDS];
+    emptyFDs(received);
+    CHECK(!snapshotFDs(plan, received) && snapshotIndex(plan, high) >= 0 && snapshotIndex(plan, last) < 0);
+    CHECK(!LSBApplySpawnPlan(plan, received));
+    CHECK(fcntl(high, F_GETFD) == 0 && fcntl(last, F_GETFD) == -1 && errno == EBADF);
+}
+
 static void snapshotDropsKqueueVariant(bool defaults) {
     int queue = kqueue(), ordinary = open("/dev/null", O_RDONLY);
     CHECK(queue >= 0 && ordinary >= 0);
@@ -766,6 +798,7 @@ int main(void) {
     runChild(shimSerialization, "guest attribute and file-action serialization");
     runChild(portInheritanceAndExecFailure, "registered/bootstrap port inheritance and failed SETEXEC cleanup");
     runChild(execNeverReturns, "successful SETEXEC does not return");
+    runChild(sparseAndFullFDTables, "sparse FD discovery, denied/truncated inventories and high descriptor preservation");
     runChild(fileportActionOrdering, "fileportdup2 ownership and ordered descriptor replacement");
     runChild(fileportFailureCleanup, "fileport conversion and RPC failure close all temporary descriptors");
     puts("Spawn plan tests passed");

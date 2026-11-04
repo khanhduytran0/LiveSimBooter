@@ -1,21 +1,15 @@
 #pragma once
 
 #include "../PrivateMachVM.h"
+#include "ForkTrace.h"
 #include <dlfcn.h>
 #include <mach-o/loader.h>
 #include <stdbool.h>
 #include <stdarg.h>
 #include <stdlib.h>
-#include "../../../ProcessSupport/FakePTY.h"
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-
-// Keep the interactive terminal usable. The same receipts remain available for device diagnostics.
-static inline bool forkTrialTraceEnabled(void) {
-    const char *trace = getenv("LSB_FORK_SNAPSHOT_TRACE");
-    return trace ? !strcmp(trace, "1") : !getenv(LSB_FAKE_PTY_ENV);
-}
 
 __attribute__((format(printf, 1, 2))) static inline void forkTrialTrace(const char *format, ...) {
     if (!forkTrialTraceEnabled()) return;

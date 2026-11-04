@@ -42,7 +42,6 @@ static void initialize(void) {
     runtimeRoot = [testDirectory stringByAppendingPathComponent:@"RuntimeRoot"];
     assert([NSFileManager.defaultManager createDirectoryAtPath:runtimeRoot withIntermediateDirectories:NO attributes:nil error:NULL]);
     assert(!setenv(LSB_FRAMEWORK_BUNDLE_ROOT_ENV, runtimeRoot.fileSystemRepresentation, 1));
-    assert(!setenv(LSB_FRAMEWORK_BUNDLE_ENABLE_ENV, "1", 1));
 }
 
 static void finish(void) {
@@ -54,6 +53,7 @@ static void finish(void) {
 int main(void) {
     @autoreleasepool {
         initialize();
+        assert(!unsetenv(LSB_FRAMEWORK_BUNDLE_ENABLE_ENV)); // The inserted library already captured the launch option.
         NSString *expected = makeBundle(@"System/Library/Frameworks/QuartzCore.framework", NO);
         NSBundle *bundle = [NSBundle bundleForClass:CALayer.class];
         assert(samePhysicalPath(bundle.bundleURL, expected));
@@ -137,9 +137,12 @@ static void testScopeAndGate(void) {
     for (unsigned i = 0; i < sizeof(disabled) / sizeof(disabled[0]); ++i) {
         if (disabled[i]) assert(!setenv(LSB_FRAMEWORK_BUNDLE_ENABLE_ENV, disabled[i], 1));
         else assert(!unsetenv(LSB_FRAMEWORK_BUNDLE_ENABLE_ENV));
+        initializeFrameworkBundles();
         expectForward(source);
     }
     assert(!setenv(LSB_FRAMEWORK_BUNDLE_ENABLE_ENV, "1", 1));
+    initializeFrameworkBundles();
+    assert(!unsetenv(LSB_FRAMEWORK_BUNDLE_ENABLE_ENV));
     expectRedirect(source, expected);
     expectRedirect([source stringByAppendingString:@"/"], expected);
     expectForward(expected); // Physical RuntimeRoot paths must not receive a second prefix.

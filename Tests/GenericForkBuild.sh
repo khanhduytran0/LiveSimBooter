@@ -14,3 +14,4 @@ cc() { xcrun --sdk "$sdk" clang -target "$target" -std=c11 -D_DARWIN_C_SOURCE -W
 cc -dynamiclib -install_name @loader_path/libfork-fixture.dylib "$tests/Guest/libfork-fixture/GenericForkCaller.c" -o "$2/libfork-fixture.dylib"
 cc "$tests/Guest/fork-fixture/GenericFork.c" "$2/libfork-fixture.dylib" -o "$2/fork-fixture"
 cc "$tests/Guest/fork-resolver/ForkResolver.c" -o "$2/fork-resolver"
+cc -O2 "$tests/Guest/fork-stack-bounds/ForkStackBounds.c" -o "$2/fork-stack-bounds"

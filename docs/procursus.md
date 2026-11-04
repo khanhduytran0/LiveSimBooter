@@ -170,9 +170,9 @@ the Procursus HTTP method and was reaped with `SIGINT`. The second child exited 
 consistent with the optional `ischroot` lookup failing. APT also warned that its EDSP output path resolved to the guest data directory.
 No packages were changed by the simulation.
 
-Build the independent tests with `sh Tests/GenericForkBuild.sh iphonesimulator tmp/generic-fork`. Sign the two
-executables and the dylib. Run `fork-resolver` for the user lookup and `fork-fixture` by path with its dylib beside it.
-The latter calls fork from the dylib and tests the callbacks from
+Build the independent tests with `sh Tests/GenericForkBuild.sh iphonesimulator tmp/generic-fork`. Sign the guest executables
+and the fixture dylib. Run `fork-resolver` for the user lookup and `fork-stack-bounds` for the copied stack, pthread bounds,
+lower guard and parent wait status. Run `fork-fixture` by path with its dylib beside it. It calls fork from the dylib and tests the callbacks from
 `pthread_atfork`, private globals/heap/stack, shared file offset, close-on-exec and the status reaped by the parent.
 The macOS control and the iPhone 15 resume trial both reaped status 37 after the child executed the fixture a
 second time. The parent kept its global, heap and stack values and read byte `C` at the shared file offset. The
@@ -184,6 +184,62 @@ metadata above the normal starting range of a fresh child's heap. A fork can sti
 the observer cannot place every required region at the same address
 (`EADDRINUSE`) or a new allocation appears between inventory and libc prepare (`EAGAIN`). It currently supports
 one scalable default zone in the donor. An immediate nested fork from the adopted child before exec is unsupported.
+
+### Intermittent fork failures during unpack
+
+On iPhone 15 (host 23B50, guest 23A343), the 1900 `dpkg-deb` executable called `fork` from `subproc_fork+0xc`.
+Unpacking a package starts separate archive-reader and decompressor processes and, for control-file extraction, a tar
+process. A ten-package APT transaction exercises this path many times. [Upstream extraction code](https://github.com/guillemj/dpkg/blob/1.22.6/src/deb/extract.c#L259-L299)
+
+- **`EAGAIN`.** Three failing donors each gained a 1 MiB tiny malloc region during the XPC call that registers their
+  range list with the host. The child had already checked the original list. The new region was present
+  before the donor entered libc's fork handlers, and the locked coverage check caught it. The donor now rechecks the
+  allocator after the XPC call, before giving the child its broker token. On a new uncovered span it closes the socket,
+  reaps that child, and rebuilds the offer once. The locked check still guards the final snapshot.
+- **`EADDRINUSE`.** One donor needed the 8 MiB stack interval `[0x16efb0000, 0x16f7b0000)`. Four consecutive native
+  children rejected it before starting guest dyld, exhausting the old limit. A separate run recorded both ranges on
+  12 early rejections. Each donor stack overlapped the prospective child's live native pthread stack. Each was above
+  that child's VM floor. Early rejections can now use up to eight placements. The full observer preflight still stops on
+  its fourth placement failure, and a late broker error still reaches the caller.
+
+The normal build completed three ten-package reinstalls on disposable copies and 16 consecutive stock
+`dpkg-deb --control` extractions. One extraction detected a new 1 MiB region, rebuilt the offer, and passed the
+locked check. Another used the eighth child after seven early stack rejections. Both exited zero. The independent
+callback fixture also passed its `fork`, `vfork`, exec and wait checks. No debugger was attached.
+
+#### Reclaiming the fork child's stack
+
+When the donor's stack overlaps the lower part of the observer's native main stack, the single-threaded observer can move to a guarded
+1 MiB scratch stack and release the overlapping pages. It checks the native pthread bounds against the actual writable stack mapping and
+keeps the upper pages containing the native startup frames and kernel argument strings. It reserves the donor's exact range and a lower
+guard page. The broker rechecks vacancy and maps the donor stack copy-on-write at its original address.
+
+If the stacks are disjoint, the observer stays on its native stack until the final handoff. If it reclaimed pages, it briefly uses the
+preserved upper pages to unmap scratch. Both paths publish the donor bounds in the child's native pthread at the instruction sequence
+that switches SP and resumes the saved registers. The donor and observer use checkpoint protocol v21. For a general guest resume,
+the donor verifies that the copied mapping matches its complete pthread stack, and the observer reserves a guard page directly below it.
+A donor that overlaps the original stack top or an unrelated occupied mapping still needs a new placement.
+
+On iPhone 15 (native 23B50, guest 23A343, cache `9a2fb463-a774-53ed-a661-ff3f3fcac717` at `0x480000000`), stock Procursus
+`dpkg-deb --control` completed 12 extractions and reaped all 36 children. The extracted `control` and `md5sums` files matched
+the archive byte-for-byte in every run. Three children reclaimed a real stack overlap on their first placement. In one run,
+parent 34768 accepted child 34772, which released `[0x16a95c000, 0x16aef0000)` and resumed with the parent's 8 MiB stack at
+`0x16a6f0000`. The parent's wait for that same PID returned status 0. The session used guest launchd without SpringBoard or a debugger.
+
+An independent fork fixture checked the stack from the resumed child's own code. After reclaiming an overlap, child 35115 reported
+the same 8 MiB pthread bounds as its parent, with its SP inside them. It modified an inherited stack local and exited 37. The parent
+reaped 37 and retained the original value. Before v21, children with disjoint stacks resumed on the copied stack but still reported the
+observer's original pthread bounds.
+
+On the same iPhone 15, the v21 probe passed for 15 disjoint stacks and one reclaimed stack. In a disjoint child (PID 35639),
+the observer's original stack ended at `0x16f2f4000`. After `fork()` returned zero, pthread reported the parent's 8 MiB range
+`[0x16cbe0000, 0x16d3e0000)`, containing the actual SP `0x16d3da180`. The page below it was inaccessible, a stack write stayed
+private to the child, and the parent reaped exit 37. The child went directly to the donor stack without allocating scratch.
+Ten stock `dpkg-deb --control` extractions on that build matched the archive and reaped all 30 children with status zero.
+
+On iPhone 17 (native 24A435, same guest and cache UUID at `0x7180000000`), the v21 probe passed for nine disjoint stacks and three
+reclaimed stacks. Each child reported the donor's bounds and an inaccessible lower guard, and each parent reaped exit 37 with its
+stack local intact. Ten stock control extractions matched the archive and all 30 children exited zero.
 
 ### iPhone 17
 

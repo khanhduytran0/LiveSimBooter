@@ -29,6 +29,8 @@ enum { StateNoPtrauth = 1, StateKernelSignedPC = 4, WorkqueueReuse = 0x20000, Wo
 enum { DebugSlots = 16, BreakpointControl = 0x1e5, DebugUserMode = 4 };
 static _Atomic(uintptr_t) simulatorEntry;
 static uintptr_t nativeEntry, guestEntry;
+static int nativeFeatures;
+static pthread_once_t metadataOnce = PTHREAD_ONCE_INIT;
 static pthread_once_t bridgeOnce = PTHREAD_ONCE_INIT;
 static int bridgeError;
 static mach_port_t exceptionPort;
@@ -188,9 +190,10 @@ void LSBWorkqueueRegister(uintptr_t start) {
     atomic_store_explicit(&simulatorEntry, start && !(start & 3) ? start : 0, memory_order_release);
 }
 
-static bool parseMetadata(uintptr_t *entry, int *features) {
+// The legacy libpthread registers during libSystem startup. Defer environment access until its first feature query or bridge setup.
+static void readWorkqueueMetadata(void) {
     const char *start = getenv(LSB_HOST_WORKQUEUE_START_ENV), *mask = getenv(LSB_HOST_WORKQUEUE_FEATURES_ENV);
-    if (!start || !mask || !*start || !*mask || *start == '-' || *mask == '-') return false;
+    if (!start || !mask || !*start || !*mask || *start == '-' || *mask == '-') return;
     char *end;
     int saved = errno;
     errno = 0;
@@ -200,16 +203,14 @@ static bool parseMetadata(uintptr_t *entry, int *features) {
     unsigned long long value = strtoull(mask, &end, 0);
     valid = valid && !errno && !*end && value && value <= INT_MAX;
     errno = saved;
-    if (valid) { *entry = (uintptr_t)address; *features = (int)value; }
-    return valid;
+    if (valid) { nativeEntry = (uintptr_t)address; nativeFeatures = (int)value; }
 }
 
 int LSBWorkqueueSupported(void) {
     if (!atomic_load_explicit(&simulatorEntry, memory_order_acquire)) return _pthread_workqueue_supported();
-    uintptr_t entry;
-    int features;
     // A zero mask makes libdispatch reject initialization; never invent kernel capabilities when native capture was unavailable.
-    return parseMetadata(&entry, &features) ? features : 0;
+    pthread_once(&metadataOnce, readWorkqueueMetadata);
+    return nativeFeatures;
 }
 
 static bool parseException(const Message *message, ExceptionRequest *request) {
@@ -467,9 +468,12 @@ static void restoreHandlers(void) {
 static void initializeBridge(void) {
     const bool nativeSupport = usesNativeSupport();
     guestEntry = atomic_load_explicit(&simulatorEntry, memory_order_acquire);
-    int features;
     bridgeError = ENOTSUP;
-    if (!nativeSupport && (!guestEntry || !parseMetadata(&nativeEntry, &features) || nativeEntry == guestEntry)) return;
+    if (!nativeSupport) {
+        if (!guestEntry) return;
+        pthread_once(&metadataOnce, readWorkqueueMetadata);
+        if (!nativeFeatures || nativeEntry == guestEntry) return;
+    }
     const char *trace = getenv("LSB_TRACE_HANDOFF");
     traceHandoff = trace && !strcmp(trace, "1");
     const char *hardware = getenv(LSB_WORKQUEUE_HARDWARE_BREAKPOINT_ENV);

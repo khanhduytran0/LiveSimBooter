@@ -51,6 +51,7 @@ static void testForwarding(void) {
                           "apple.sim.cfprefs.user.daemonv.extra", "apple.sim.cfprefs.system.daemo", "apple.sim.cfprefs.system.daemonv1",
                           "test.sim.cfprefs.user.daemonv1", "apple.cfprefs.user.daemonv1"};
     assert(!setenv(LSB_NOTIFICATION_SHM_ENABLE_ENV, "1", 1));
+    initializeNotificationShm();
     for (unsigned i = 0; i < sizeof(names) / sizeof(*names); ++i) {
         expectedName = names[i]; expectedFlags = O_CREAT | O_RDWR | O_EXCL; expectedMode = 0621;
         unsigned before = forwards;
@@ -65,6 +66,7 @@ static void testForwarding(void) {
         for (unsigned i = 0; i < 4; ++i) {
             if (!i) assert(!unsetenv(LSB_NOTIFICATION_SHM_ENABLE_ENV));
             else assert(!setenv(LSB_NOTIFICATION_SHM_ENABLE_ENV, i == 1 ? "" : i == 2 ? "0" : "true", 1));
+            initializeNotificationShm();
             unsigned before = forwards;
             assert(objectOpen(expectedName, expectedFlags) == -1 && errno == ENOSYS);
             assert(objectUnlink(expectedName) == -1 && errno == ENOSYS && forwards == before + 2);
@@ -256,8 +258,10 @@ static void testWorkspaceSandbox(const char *root) {
     checkSandbox(preferencesName, "ipc-posix-shm-write-data", false);
     assert(access(object, F_OK) == -1 && errno == ENOENT); // Access queries have no creation side effect.
     assert(!setenv(LSB_NOTIFICATION_SHM_ENABLE_ENV, "0", 1));
+    initializeNotificationShm();
     checkSandbox(workspace, operations[0], false);
     assert(!setenv(LSB_NOTIFICATION_SHM_ENABLE_ENV, "1", 1));
+    initializeNotificationShm();
     assert(!setenv(LSB_NOTIFICATION_SHM_ROOT_ENV, "/", 1));
     checkSandbox(workspace, operations[0], false);
     assert(!setenv(LSB_NOTIFICATION_SHM_ROOT_ENV, root, 1));
@@ -296,13 +300,15 @@ int main(void) {
     alarm(10);
 #ifndef LSB_NOTIFICATION_SHM_INTERPOSE_TESTING
     testForwarding();
+    assert(!setenv(LSB_NOTIFICATION_SHM_ENABLE_ENV, "1", 1));
+    initializeNotificationShm();
 #endif
+    assert(!unsetenv(LSB_NOTIFICATION_SHM_ENABLE_ENV)); // Both direct and inserted hooks keep the captured setting.
     char directory[] = "/tmp/LiveSimBooter-notification-shm.XXXXXX", root[PATH_MAX], temporary[PATH_MAX], second[PATH_MAX], secondTmp[PATH_MAX];
     assert(mkdtemp(directory) && realpath(directory, root));
     pathJoin(temporary, root, "tmp");
     pathJoin(second, root, "other-runtime"); pathJoin(secondTmp, second, "tmp");
     assert(!mkdir(temporary, 0700) && !mkdir(second, 0700) && !mkdir(secondTmp, 0700));
-    assert(!setenv(LSB_NOTIFICATION_SHM_ENABLE_ENV, "1", 1));
     testMappings(root, name, slashName);
     testMappings(root, "/FBW1:com.apple.frontboard.syst", "/FBW1:com.apple.frontboard.syst");
     testMappings(root, "/FBW2:com.apple.frontboard.syst", "/FBW2:com.apple.frontboard.syst");

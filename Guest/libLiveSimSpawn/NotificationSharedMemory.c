@@ -1,4 +1,5 @@
 #include "NotificationSharedMemory.h"
+#include "../Shared/LaunchFlag.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -14,6 +15,11 @@
 
 static const char objectFile[] = "notification-center.shm";
 #define WORKSPACE_OBJECT_FILE_CAPACITY 64
+static LSBLaunchFlag notificationShm = {.name = LSB_NOTIFICATION_SHM_ENABLE_ENV};
+
+__attribute__((constructor)) static void initializeNotificationShm(void) {
+    LSBCaptureLaunchFlag(&notificationShm);
+}
 
 static bool workspaceObjectFile(const char *name, char file[WORKSPACE_OBJECT_FILE_CAPACITY]) {
     // iOS 26 FrontBoard's __pathForIdentifierAndBuffer uses /FBW1: and /FBW2: with identifierForName's first 25 characters.
@@ -31,7 +37,7 @@ static bool workspaceObjectFile(const char *name, char file[WORKSPACE_OBJECT_FIL
 }
 
 static const char *virtualObject(const char *name, char file[WORKSPACE_OBJECT_FILE_CAPACITY]) {
-    // Check the name before getenv: unrelated early libSystem initialization must not consult environment state.
+    // Before constructors, unrelated libSystem initialization must not consult environment state.
     if (!name) return NULL;
     const char *selected;
     if (!strcmp(name, "apple.shm.notification_center") || !strcmp(name, "/apple.shm.notification_center")) selected = objectFile;
@@ -40,8 +46,7 @@ static const char *virtualObject(const char *name, char file[WORKSPACE_OBJECT_FI
     else if (!strcmp(name, "apple.sim.cfprefs.user.daemonv")) selected = "cfpreferences-user-v1.shm";
     else if (workspaceObjectFile(name, file)) selected = file;
     else return NULL;
-    const char *enabled = getenv(LSB_NOTIFICATION_SHM_ENABLE_ENV);
-    return enabled && !strcmp(enabled, "1") ? selected : NULL;
+    return LSBLaunchFlagEnabled(&notificationShm) ? selected : NULL;
 }
 
 static int ownedDirectory(int descriptor) {

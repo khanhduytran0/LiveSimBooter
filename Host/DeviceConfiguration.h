@@ -10,7 +10,8 @@ int LSBCopyGuestDeviceCapabilities(NSString *runtimeRoot, LSBGuestDeviceType *ty
 int LSBCopyStagedGuestDeviceCapabilities(NSString *runtimeRoot, LSBGuestDeviceType *type, NSDictionary **profile);
 // Call only before any guest starts or after all old guest processes have exited. Atomic replacement preserves readers.
 int LSBInstallGuestDeviceCapabilities(NSString *runtimeRoot, NSDictionary *profile);
-// Native preference defaults off and accepts only a real Boolean. Exact host environment "1" forces on without saving it.
+// Capture before UIKit starts. Exact "1" forces a feature on for the host lifetime; the Boolean user preferences stay live.
+void LSBCaptureDeviceLaunchOverrides(const char *const environment[]);
 BOOL LSBHapticsForcedByEnvironment(void);
 BOOL LSBExperimentalHapticsEnabled(void);
 void LSBSaveConfiguredHapticsEnabled(BOOL enabled);

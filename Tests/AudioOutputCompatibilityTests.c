@@ -112,11 +112,7 @@ static OSStatus render(AudioObjectID object, const AudioTimeStamp *now, const Au
 static void testProperties(void) {
     AudioObjectPropertyAddress address = {'dOut', 'glob', 0};
     UInt32 size = 4, identifier = 0;
-    unsetenv(LSB_AUDIO_OUTPUT_ENABLE_ENV);
-    assert(LSBAudioObjectGetPropertyData(1, &address, 0, NULL, &size, &identifier) == forwardedStatus && forwarded == 1);
-    setenv(LSB_AUDIO_OUTPUT_ENABLE_ENV, "true", 1);
-    assert(LSBAudioObjectGetPropertyData(1, &address, 0, NULL, &size, &identifier) == forwardedStatus && forwarded == 2);
-    setenv(LSB_AUDIO_OUTPUT_ENABLE_ENV, "1", 1);
+    assert(!unsetenv(LSB_AUDIO_OUTPUT_ENABLE_ENV)); // The session's enabled value survives a guest environment change.
     assert(LSBAudioObjectGetPropertyData(1, &address, 0, NULL, &size, &identifier) == 0 && identifier == LSB_AUDIO_OUTPUT_DEVICE);
     assert(LSBAudioObjectExists(identifier));
     address.mSelector = 'dIn ';
@@ -338,7 +334,15 @@ static void testRendering(void) {
     for (unsigned i = 0; i < LSB_AUDIO_OUTPUT_MAX_PROCS; ++i) assert(LSBAudioDeviceDestroyIOProcID(LSB_AUDIO_OUTPUT_DEVICE, identifiers[i]) == 0);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "disabled")) {
+        assert(!setenv(LSB_AUDIO_OUTPUT_ENABLE_ENV, "1", 1));
+        AudioObjectPropertyAddress address = {'dOut', 'glob', 0};
+        UInt32 size = 4, identifier = 0;
+        assert(LSBAudioObjectGetPropertyData(1, &address, 0, NULL, &size, &identifier) == forwardedStatus && forwarded == 1);
+        return 0;
+    }
+    assert(argc == 1);
     testProperties();
     testRendering();
     testAggregate();

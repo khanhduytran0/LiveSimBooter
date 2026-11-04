@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <vector>
 
 namespace lsb { pid_t getpid() { return 1234; } }
@@ -410,7 +412,21 @@ static void testImageCapacity(bool modern) {
     std::free(allocation);
 }
 
+static void testChecksumPageBoundary() {
+    const size_t pageSize = static_cast<size_t>(getpagesize());
+    auto *pages = static_cast<uint8_t *>(mmap(nullptr, 2 * pageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0));
+    check(pages != MAP_FAILED && !mprotect(pages + pageSize, pageSize, PROT_NONE), "allocate guarded checksum input");
+    for (size_t i = 0; i < pageSize; ++i) pages[i] = static_cast<uint8_t>(i * 17 + (i >> 3));
+    for (size_t length = 0; length < 270; ++length) {
+        const uint8_t *input = pages + pageSize - length;
+        check(crc32c(input, length) == referenceCRC(input, length), "CRC32C unaligned input ending at a guard page");
+        check(posixChecksum(input, length) == referenceChecksum(input, length), "POSIX cksum unaligned input ending at a guard page");
+    }
+    check(!munmap(pages, 2 * pageSize), "release guarded checksum input");
+}
+
 int main(int argc, char **argv) {
+    testChecksumPageBoundary();
     check(crc32c(reinterpret_cast<const uint8_t *>("123456789"), 9) == 0xe3069283, "standard CRC32C check value");
     check(crc32c(nullptr, 0) == 0, "empty CRC32C check value");
     testEncodingSelection();

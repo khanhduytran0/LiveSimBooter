@@ -33,6 +33,9 @@
 #include <cstdint>
 #include <limits.h>
 #include <mach-o/loader.h>
+#if defined(__ARM_FEATURE_CRC32) && defined(__AARCH64EL__)
+#include <arm_acle.h>
+#endif
 
 namespace {
 
@@ -153,17 +156,46 @@ struct Writer {
     }
 };
 
+#if defined(__ARM_FEATURE_CRC32) && defined(__AARCH64EL__)
+uint64_t archiveWord(const uint8_t *bytes) {
+    uint64_t word;
+    __builtin_memcpy_inline(&word, bytes, sizeof(word)); // Archive fields can be unaligned, including after host-cache detachment.
+    return word;
+}
+#endif
+
 uint32_t crc32c(const uint8_t *bytes, size_t size) {
     uint32_t crc = UINT32_MAX;
+#if defined(__ARM_FEATURE_CRC32) && defined(__AARCH64EL__)
+    while (size >= sizeof(uint64_t)) {
+        crc = __crc32cd(crc, archiveWord(bytes));
+        bytes += sizeof(uint64_t);
+        size -= sizeof(uint64_t);
+    }
+    while (size--) crc = __crc32cb(crc, *bytes++);
+#else
     for (size_t index = 0; index < size; ++index) {
         crc ^= bytes[index];
         for (unsigned bit = 0; bit < 8; ++bit) crc = (crc >> 1) ^ ((0u - (crc & 1)) & 0x82f63b78u);
     }
+#endif
     return ~crc;
 }
 
 uint32_t posixChecksum(const uint8_t *bytes, size_t size) {
     uint32_t crc = 0;
+#if defined(__ARM_FEATURE_CRC32) && defined(__AARCH64EL__)
+    // POSIX cksum feeds each byte MSB first. ARM's reflected IEEE CRC consumes the equivalent bit-reversed bytes in the same order.
+    size_t remaining = size;
+    while (remaining >= sizeof(uint64_t)) {
+        crc = __crc32d(crc, __builtin_bswap64(__builtin_bitreverse64(archiveWord(bytes))));
+        bytes += sizeof(uint64_t);
+        remaining -= sizeof(uint64_t);
+    }
+    while (remaining--) crc = __crc32b(crc, __builtin_bitreverse8(*bytes++));
+    for (; size; size >>= 8) crc = __crc32b(crc, __builtin_bitreverse8(static_cast<uint8_t>(size)));
+    return ~__builtin_bitreverse32(crc);
+#else
     auto update = [&crc](uint8_t byte) {
         crc ^= static_cast<uint32_t>(byte) << 24;
         for (unsigned bit = 0; bit < 8; ++bit) crc = (crc << 1) ^ ((0u - (crc >> 31)) & 0x04c11db7u);
@@ -171,6 +203,7 @@ uint32_t posixChecksum(const uint8_t *bytes, size_t size) {
     for (size_t index = 0; index < size; ++index) update(bytes[index]);
     for (size_t remaining = size; remaining; remaining >>= 8) update(static_cast<uint8_t>(remaining));
     return ~crc;
+#endif
 }
 
 uint64_t readLittle(const uint8_t *bytes, unsigned count) {

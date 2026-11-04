@@ -12,7 +12,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-enum { TrialWireVersion = 20, TrialMaxDepth = 4, TrialSlicedStack = 1, TrialRestoreAllocator = 4, TrialResumeGuest = 8, TrialVfork = 16,
+// In v21 the donor guarantees that a TrialResumeGuest stack range covers its full pthread stack.
+enum { TrialWireVersion = 21, TrialMaxDepth = 4, TrialSlicedStack = 1, TrialRestoreAllocator = 4, TrialResumeGuest = 8, TrialVfork = 16,
        TrialStackHeadroom = 256 * 1024, TrialWitnessSize = 128 };
 typedef enum { TrialSnapshot, TrialDF, TrialExec, TrialShell } TrialMode;
 
@@ -53,8 +54,8 @@ typedef struct {
     LSBForkWireRange ranges[LSB_MAX_FORK_RANGES]; // Same sorted ranges as the broker offer. Bit i marks VM_INHERIT_NONE.
 } TrialOffer;
 
-// A nested fork can offer its parent's reduced stack as a full VM leaf. Always guard the shell stack at every generation.
-static inline bool trialNeedsStackGuard(const TrialOffer *offer) { return offer->resume == TrialShell || (offer->flags & TrialSlicedStack); }
+// Keep a lower guard on published pthread stacks and on every generation of the sliced shell stack.
+static inline bool trialNeedsStackGuard(const TrialOffer *offer) { return offer->resume == TrialShell || (offer->flags & (TrialSlicedStack | TrialResumeGuest)); }
 
 _Static_assert(LSB_MAX_FORK_RANGES <= 64 && sizeof(TrialReady) == 40 && LSB_MAX_FDS % 64 == 0 &&
                sizeof(TrialOffer) == 416 + sizeof(ForkPthreadState) + sizeof(TrialSupportImages) + LSB_MAX_FDS / 8 + 16 * LSB_MAX_FORK_RANGES, "fork trial handshake size");

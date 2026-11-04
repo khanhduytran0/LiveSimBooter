@@ -14,6 +14,10 @@
 
 static char simulatorBootUUID[37];
 static _Atomic(bool) simulatorBootUUIDReady;
+static _Atomic(bool) simulatorLaunchd;
+static char launchdStateDirectory[PATH_MAX];
+static size_t launchdStateDirectoryLength;
+static int launchdStateDirectoryError;
 _Static_assert(ATOMIC_BOOL_LOCK_FREE == 2, "Early sysctl forwarding must not acquire a runtime lock");
 
 #ifndef LSB_LAUNCHD_COMPATIBILITY_TESTING
@@ -53,13 +57,9 @@ int LSBLaunchdSysctlByName(const char *name, void *oldValue, size_t *oldSize, vo
     // transient-info URL. Supply the simulator's own boot identity, never an entitlement grant or a write override.
     if (name && !strcmp(name, "kern.bootsessionuuid") && !newValue && !newSize &&
         atomic_load_explicit(&simulatorBootUUIDReady, memory_order_acquire)) return readSimulatorBootUUID(oldValue, oldSize);
-    // libSystem itself queries sysctls before environ is initialized. Only launchd's later bootargs read may inspect its marker.
-    if (!name || strcmp(name, "kern.bootargs") || newValue || newSize)
+    if (!atomic_load_explicit(&simulatorLaunchd, memory_order_acquire) || !name || strcmp(name, "kern.bootargs") || newValue || newSize)
         return sysctlbyname(name, oldValue, oldSize, newValue, newSize);
     int savedErrno = errno;
-    const char *marker = getenv(LSB_SIMULATOR_LAUNCHD_ENV);
-    if (!marker || strcmp(marker, "1"))
-        return sysctlbyname(name, oldValue, oldSize, newValue, newSize);
     // launchd needs a bootargs string before reading its bootstrap plist; this isolated simulator has no configured boot arguments.
     // Darwin's sysctl_old_user reports zero bytes copied on an undersized output, rather than the required query length.
     if (oldValue && (!oldSize || !*oldSize)) {
@@ -85,29 +85,45 @@ static bool dotComponent(const char *path) {
     return false;
 }
 
-static int launchdStatePath(const char *path, char translated[PATH_MAX], const char **result) {
-    static const char prefix[] = "/private/var/tmp/com.kdt.LiveSimBooter.launchd";
+static int configureLaunchdStateDirectory(const char *root) {
     static const char replacement[] = "/tmp/launchd";
-    *result = path;
-    // As with sysctlbyname, early libc calls cannot safely inspect environ. Match the complete fixed component first.
-    if (!path || strncmp(path, prefix, sizeof(prefix) - 1)) return 0;
-    const char *suffix = path + sizeof(prefix) - 1;
-    if (*suffix && *suffix != '/') return 0;
-    const char *marker = getenv(LSB_SIMULATOR_LAUNCHD_ENV);
-    if (!marker || strcmp(marker, "1")) return 0;
-    const char *root = getenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY");
     if (!root || root[0] != '/') return EINVAL;
-    size_t rootLength = strnlen(root, PATH_MAX), suffixLength = strnlen(suffix, PATH_MAX);
-    if (rootLength == PATH_MAX || suffixLength == PATH_MAX) return ENAMETOOLONG;
-    if (dotComponent(root) || dotComponent(suffix)) return EINVAL;
+    size_t rootLength = strnlen(root, PATH_MAX);
+    if (rootLength == PATH_MAX) return ENAMETOOLONG;
+    if (dotComponent(root)) return EINVAL;
     while (rootLength > 1 && root[rootLength - 1] == '/') --rootLength;
     // The native host supplies the canonical build's data directory. Reject an accidentally missing container path.
     if (rootLength == 1) return EINVAL;
-    size_t replacementLength = sizeof(replacement) - 1;
-    if (rootLength + replacementLength + suffixLength >= PATH_MAX) return ENAMETOOLONG;
-    memcpy(translated, root, rootLength);
-    memcpy(translated + rootLength, replacement, replacementLength);
-    memcpy(translated + rootLength + replacementLength, suffix, suffixLength + 1);
+    if (rootLength + sizeof(replacement) > PATH_MAX) return ENAMETOOLONG;
+    memcpy(launchdStateDirectory, root, rootLength);
+    memcpy(launchdStateDirectory + rootLength, replacement, sizeof(replacement));
+    launchdStateDirectoryLength = rootLength + sizeof(replacement) - 1;
+    return 0;
+}
+
+#ifndef LSB_LAUNCHD_COMPATIBILITY_TESTING
+__attribute__((constructor))
+#endif
+static void initializeLaunchdStateDirectory(void) {
+    const char *marker = getenv(LSB_SIMULATOR_LAUNCHD_ENV);
+    bool enabled = marker && !strcmp(marker, "1");
+    if (enabled) launchdStateDirectoryError = configureLaunchdStateDirectory(getenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY"));
+    atomic_store_explicit(&simulatorLaunchd, enabled, memory_order_release);
+}
+
+static int launchdStatePath(const char *path, char translated[PATH_MAX], const char **result) {
+    static const char prefix[] = "/private/var/tmp/com.kdt.LiveSimBooter.launchd";
+    *result = path;
+    if (!atomic_load_explicit(&simulatorLaunchd, memory_order_acquire) || !path || strncmp(path, prefix, sizeof(prefix) - 1)) return 0;
+    const char *suffix = path + sizeof(prefix) - 1;
+    if (*suffix && *suffix != '/') return 0;
+    if (launchdStateDirectoryError) return launchdStateDirectoryError;
+    size_t suffixLength = strnlen(suffix, PATH_MAX);
+    if (suffixLength == PATH_MAX) return ENAMETOOLONG;
+    if (dotComponent(suffix)) return EINVAL;
+    if (launchdStateDirectoryLength + suffixLength >= PATH_MAX) return ENAMETOOLONG;
+    memcpy(translated, launchdStateDirectory, launchdStateDirectoryLength);
+    memcpy(translated + launchdStateDirectoryLength, suffix, suffixLength + 1);
     *result = translated;
     return 0;
 }

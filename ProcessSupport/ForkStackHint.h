@@ -11,7 +11,7 @@
 #include <sys/socket.h>
 
 #define LSB_FORK_STACK_HINT_ENV "LSB_FORK_DONOR_STACK"
-enum { LSBForkStackHintLength = 33, LSBForkStackCollisionByte = 0xa7 };
+enum { LSBForkStackHintLength = 33, LSBForkStackCollisionByte = 0xa7, LSBForkStackLandingHeadroom = 64 * 1024 };
 
 static inline bool LSBForkStackHintValid(const char *text, uint64_t *bottom, uint64_t *top) {
     if (!text || strlen(text) != LSBForkStackHintLength || text[16] != ':' ||
@@ -28,8 +28,8 @@ static inline bool LSBForkStackUnplaceable(uint64_t bottom, uint64_t top) {
     pthread_t main = pthread_self();
     uint64_t high = (uintptr_t)pthread_get_stackaddr_np(main), size = pthread_get_stacksize_np(main);
     uintptr_t sp = (uintptr_t)&main;
-    if (!pthread_main_np() || size > high || sp < high - size || sp >= high) return false;
-    // Only reject the actual mapped leaf containing this native main thread's live frame.
+    // The observer can leave its original stack and reclaim a lower overlap. Keep the native startup/argv window at the top.
+    if (top < high || !pthread_main_np() || size > high || sp < high - size || sp >= high) return false;
     vm_address_t low = sp;
     vm_size_t bytes = 0;
     natural_t depth = UINT32_MAX;

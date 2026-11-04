@@ -1542,7 +1542,7 @@ static int host(const char *executable) {
 }
 
 int main(int argc, char **argv) {
-    _Static_assert(LSB_TRANSPORT_VERSION == 12 && LSB_BOOTSTRAP_VERSION == 7, "terminal job control uses transport 12 and the existing native bootstrap");
+    _Static_assert(LSB_TRANSPORT_VERSION == 12 && LSB_BOOTSTRAP_VERSION == 8, "native worker placement uses bootstrap 8 and the existing guest transport");
     // Bound a failed regression test without adding a signal handler to the production transport.
     alarm(20);
     return argc == 2 && !strcmp(argv[1], "--client") ? client() : host(argv[0]);

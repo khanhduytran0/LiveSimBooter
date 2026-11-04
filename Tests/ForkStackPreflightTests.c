@@ -3,6 +3,7 @@
 #include "../Guest/lsb-fork-snapshot-child/ForkSnapshotChild.c"
 #undef main
 #include <assert.h>
+#include <sys/wait.h>
 
 int LSBTrialReceiveForkFDs(int fd) { (void)fd; return ENOTSUP; }
 uintptr_t LSBTrialLibcForkReturnPC(bool isVfork) { (void)isVfork; abort(); } // Only used after preflight.
@@ -13,8 +14,9 @@ int LSBTrialAdoptBash(uintptr_t image, unsigned depth) { (void)image; (void)dept
 
 int LSBTransportAcceptFork(const audit_token_t *parent) { (void)parent; return ENOTSUP; }
 
-int LSBTrialResumeBash(uintptr_t header, const LSBForkContext *caller, uintptr_t stackStart, size_t stackSize, int fd, bool dfOnly, bool allowEarly) {
-    (void)header; (void)caller; (void)stackStart; (void)stackSize; (void)fd; (void)dfOnly; (void)allowEarly;
+int LSBTrialResumeBash(uintptr_t header, const LSBForkContext *caller, uintptr_t stackStart, size_t stackSize, int fd,
+                       bool dfOnly, bool allowEarly, bool traceEnabled) {
+    (void)header; (void)caller; (void)stackStart; (void)stackSize; (void)fd; (void)dfOnly; (void)allowEarly; (void)traceEnabled;
     return ENOTSUP;
 }
 
@@ -115,6 +117,93 @@ static void testVforkOffer(void) {
     assert(validateOffer(&offer, &stack) == EPROTO);
     offer.flags = TrialVfork | TrialResumeGuest;
     assert(validateOffer(&offer, &stack) == EPROTO);
+    offer.flags = TrialResumeGuest | TrialRestoreAllocator;
+    task_vm_info_data_t vm = {};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    assert(!task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &count) && count >= TASK_VM_INFO_REV2_COUNT);
+    if (vm.min_address >= vm_page_size) {
+        // The stack fits at the VM floor, but published pthread bounds also require space for its guard.
+        offer.caller.sp = offer.ranges[0].start = vm.min_address;
+        assert(validateOffer(&offer, &stack) == EADDRINUSE && unavailableAddress == vm.min_address - vm_page_size);
+        offer.caller.sp = offer.ranges[0].start = vm.min_address + vm_page_size;
+        assert(!validateOffer(&offer, &stack));
+    }
+}
+
+// Use a disposable child for each one-way handoff.
+static TrialScratchStack scratch;
+
+__attribute__((used)) static void verifyResumedStack(void) {
+    uintptr_t sp = (uintptr_t)&sp;
+    assert(scratch.donor.bottom < sp && sp < scratch.donor.top);
+    assert((uintptr_t)pthread_get_stackaddr_np(pthread_self()) == scratch.donor.top && scratch.pthreadBounds->bottom == scratch.donor.bottom);
+    assert(!LSBCheckForkGuard(scratch.donor.bottom - vm_page_size, scratch.donor.bottom, TrialStackTag));
+    if (scratch.scratch.top) {
+        assert(trialStackLeaf(scratch.donor.top, scratch.donor.top, vm_page_size, VM_PROT_NONE));
+        mach_vm_address_t address = scratch.scratch.bottom - vm_page_size;
+        mach_vm_size_t bytes = scratch.scratch.top - scratch.scratch.bottom + 2 * vm_page_size;
+        assert(mach_vm_allocate(mach_task_self(), &address, bytes, VM_FLAGS_FIXED) == KERN_SUCCESS);
+    } else {
+        assert(pthread_get_stacksize_np(pthread_self()) == scratch.donor.top - scratch.donor.bottom);
+        assert(trialStackLeaf(scratch.native.top - 1, scratch.native.bottom, scratch.native.top - scratch.native.bottom, VM_PROT_READ | VM_PROT_WRITE));
+    }
+    _exit(37);
+}
+
+// Check the saved register and both ends of Darwin's red zone before C can use the resumed stack.
+__attribute__((naked)) static void verifyStackEntry(void) {
+    __asm__("cbnz x0, 1f\n"
+            "ldur x9, [sp, #-8]\n cmp x9, x19\n b.ne 1f\n"
+            "ldur x9, [sp, #-128]\n cmp x9, x19\n b.ne 1f\n"
+            "b _verifyResumedStack\n"
+            "1: brk #0");
+}
+
+static void installTestStack(void *unused) {
+    (void)unused;
+    if (scratch.scratch.top) assert(!trialReclaimStack(&scratch));
+    LSBForkWireRange stack = {scratch.donor.bottom, scratch.donor.top - scratch.donor.bottom};
+    offer.flags = TrialResumeGuest | TrialRestoreAllocator;
+    assert(trialNeedsStackGuard(&offer));
+    assert(!reserveStack(stack, true) && !releaseStackReservation(stack, true));
+    mach_vm_address_t address = stack.start;
+    assert(mach_vm_allocate(mach_task_self(), &address, stack.size, VM_FLAGS_FIXED) == KERN_SUCCESS);
+    uint64_t cookie = UINT64_C(0x1234a0b0c0d0);
+    offer.caller = (LSBForkContext){.sp = scratch.donor.top, .pc = (uintptr_t)&verifyStackEntry, .x19ToX28 = {cookie}};
+    *(uint64_t *)(offer.caller.sp - 8) = *(uint64_t *)(offer.caller.sp - 128) = cookie;
+    trialReturnToGuest(&offer, (TrialGuardPage){}, &scratch);
+}
+
+static void testStackHandoff(bool reclaim) {
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        uintptr_t sp = (uintptr_t)&sp;
+        uintptr_t top = (uintptr_t)pthread_get_stackaddr_np(pthread_self()), bottom = top - pthread_get_stacksize_np(pthread_self());
+        size_t page = vm_page_size;
+        LSBForkWireRange donor;
+        if (reclaim) {
+            assert(trialPrepareStackHandoff(&scratch, (LSBForkWireRange){top - page, page}, sp) || !trialPlanScratchStack(&scratch, sp));
+            donor = (LSBForkWireRange){bottom + 4 * page, 16 * page};
+        } else {
+            mach_vm_address_t base = 0;
+            size_t size = top - bottom;
+            assert(!mach_vm_allocate(mach_task_self(), &base, size + page, VM_FLAGS_ANYWHERE));
+            assert(!mach_vm_deallocate(mach_task_self(), base, size + page));
+            donor = (LSBForkWireRange){base + page, size};
+            assert(base + page + size <= bottom || base >= top);
+        }
+        assert(!trialPrepareStackHandoff(&scratch, donor, sp));
+        assert(trialPlanScratchStack(&scratch, sp) == reclaim);
+        assert((uintptr_t)pthread_get_stackaddr_np(pthread_self()) == top);
+        if (reclaim) {
+            assert(!trialAllocateScratchStack(&scratch, 0));
+            trialPivotStack(scratch.scratch.top, scratch.pthreadBounds, &scratch.scratch, installTestStack, NULL);
+        }
+        installTestStack(NULL);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 37);
 }
 
 int main(void) {
@@ -144,6 +233,8 @@ int main(void) {
     testStackSlice();
     testAddressLimits();
     testVforkOffer();
-    puts("Fork stack preflight and guarded slice passed");
+    testStackHandoff(false);
+    testStackHandoff(true);
+    puts("Fork stack preflight, guarded slice, disjoint and reclaimed stack handoffs passed");
     return 0;
 }

@@ -260,11 +260,19 @@ static void checkRejectedPath(const char *path, int error) {
     assert(filesystemCalls == before);
 }
 
+// Each change models the environment of a newly started launchd, with its own constructor snapshot.
+static void startWithLaunchdSetting(const char *key, const char *value) {
+    if (value) assert(!setenv(key, value, 1));
+    else assert(!unsetenv(key));
+    initializeLaunchdStateDirectory();
+}
+
 static void testFilesystem(void) {
     static const char original[] = "/private/var/tmp/com.kdt.LiveSimBooter.launchd";
     static const char originalFile[] = "/private/var/tmp/com.kdt.LiveSimBooter.launchd/disabled.plist";
     environmentAvailable = false;
     unsigned beforeEnvironment = environmentCalls;
+    checkFilesystemPath(originalFile, originalFile);
     const char *unrelated[] = {NULL, "/dev/null", "/private/var/tmp/com.kdt.LiveSimBooter.launchd-extra/disabled.plist",
                               "/private/var/tmp/com.kdt.LiveSimBooter.launch", "private/var/tmp/com.kdt.LiveSimBooter.launchd",
                               "/var/jb-extra/tool", "/private/var/jb-extra/tool", "var/jb/tool"};
@@ -275,12 +283,14 @@ static void testFilesystem(void) {
     assert(LSBLaunchdRename(expectedPath, expectedOtherPath, RENAME_EXCL) == -1 && errno == EACCES);
     assert(environmentCalls == beforeEnvironment);
     environmentAvailable = true;
-    assert(!unsetenv(LSB_SIMULATOR_LAUNCHD_ENV));
+    startWithLaunchdSetting(LSB_SIMULATOR_LAUNCHD_ENV, NULL);
     checkFilesystemPath(originalFile, originalFile);
-    assert(!setenv(LSB_SIMULATOR_LAUNCHD_ENV, "01", 1));
+    startWithLaunchdSetting(LSB_SIMULATOR_LAUNCHD_ENV, "01");
     checkFilesystemPath(originalFile, originalFile);
-    assert(!setenv(LSB_SIMULATOR_LAUNCHD_ENV, "1", 1));
-    assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", "/group/data", 1));
+    startWithLaunchdSetting(LSB_SIMULATOR_LAUNCHD_ENV, "1");
+    startWithLaunchdSetting("SIMULATOR_SHARED_RESOURCES_DIRECTORY", "/group/data");
+    assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", "/later/root", 1));
+    environmentAvailable = false;
     checkFilesystemPath(original, "/group/data/tmp/launchd");
     checkFilesystemPath(originalFile, "/group/data/tmp/launchd/disabled.plist");
     checkFilesystemPath("/private/var/tmp/com.kdt.LiveSimBooter.launchd/", "/group/data/tmp/launchd/");
@@ -304,27 +314,28 @@ static void testFilesystem(void) {
     expectedOtherPath = "/group/data/tmp/launchd/disabled.plist";
     assert(LSBLaunchdRename(expectedPath, originalFile, 0) == -1 && errno == EACCES);
     assert(filesystemCalls == before + 3);
-    assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", "/group/data///", 1));
+    environmentAvailable = true;
+    startWithLaunchdSetting("SIMULATOR_SHARED_RESOURCES_DIRECTORY", "/group/data///");
     checkFilesystemPath(originalFile, "/group/data/tmp/launchd/disabled.plist");
     const char *badRoots[] = {"", "relative", "/", "/group/../other", "/group/./data"};
     for (unsigned i = 0; i < sizeof(badRoots) / sizeof(badRoots[0]); ++i) {
-        assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", badRoots[i], 1));
+        startWithLaunchdSetting("SIMULATOR_SHARED_RESOURCES_DIRECTORY", badRoots[i]);
         checkRejectedPath(original, EINVAL);
     }
-    assert(!unsetenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY"));
+    startWithLaunchdSetting("SIMULATOR_SHARED_RESOURCES_DIRECTORY", NULL);
     checkRejectedPath(original, EINVAL);
     char largeRoot[PATH_MAX + 1], translated[PATH_MAX];
     memset(largeRoot, 'r', sizeof(largeRoot));
     largeRoot[0] = '/';
     largeRoot[PATH_MAX] = '\0';
-    assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", largeRoot, 1));
+    startWithLaunchdSetting("SIMULATOR_SHARED_RESOURCES_DIRECTORY", largeRoot);
     checkRejectedPath(original, ENAMETOOLONG);
     largeRoot[PATH_MAX - sizeof("/tmp/launchd")] = '\0';
-    assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", largeRoot, 1));
+    startWithLaunchdSetting("SIMULATOR_SHARED_RESOURCES_DIRECTORY", largeRoot);
     assert(snprintf(translated, sizeof(translated), "%s/tmp/launchd", largeRoot) == PATH_MAX - 1);
     checkFilesystemPath(original, translated);
     checkRejectedPath(originalFile, ENAMETOOLONG);
-    assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", "/group", 1));
+    startWithLaunchdSetting("SIMULATOR_SHARED_RESOURCES_DIRECTORY", "/group");
     char largePath[PATH_MAX + sizeof(original)];
     memcpy(largePath, original, sizeof(original) - 1);
     memset(largePath + sizeof(original) - 1, 'x', PATH_MAX);
@@ -337,7 +348,7 @@ static void testFilesystem(void) {
     assert(mkdtemp(directory));
     assert(snprintf(temporary, sizeof(temporary), "%s/tmp", directory) > 0);
     assert(!mkdir(temporary, 0700));
-    assert(!setenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY", directory, 1));
+    startWithLaunchdSetting("SIMULATOR_SHARED_RESOURCES_DIRECTORY", directory);
     realFilesystem = true;
     assert(!LSBLaunchdMkdir(original, 0700));
     int descriptor = LSBLaunchdOpen(originalFile, O_WRONLY | O_CREAT | O_EXCL, 0600);
@@ -355,7 +366,8 @@ static void testFilesystem(void) {
     realFilesystem = false;
     assert(snprintf(state, sizeof(state), "%s/tmp/launchd", directory) > 0);
     assert(!rmdir(state) && !rmdir(temporary) && !rmdir(directory));
-    assert(!unsetenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY") && !unsetenv(LSB_SIMULATOR_LAUNCHD_ENV));
+    assert(!unsetenv("SIMULATOR_SHARED_RESOURCES_DIRECTORY"));
+    startWithLaunchdSetting(LSB_SIMULATOR_LAUNCHD_ENV, NULL);
 }
 
 static void testBootstrapStat(void) {
@@ -383,20 +395,21 @@ int main(void) {
     char output[4] = {'a', 'b', 'c', 'd'}, replacement[] = "changed";
     size_t size = sizeof(output);
     // libSystem's host compatibility checks run before environ exists; unrelated queries must never touch getenv.
+    expectPassthrough("kern.bootargs", output, &size, NULL, 0);
     expectPassthrough("kern.osrelease", output, &size, NULL, 0);
     expectPassthrough("hw.optional.arm64", output, &size, NULL, 0);
     expectPassthrough(NULL, output, &size, NULL, 0);
     expectPassthrough("kern.bootargs", output, &size, replacement, sizeof(replacement));
     assert(environmentCalls == 0);
     environmentAvailable = true;
-    assert(!unsetenv(LSB_SIMULATOR_LAUNCHD_ENV));
+    startWithLaunchdSetting(LSB_SIMULATOR_LAUNCHD_ENV, NULL);
     expectPassthrough("kern.bootargs", output, &size, NULL, 0);
     const char *inactive[] = {"", "0", "true", "01", "1x", " 1", "1 "};
     for (unsigned i = 0; i < sizeof(inactive) / sizeof(inactive[0]); ++i) {
-        assert(!setenv(LSB_SIMULATOR_LAUNCHD_ENV, inactive[i], 1));
+        startWithLaunchdSetting(LSB_SIMULATOR_LAUNCHD_ENV, inactive[i]);
         expectPassthrough("kern.bootargs", output, &size, NULL, 0);
     }
-    assert(!setenv(LSB_SIMULATOR_LAUNCHD_ENV, "1", 1));
+    startWithLaunchdSetting(LSB_SIMULATOR_LAUNCHD_ENV, "1");
     unsigned priorEnvironmentCalls = environmentCalls;
     const char *otherNames[] = {"kern.osrelease", "kern.bootargs.extra", "kern.bootarg", "KERN.BOOTARGS", "", NULL};
     for (unsigned i = 0; i < sizeof(otherNames) / sizeof(otherNames[0]); ++i)
@@ -429,8 +442,8 @@ int main(void) {
     assert(!memcmp(output, "abcd", sizeof(output)));
     errno = EDOM;
     assert(!LSBLaunchdSysctlByName("kern.bootargs", NULL, NULL, NULL, 0) && errno == EDOM);
-    assert(nativeCalls == before);
-    assert(!unsetenv(LSB_SIMULATOR_LAUNCHD_ENV));
+    assert(nativeCalls == before && environmentCalls == priorEnvironmentCalls);
+    startWithLaunchdSetting(LSB_SIMULATOR_LAUNCHD_ENV, NULL);
     expectPassthrough("kern.bootargs", output, &size, NULL, 0);
     testBootUUID();
     testFilesystem();

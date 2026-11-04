@@ -1,5 +1,6 @@
 #pragma once
 #include "ForkLibcCheckpoint.h"
+#include "ForkScratchStack.h"
 #include "../Shared/Fork/ForkPthreadRegistry.h"
 #include "../Shared/PrivateMachVM.h"
 #include <crt_externs.h>
@@ -85,12 +86,13 @@ static inline int trialPrepareGuard(uintptr_t guard, uintptr_t libcPC, TrialGuar
 }
 
 // Switch the guest's stack guard only on a no-return path. Frames copied from the parent already contain this value.
-__attribute__((noreturn, unused, no_stack_protector)) static void trialReturnToGuest(const TrialOffer *offer, TrialGuardPage page) {
+__attribute__((noreturn, unused, no_stack_protector)) static void trialReturnToGuest(const TrialOffer *offer, TrialGuardPage page, TrialScratchStack *scratch) {
     if (page.page) {
         __stack_chk_guard = offer->guard;
         if (!(page.protection & VM_PROT_WRITE) && vm_protect(mach_task_self(), page.page, vm_page_size, FALSE, page.protection)) _exit(126);
     }
     // Its worker can now use child-side pthread state and the inherited stack guard.
     if (LSBTrialResumeTerminalWitness()) _exit(126);
-    LSBResumeForkContext(&offer->caller);
+    if (scratch->scratch.top) trialResumeFromScratch(scratch, &offer->caller);
+    trialResumeOnDonorStack(scratch, &offer->caller);
 }

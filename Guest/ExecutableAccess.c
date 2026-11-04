@@ -119,8 +119,36 @@ int LSBFAccessAt(int directory, const char *path, int mode, int flags) {
     return allowed ? 0 : result;
 }
 
+// Procursus dpkg 1.22.6 scans CONFIGDIR before it parses --root, then opens the selected fragments using Darwin's unlimited-streams ABI.
+extern FILE *darwinFopen(const char *path, const char *mode) __asm("_fopen$DARWIN_EXTSN");
+
+static int translateDpkgConfig(const char **path, char resolved[PATH_MAX]) {
+    const char *guest = LSBGuestVirtualBootstrapPath(*path);
+    static const char prefix[] = "/var/jb/etc/dpkg/";
+    if (!guest || strncmp(guest, prefix, sizeof(prefix) - 1)) return 0;
+    return LSBResolveBootstrapAccess(guest, path, resolved, false);
+}
+
+int LSBDpkgConfigScandir(const char *path, struct dirent ***entries, int (*filter)(const struct dirent *),
+                         int (*compare)(const struct dirent **, const struct dirent **)) {
+    char resolved[PATH_MAX];
+    int error = translateDpkgConfig(&path, resolved);
+    if (error) { errno = error; return -1; }
+    return scandir(path, entries, filter, compare);
+}
+
+FILE *LSBDpkgConfigFopen(const char *path, const char *mode) {
+    char resolved[PATH_MAX];
+    if (mode && mode[0] == 'r' && !mode[1]) {
+        int error = translateDpkgConfig(&path, resolved);
+        if (error) { errno = error; return NULL; }
+    }
+    return darwinFopen(path, mode);
+}
+
 #ifndef LSB_EXECUTABLE_ACCESS_TESTING
 __attribute__((used, section("__DATA,__interpose"))) static const struct { const void *replacement, *original; } interpositions[] = {
-    {(const void *)&LSBAccess, (const void *)&access}, {(const void *)&LSBFAccessAt, (const void *)&faccessat}
+    {(const void *)&LSBAccess, (const void *)&access}, {(const void *)&LSBFAccessAt, (const void *)&faccessat},
+    {(const void *)&LSBDpkgConfigScandir, (const void *)&scandir}, {(const void *)&LSBDpkgConfigFopen, (const void *)&darwinFopen}
 };
 #endif

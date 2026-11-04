@@ -16,7 +16,7 @@ _Static_assert(sizeof(BashWordList) == 16 && sizeof(BashWordDescription) == 16 &
 
 // Preserve only pages reached from the reviewed command objects. An object may cross a page boundary,
 // or share pages with the executable, original stack, variable context, or another object.
-static int addBashBytes(TrialPlan *plan, uintptr_t address, size_t size, size_t pageSize) {
+static int addForkBytes(TrialPlan *plan, uintptr_t address, size_t size, size_t pageSize) {
     uintptr_t end;
     if (!address || !size || __builtin_add_overflow(address, size, &end)) return EFAULT;
     for (uintptr_t page = address & ~(pageSize - 1); page < end;) {
@@ -25,10 +25,11 @@ static int addBashBytes(TrialPlan *plan, uintptr_t address, size_t size, size_t 
         if (__builtin_add_overflow(page, pageSize, &next)) return EOVERFLOW;
         int error = readLeaf(page, &leaf);
         if (error) return error;
-        if (leaf.end < next || leaf.info.inheritance != VM_INHERIT_COPY || !(leaf.info.protection & VM_PROT_READ) ||
-            (leaf.info.protection & VM_PROT_EXECUTE)) return ENOTSUP;
+        if (leaf.end < next || leaf.info.inheritance == VM_INHERIT_NONE || !(leaf.info.protection & VM_PROT_READ)) return ENOTSUP;
         if (!contains(plan, page)) {
-            error = addSpan(plan, "bash-command", page, next);
+            // argv and environ may reference literals in a signed image already in the offer.
+            if (leaf.info.inheritance != VM_INHERIT_COPY || (leaf.info.protection & VM_PROT_EXECUTE)) return ENOTSUP;
+            error = addSpan(plan, "referenced-by-guest", page, next);
             if (error) return error;
         }
         page = next;
@@ -38,12 +39,12 @@ static int addBashBytes(TrialPlan *plan, uintptr_t address, size_t size, size_t 
 
 static int addBashObject(TrialPlan *plan, uintptr_t address, void *buffer, size_t bytes, size_t pageSize) {
     if (address % sizeof(uintptr_t)) return EFAULT;
-    int error = addBashBytes(plan, address, bytes, pageSize);
+    int error = addForkBytes(plan, address, bytes, pageSize);
     if (error) return error;
     return forkTrialRead(address, buffer, bytes) ? 0 : EFAULT;
 }
 
-static int addBashString(TrialPlan *plan, uintptr_t start, size_t *budget, size_t pageSize) {
+static int addForkString(TrialPlan *plan, uintptr_t start, size_t *budget, size_t pageSize) {
     if (!start) return EFAULT;
     for (size_t used = 0; used < *budget;) {
         char block[256];
@@ -57,7 +58,7 @@ static int addBashString(TrialPlan *plan, uintptr_t start, size_t *budget, size_
         if (nul) {
             used += (size_t)(nul - block) + 1;
             *budget -= used;
-            return addBashBytes(plan, start, used, pageSize);
+            return addForkBytes(plan, start, used, pageSize);
         }
         used += bytes;
     }
@@ -103,7 +104,7 @@ static int addBashCommandPages(TrialPlan *plan, uintptr_t header, const LSBForkC
     // x21 is Bash's resolved executable. The normal execve interposer applies the runtime's path policy after the child reaches it.
     if (!frame.x21) return ENOTSUP; // Bash's separate command-not-found branch does not reach execve.
     size_t pathBudget = LSB_PATH_BYTES;
-    int error = addBashString(plan, frame.x21, &pathBudget, pageSize);
+    int error = addForkString(plan, frame.x21, &pathBudget, pageSize);
     if (error) return error == E2BIG ? ENAMETOOLONG : error;
     size_t pathBytes = LSB_PATH_BYTES - pathBudget;
     if (mode == TrialDF) {
@@ -122,7 +123,7 @@ static int addBashCommandPages(TrialPlan *plan, uintptr_t header, const LSBForkC
         if (fds.size < 0 || fds.size > (int)LSB_MAX_FDS) return ENOTSUP;
         if (fds.size) {
             uint8_t flags[LSB_MAX_FDS];
-            error = addBashBytes(plan, fds.bitmap, (size_t)fds.size, pageSize);
+            error = addForkBytes(plan, fds.bitmap, (size_t)fds.size, pageSize);
             if (error) return error;
             if (!forkTrialRead(fds.bitmap, flags, (size_t)fds.size)) return EFAULT;
             // The standalone foreground command has no pipe ends to close.
@@ -138,7 +139,7 @@ static int addBashCommandPages(TrialPlan *plan, uintptr_t header, const LSBForkC
         if (argc == LSB_MAX_VECTOR) return E2BIG;
         if ((error = addBashObject(plan, words, &list, sizeof(list), pageSize)) ||
             (error = addBashObject(plan, list.description, &desc, sizeof(desc), pageSize)) ||
-            (error = addBashString(plan, desc.string, &budget, pageSize))) return error;
+            (error = addForkString(plan, desc.string, &budget, pageSize))) return error;
         words = list.next;
         ++argc;
     }
@@ -147,7 +148,7 @@ static int addBashCommandPages(TrialPlan *plan, uintptr_t header, const LSBForkC
         if ((error = addBashObject(plan, env, &entry, sizeof(entry), pageSize))) return error;
         if (!entry) break;
         if (envc == LSB_MAX_VECTOR) return E2BIG;
-        if ((error = addBashString(plan, entry, &budget, pageSize))) return error;
+        if ((error = addForkString(plan, entry, &budget, pageSize))) return error;
         env += sizeof(entry); // addBashObject checked that this addition fits.
         ++envc;
     }

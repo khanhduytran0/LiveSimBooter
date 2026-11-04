@@ -151,10 +151,16 @@ The original simulator `libsystem_containermanager` contains these bundle/data r
 `MIBundleContainer` allocates the bundle through MIContainer/MCM, and `MIGlobalConfiguration` reads the shared-resources
 directory separately from the runtime root. The first successful device installation confirmed this layout.
 
-[ApplicationRegistration](../Guest/ApplicationRegistration.m) currently calls `LSApplicationWorkspace registerApplication:`
-for pre-staged stock apps. Its allowed directories are deliberately restricted to RuntimeRoot's `/Applications`,
-`/System/Applications`, and `/System/Library/CoreServices`. This registers an existing bundle with lsd; it does not run
-the installation workflow. Keep that tool separate from a user-app installer.
+The guest registration helper has two modes for bundles already present on disk.
+
+- `--manifest` passes selected stock apps to `LSApplicationWorkspace registerApplication:`. The manifest accepts
+  apps in RuntimeRoot's `/Applications`, `/System/Applications`, and `/System/Library/CoreServices`.
+- `--dpkg-trigger` reconciles package apps directly under the selected `DPKG_ROOT/var/jb/Applications` with guest lsd.
+  Guest 23A343 accepts `registerApplicationDictionary:` with the bundle's own `CFBundleIdentifier` and canonical
+  physical `Path`. Removal requires an existing record in that same directory and an absent bundle.
+
+IPA imports continue through InstallCoordination and installd. See the [registration implementation](../Guest/ApplicationRegistration.m)
+and the [Procursus transaction instructions](procursus.md#run-a-package-repair-in-fish).
 
 ## Temporary staging compatibility
 

@@ -9,3 +9,9 @@ NSArray<NSString *> *LSBReadApplicationRegistrationManifest(NSString *root, NSSt
 NSURL *LSBPrepareApplicationRegistration(NSString *root, NSString *guestPath, NSString **identifier, NSString **skipReason, NSError **error);
 BOOL LSBVerifyApplicationRegistration(NSURL *expectedURL, NSString *expectedIdentifier, NSURL *registeredURL,
                                     NSString *registeredIdentifier, BOOL installed, NSError **error);
+
+// The caller supplies a complete guest LaunchServices inventory or an error. Only direct package apps may change.
+typedef NSDictionary<NSString *, NSURL *> *(^LSBReadGuestApplications)(NSError **error);
+typedef BOOL (^LSBChangeGuestApplication)(NSString *identifier, NSURL *url, BOOL removing, NSError **changeError);
+BOOL LSBRefreshDpkgApplications(NSString *runtime, NSString *data, NSString *dpkgRoot, LSBReadGuestApplications readRecords,
+                                LSBChangeGuestApplication change, NSError **error);

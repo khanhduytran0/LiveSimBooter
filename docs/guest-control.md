@@ -39,6 +39,14 @@ lock prevents two instances from consuming the same queue. Native SSH needs Pyth
 
 ## Commands
 
+For command-line tests, start the native app with `--launchd-cli`. The guest starts the Fish terminal and launchctl
+worker under launchd. On the full runtime, guest LaunchServices, preferences, notifications and the two container
+managers have Mach service entries and start on demand. The profile omits SpringBoard, backboardd and native graphics helpers.
+
+```sh
+xcrun devicectl device process launch --device "$LSB_DEVICE" -- "$LSB_BUNDLE_ID" --launchd-cli
+```
+
 Supply the actual SSH destination and physical data path; the tool has no device or App Group default. Port 2222
 is the default. SSH uses the user's normal host-key configuration; additional SSH options can be passed with `--ssh-option`.
 

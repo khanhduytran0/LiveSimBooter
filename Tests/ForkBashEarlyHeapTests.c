@@ -3,7 +3,34 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 
+// No code from the fixture executes. The two VM leaves model the pinned image and its read-only chained import table.
+static void testProcursusHeapImports(void) {
+    size_t bytes = ProcursusBashGOT + vm_page_size;
+    uint8_t *image = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    assert(image != MAP_FAILED);
+    struct mach_header_64 *mh = (void *)image;
+    *mh = (struct mach_header_64){.magic = MH_MAGIC_64, .cputype = CPU_TYPE_ARM64, .filetype = MH_EXECUTE,
+                                  .ncmds = 1, .sizeofcmds = sizeof(struct uuid_command)};
+    struct uuid_command *uuid = (void *)(mh + 1);
+    *uuid = (struct uuid_command){LC_UUID, sizeof(*uuid), {5,0x79,0x98,11,0x28,0x5b,0x3e,0x49,0xa3,0xb1,0xff,0x5e,0xa2,9,0x9c,0x97}};
+    *(uint32_t *)(image + ProcursusBashForkReturn - 4) = 0x940181d9;
+    const uint32_t stub[] = {0x900000f0, 0xf9413a10, 0xd61f0200};
+    memcpy(image + ProcursusBashGetpidStub, stub, sizeof(stub));
+    uintptr_t *slot = (void *)(image + 0xa03e8);
+    *slot = 7;
+    assert(!mprotect(image + ProcursusBashGOT, vm_page_size, PROT_READ));
+    uuid->uuid[0] ^= 1;
+    assert(bashEarlyBindAllocations((uintptr_t)image) == ENOEXEC && *slot == 7);
+    uuid->uuid[0] ^= 1;
+    assert(!bashEarlyBindAllocations((uintptr_t)image) && *slot == (uintptr_t)&bashEarlyMalloc);
+    assert(!*(uintptr_t *)(image + ProcursusBashGetpidSlot)); // An adjacent non-allocator import stays intact.
+    vm_region_submap_info_data_64_t info = {};
+    assert(forkTrialLeaf((uintptr_t)slot, sizeof(*slot), &info) == KERN_SUCCESS && info.protection == VM_PROT_READ);
+    assert(!munmap(image, bytes));
+}
+
 int main(void) {
+    testProcursusHeapImports();
     BashHeap *heap = mmap(NULL, BashEarlyHeapBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     assert(heap != MAP_FAILED);
     bashHeapInit(heap);

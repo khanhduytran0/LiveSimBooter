@@ -1,6 +1,9 @@
 #include "ChildWait.h"
 #include "CreationMask.h"
 #include "TerminalStopWitness.h"
+#if defined(LSB_FORK_SNAPSHOT_TRIAL)
+#include "../ProcessSupport/ForkDescriptorSlots.h"
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -9,11 +12,14 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 static _Atomic(LSBChildStatus *) childStatus;
 static _Atomic(int) childWakeFD = -1;
+static _Atomic(dev_t) wakeDevice;
+static _Atomic(ino_t) wakeInode;
 static _Atomic(int) configurationError = ENOTSUP;
 static _Atomic(bool) wait4StatusOnly;
 _Static_assert(ATOMIC_POINTER_LOCK_FREE == 2, "Child wait lookup must remain signal-safe");
@@ -62,11 +68,16 @@ int LSBChildWaitConfigure(LSBChildStatus *ledger, int wakeFD) {
     int flags = fcntl(wakeFD, F_GETFL);
     if (flags < 0) return errno;
     if (!(flags & O_NONBLOCK) || (flags & O_ACCMODE) == O_WRONLY) return EINVAL;
+    struct stat metadata;
+    if (fstat(wakeFD, &metadata)) return errno;
+    if (!S_ISFIFO(metadata.st_mode)) return EINVAL;
     struct sigaction action;
     if (sigaction(SIGCHLD, NULL, &action)) return errno;
     const char *statusOnly = getenv("LSB_WAIT4_STATUS_ONLY");
     atomic_store_explicit(&wait4StatusOnly, statusOnly && !strcmp(statusOnly, "1"), memory_order_relaxed);
-    atomic_store_explicit(&childWakeFD, wakeFD, memory_order_relaxed);
+    atomic_store_explicit(&wakeDevice, metadata.st_dev, memory_order_relaxed);
+    atomic_store_explicit(&wakeInode, metadata.st_ino, memory_order_relaxed);
+    atomic_store_explicit(&childWakeFD, wakeFD, memory_order_release);
     atomic_store_explicit(&childStatus, ledger, memory_order_release);
     atomic_store_explicit(&configurationError, 0, memory_order_relaxed);
     updateDiscard(&action);
@@ -83,10 +94,29 @@ int LSBChildWaitConfigure(LSBChildStatus *ledger, int wakeFD) {
     return 0;
 }
 
-int LSBGuestChildWakeFD(void) { return atomic_load_explicit(&childWakeFD, memory_order_relaxed); }
+int LSBGuestChildWakeFD(void) {
+    int fd = atomic_load_explicit(&childWakeFD, memory_order_acquire);
+    if (fd < 0) return -1;
+    int saved = errno;
+    struct stat metadata;
+    bool owned = !fstat(fd, &metadata) && S_ISFIFO(metadata.st_mode) &&
+        metadata.st_dev == atomic_load_explicit(&wakeDevice, memory_order_relaxed) && metadata.st_ino == atomic_load_explicit(&wakeInode, memory_order_relaxed);
+    errno = saved;
+    return owned ? fd : -1;
+}
 LSBChildStatus *LSBGuestChildStatus(void) { return atomic_load_explicit(&childStatus, memory_order_acquire); }
 
 #ifndef LSB_CHILD_WAIT_TESTING
+#if defined(LSB_FORK_SNAPSHOT_TRIAL)
+static bool deferredTerminalWitness;
+// Only the authenticated fork bootstrap receives the descriptor-anchor environment entry from LiveProcess.
+__attribute__((visibility("default"))) int LSBTrialResumeTerminalWitness(void) {
+    if (!deferredTerminalWitness) return 0;
+    deferredTerminalWitness = false;
+    return LSBStartTerminalStopWitness(&LSBGuestChildStatus()->nativeStopEvent);
+}
+#endif
+
 __attribute__((constructor)) static void initializeChildWait(void) {
     const char *address = getenv(LSB_CHILD_STATUS_ENV), *descriptor = getenv(LSB_CHILD_WAKE_FD_ENV);
     int error = EINVAL;
@@ -104,7 +134,11 @@ __attribute__((constructor)) static void initializeChildWait(void) {
     if (!error && attachedTerminal()) {
         // Hosts without getumask need a single thread for their first mask snapshot; constructor ordering is not an ABI.
         uint32_t mask;
-        if (!LSBReadCreationMask(&mask)) (void)LSBStartTerminalStopWitness(&LSBGuestChildStatus()->nativeStopEvent);
+        if (LSBReadCreationMask(&mask)) return;
+#if defined(LSB_FORK_SNAPSHOT_TRIAL)
+        if (getenv(LSB_FORK_ANCHOR_ENV)) { deferredTerminalWitness = true; return; }
+#endif
+        (void)LSBStartTerminalStopWitness(&LSBGuestChildStatus()->nativeStopEvent);
     }
 }
 #endif

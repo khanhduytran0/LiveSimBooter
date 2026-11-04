@@ -61,7 +61,7 @@
 				LocalPOSIX.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LocalRuntime.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				MainThreadBootstrap.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
-				NativeSupportBindings.cpp = "-fno-builtin -fno-stack-protector";
+				NativeSupportBindings.cpp = "-fno-builtin -fno-stack-protector $(LSB_BINDINGS_OPTIMIZATION)";
 				NativeSupportState.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				SharedCacheHandoff.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				SimSyscallHelpers.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
@@ -121,7 +121,7 @@
 				LocalPOSIX.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				LocalRuntime.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				MainThreadBootstrap.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
-				NativeSupportBindings.cpp = "-fno-builtin -fno-stack-protector";
+				NativeSupportBindings.cpp = "-fno-builtin -fno-stack-protector $(LSB_BINDINGS_OPTIMIZATION)";
 				NativeSupportState.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				SharedCacheHandoff.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
 				SimSyscallHelpers.cpp = "-fno-builtin -fno-stack-protector -fno-exceptions -fno-rtti";
@@ -711,6 +711,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				LSB_BINDINGS_OPTIMIZATION = "-Os";
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

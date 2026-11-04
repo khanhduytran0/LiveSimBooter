@@ -6,6 +6,11 @@
 #include <signal.h>
 #include <stdint.h>
 #include <unistd.h>
+#if defined(LSB_FORK_SNAPSHOT_TRIAL)
+#include <stdatomic.h>
+static _Atomic uint64_t witnessThreadID;
+uint64_t LSBTerminalStopWitnessThreadID(void) { return atomic_load_explicit(&witnessThreadID, memory_order_acquire); }
+#endif
 
 static struct {
     int queue;
@@ -23,6 +28,10 @@ static int registerSignals(uint32_t generation, unsigned flags) {
 
 static void *waitForStop(void *unused) {
     (void)unused;
+#if defined(LSB_FORK_SNAPSHOT_TRIAL)
+    uint64_t id = 0;
+    if (!pthread_threadid_np(NULL, &id)) atomic_store_explicit(&witnessThreadID, id, memory_order_release);
+#endif
     // The syscall's result buffer is mapped by the host. XNU wakes this knote for the exact signal before returning
     // any guest thread to userspace. Thus the kernel can publish the stop even while the guest cannot run its own code.
     for (uint32_t generation = 1;;) {
@@ -36,6 +45,9 @@ static void *waitForStop(void *unused) {
         if (registerSignals(generation, EV_ENABLE) < 0) break;
     }
     // A guest may have closed or repurposed the private fd. Do not close a replacement on this error path.
+#if defined(LSB_FORK_SNAPSHOT_TRIAL)
+    atomic_store_explicit(&witnessThreadID, 0, memory_order_release);
+#endif
     return NULL;
 }
 

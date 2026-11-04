@@ -6,6 +6,7 @@
 #include "FakePTY.h"
 #include "SpawnAttributes.h"
 #include "ProcessSession.h"
+#include "ProcursusMaintscript.h"
 #include "../LiveProcess/ExecutablePath.h"
 
 #include <errno.h>
@@ -296,7 +297,8 @@ static int snapshotFDs(LSBSpawnPlan *plan, int descriptors[LSB_MAX_FDS]) {
 static int spawnOne(pid_t *pid, const char *path, const posix_spawn_file_actions_t *actions, const posix_spawnattr_t *attributes,
                     char *const argv[], char *const envp[], bool replace) {
     if (!path || !*path || !argv || !argv[0] || !envp) return EINVAL;
-    if (strnlen(path, LSB_PATH_BYTES) == LSB_PATH_BYTES) return ENAMETOOLONG;
+    size_t pathLength = strnlen(path, LSB_PATH_BYTES);
+    if (pathLength == LSB_PATH_BYTES) return ENAMETOOLONG;
     LSBSpawnPlan *plan = calloc(1, sizeof(*plan));
     if (!plan) return ENOMEM;
     plan->version = LSB_PLAN_VERSION;
@@ -319,6 +321,7 @@ static int spawnOne(pid_t *pid, const char *path, const posix_spawn_file_actions
     SPAWN_STAGE("creation-mask", LSBReadCreationMask(&plan->creationMask));
     SPAWN_STAGE("argv", addVector(plan, argv, &plan->argc, plan->argv));
     SPAWN_STAGE("environment", addVector(plan, envp, &plan->envc, plan->envp));
+    SPAWN_STAGE("dpkg-maintscript", LSBProjectProcursusMaintscript(plan, pathLength));
     SPAWN_STAGE("session", snapshotSession(plan));
     SPAWN_STAGE("attributes", readAttributes(plan, attributes, &additional));
     SPAWN_STAGE("ports", snapshotPorts(&additional.ports, &ports));

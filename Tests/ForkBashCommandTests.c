@@ -32,6 +32,15 @@ int main(void) {
     uint8_t *image = bashFixture();
     uintptr_t header = (uintptr_t)image;
     size_t page = getpagesize();
+    // A caller can put a pointer to a literal in its environment. Only include RX storage as part of its existing image.
+    static const char literal[] = "FORK_FIXTURE=literal";
+    uintptr_t textPage = (uintptr_t)literal & ~(page - 1);
+    TrialPlan strings = {};
+    size_t budget = 128;
+    assert(addForkString(&strings, (uintptr_t)literal, &budget, page) == ENOTSUP);
+    assert(!addSpan(&strings, "fixture-literal", textPage, textPage + page));
+    budget = 128;
+    assert(!addForkString(&strings, (uintptr_t)literal, &budget, page) && strings.count == 1);
     uint8_t *data = mmap(NULL, 9 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     assert(data != MAP_FAILED);
     uintptr_t sp = (uintptr_t)data;

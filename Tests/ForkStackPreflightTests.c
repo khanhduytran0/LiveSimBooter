@@ -4,6 +4,11 @@
 #undef main
 #include <assert.h>
 
+int LSBTrialReceiveForkFDs(int fd) { (void)fd; return ENOTSUP; }
+uintptr_t LSBTrialLibcForkReturnPC(bool isVfork) { (void)isVfork; abort(); } // Only used after preflight.
+int LSBTrialResumeTerminalWitness(void) { return 0; }
+int LSBTrialRestoreForkSignals(const ForkSignalState *s, void *c, int (*covers)(void *, uint64_t, uint64_t)) { return forkRestoreSignals(s, c, covers); }
+
 int LSBTrialAdoptBash(uintptr_t image, unsigned depth) { (void)image; (void)depth; return ENOTSUP; }
 
 int LSBTransportAcceptFork(const audit_token_t *parent) { (void)parent; return ENOTSUP; }
@@ -73,6 +78,45 @@ static void testStackSlice(void) {
     assert(!mach_vm_deallocate(mach_task_self(), base, page));
 }
 
+static void testAddressLimits(void) {
+    task_vm_info_data_t vm = {};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    assert(!task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &count) && count >= TASK_VM_INFO_REV2_COUNT);
+    uint64_t page = vm.page_size, above = (vm.max_address / page + 1) * page;
+    uint64_t sp = ((uintptr_t)&vm) & ~(page - 1);
+    TrialOffer offer = {.version = TrialWireVersion, .caller.sp = sp, .rangeCount = 2, .ranges = {{sp, page}, {above, page}}};
+    LSBForkWireRange stack;
+    assert(validateOffer(&offer, &stack) == ERANGE);
+    offer.skipMask = 2;
+    assert(!validateOffer(&offer, &stack)); // VM_INHERIT_NONE consumes no child VA.
+    offer.ranges[1].start = UINT64_MAX - page + 1;
+    assert(validateOffer(&offer, &stack) == EPROTO);
+    if (vm.min_address > page) {
+        offer.ranges[0] = (LSBForkWireRange){page, page};
+        offer.ranges[1] = (LSBForkWireRange){sp, page};
+        offer.skipMask = 0;
+        assert(validateOffer(&offer, &stack) == EADDRINUSE);
+        offer.skipMask = 1;
+        assert(!validateOffer(&offer, &stack));
+    }
+}
+
+static void testVforkOffer(void) {
+    LSBForkWireRange stack;
+    uintptr_t base = (uintptr_t)&stack & ~(uintptr_t)(vm_page_size - 1);
+    TrialOffer offer = {.version = TrialWireVersion, .resume = TrialSnapshot, .flags = TrialVfork | TrialResumeGuest | TrialRestoreAllocator,
+                        .caller.sp = base, .rangeCount = 1, .ranges = {{base, vm_page_size}}, .allocatorMask = 1, .allocator.count = 1,
+                        .witness = base, .argc = 1, .argv = base, .envp = base};
+    assert(!validateOffer(&offer, &stack));
+    offer.resume = TrialDF;
+    assert(validateOffer(&offer, &stack) == EPROTO);
+    offer.resume = TrialSnapshot;
+    offer.flags = TrialVfork | TrialRestoreAllocator;
+    assert(validateOffer(&offer, &stack) == EPROTO);
+    offer.flags = TrialVfork | TrialResumeGuest;
+    assert(validateOffer(&offer, &stack) == EPROTO);
+}
+
 int main(void) {
     mach_vm_size_t page = vm_page_size;
     mach_vm_address_t base = 0;
@@ -98,6 +142,8 @@ int main(void) {
     assert(!LSBCheckForkGuard(base, base + stack.size, TrialStackTag));
     assert(!mach_vm_deallocate(mach_task_self(), base, stack.size));
     testStackSlice();
+    testAddressLimits();
+    testVforkOffer();
     puts("Fork stack preflight and guarded slice passed");
     return 0;
 }

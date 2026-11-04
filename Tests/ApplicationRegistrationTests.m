@@ -38,6 +38,77 @@ static void expectBundleError(NSString *root, NSString *path, int code) {
     assert(!identifier && !skip && [error.domain isEqual:NSPOSIXErrorDomain] && error.code == code);
 }
 
+static void testDpkgRefresh(NSString *base) {
+    // mkdtemp's /tmp spelling aliases /private/tmp on macOS. The guest caller uses canonical absolute paths.
+    char canonical[PATH_MAX];
+    assert(realpath(base.fileSystemRepresentation, canonical));
+    NSString *build = [[NSString stringWithUTF8String:canonical] stringByAppendingPathComponent:@"dpkg"];
+    NSString *runtime = [build stringByAppendingPathComponent:@"RuntimeRoot"], *data = [build stringByAppendingPathComponent:@"data"];
+    NSString *clone = [data stringByAppendingPathComponent:@"tmp/clone"], *bootstrap = [clone stringByAppendingPathComponent:@"var/jb"];
+    NSString *apps = [bootstrap stringByAppendingPathComponent:@"Applications"];
+    NSString *path = [apps stringByAppendingPathComponent:@"New.app"];
+    NSURL *new = [NSURL fileURLWithPath:path isDirectory:YES];
+    NSURL *gone = [NSURL fileURLWithPath:[apps stringByAppendingPathComponent:@"Old.app"] isDirectory:YES];
+    NSURL *foreign = [NSURL fileURLWithPath:@"/Applications/Foreign.app" isDirectory:YES];
+    NSString *outside = [data stringByAppendingPathComponent:@"var/jb/Applications/Elsewhere.app"];
+    NSMutableDictionary *registry = [@{@"test.old": gone, @"outside": foreign, @"sibling": [NSURL fileURLWithPath:outside]} mutableCopy];
+    __block NSUInteger writes = 0;
+    __block BOOL offline = NO, skipMutation = NO;
+    LSBReadGuestApplications read = ^NSDictionary *(NSError **error) {
+        if (offline) {
+            if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOTCONN userInfo:nil];
+            return nil;
+        }
+        return registry.copy;
+    };
+    LSBChangeGuestApplication change = ^BOOL(NSString *identifier, NSURL *url, BOOL removing, NSError **changeError) {
+        (void)changeError; ++writes;
+        if (skipMutation) return YES;
+        if (removing) {
+            assert([registry[identifier] isEqual:url]);
+            [registry removeObjectForKey:identifier];
+        } else {
+            assert([identifier isEqual:@"test.new"] && [url isEqual:new]);
+            registry[identifier] = url;
+        }
+        return YES;
+    };
+    directory(runtime);
+    directory(path);
+    NSError *error = nil;
+    assert(!LSBRefreshDpkgApplications(runtime, data, clone, read, change, &error) && !writes); // Invalid Info.plist, preserve stale record too.
+    writePlist([path stringByAppendingPathComponent:@"Info.plist"], @{@"CFBundleExecutable": @"New", @"CFBundleIdentifier": @"test.new"});
+    executable([path stringByAppendingPathComponent:@"New"]);
+    registry[@"test.new"] = foreign;
+    assert(!LSBRefreshDpkgApplications(runtime, data, clone, read, change, &error) && error.code == EEXIST && !writes);
+    [registry removeObjectForKey:@"test.new"];
+    offline = YES;
+    assert(!LSBRefreshDpkgApplications(runtime, data, clone, read, change, &error) && error.code == ENOTCONN && !writes);
+    offline = NO;
+    NSString *alias = [apps stringByAppendingPathComponent:@"Link.app"];
+    assert(!symlink(path.fileSystemRepresentation, alias.fileSystemRepresentation));
+    assert(!LSBRefreshDpkgApplications(runtime, data, clone, read, change, &error) && !writes);
+    assert(!unlink(alias.fileSystemRepresentation));
+    NSString *plugins = [path stringByAppendingPathComponent:@"PlugIns"];
+    assert(!symlink(build.fileSystemRepresentation, plugins.fileSystemRepresentation));
+    assert(!LSBRefreshDpkgApplications(runtime, data, clone, read, change, &error) && error.code == EACCES && !writes);
+    assert(!unlink(plugins.fileSystemRepresentation));
+    assert(!chmod(apps.fileSystemRepresentation, 0000));
+    if (geteuid() != 0) assert(!LSBRefreshDpkgApplications(runtime, data, clone, read, change, &error) && !writes);
+    assert(!chmod(apps.fileSystemRepresentation, 0700));
+    skipMutation = YES;
+    assert(!LSBRefreshDpkgApplications(runtime, data, clone, read, change, &error) && error.code == EIO && writes == 1 && registry[@"test.old"]);
+    skipMutation = NO;
+    assert(LSBRefreshDpkgApplications(runtime, data, clone, read, change, &error) && writes == 3 && !registry[@"test.old"] && registry[@"test.new"]);
+    assert(LSBRefreshDpkgApplications(runtime, data, clone, read, change, &error) && writes == 3); // Idempotent.
+    assert([NSFileManager.defaultManager removeItemAtPath:apps error:NULL]);
+    assert(LSBRefreshDpkgApplications(runtime, data, clone, read, change, &error) && writes == 4 && !registry[@"test.new"]);
+    assert([registry[@"outside"] isEqual:foreign] && registry[@"sibling"]); // Native, IPA and other transaction URLs are never stale here.
+    assert(!LSBRefreshDpkgApplications(runtime, data, build, read, change, &error) && error.code == EACCES && writes == 4);
+    assert(!symlink(build.fileSystemRepresentation, apps.fileSystemRepresentation));
+    assert(!LSBRefreshDpkgApplications(runtime, data, clone, read, change, &error) && writes == 4);
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         char pattern[] = "/tmp/LSBAppRegistration.XXXXXX";
@@ -143,6 +214,7 @@ int main(int argc, const char *argv[]) {
         expectBundleError(root, @"/Applications/Linked.app", ELOOP);
         expectBundleError(root, @"/System/Library/CoreServices/Service.app/Nested.app", EINVAL);
 
+        testDpkgRefresh(base);
         assert([NSFileManager.defaultManager removeItemAtPath:base error:&error]);
         puts("ApplicationRegistrationTests passed (filesystem and record-validation only; no native LaunchServices calls)");
         if (argc == 2) {

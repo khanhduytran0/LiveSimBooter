@@ -72,19 +72,33 @@ static void testProcursusAptDefault(LSBReceivedMessage *message, NSString *group
         assert(!readPlist(bootstrap)[@"Bootstrap"][@"ChildDefaults"][@"APT_CONFIG"] && ![files fileExistsAtPath:output]);
         dispose(message);
         assert(!unlink(apt.fileSystemRepresentation) && [files createFileAtPath:apt contents:nil attributes:nil]);
-        const char *caller[] = {"APT_CONFIG=/custom.conf", NULL};
+        const char *caller[] = {"APT_CONFIG=/custom.conf", "DPKG_ROOT=/custom-root", NULL};
         assert(!LSBPrepareLaunchdPlan(message, root.fileSystemRepresentation, caller));
         NSDictionary *scopes = readPlist(bootstrap)[@"Bootstrap"];
         assert(!scopes[@"Self"][@"APT_CONFIG"] && !scopes[@"Child"][@"APT_CONFIG"]);
         assert(!strcmp(environmentValue(&message->plan, "APT_CONFIG"), "/custom.conf"));
+        assert(!scopes[@"Self"][@"DPKG_ROOT"] && !scopes[@"Child"][@"DPKG_ROOT"]);
+        assert(!strcmp(environmentValue(&message->plan, "DPKG_ROOT"), "/custom-root"));
         dispose(message);
         if ([folder containsString:@"\""]) {
             assert(!scopes[@"ChildDefaults"][@"APT_CONFIG"] && ![files fileExistsAtPath:output]);
             continue;
         }
         assert([scopes[@"ChildDefaults"][@"APT_CONFIG"] isEqual:output]);
-        NSString *expected = [NSString stringWithFormat:@"RootDir \"%@\";\nAPT::Architectures { \"iphoneos-arm64\"; };\n", data];
-        assert([[NSString stringWithContentsOfFile:output encoding:NSUTF8StringEncoding error:NULL] isEqual:expected]);
+        assert([scopes[@"ChildDefaults"][@"DPKG_ROOT"] isEqual:data]);
+        NSString *expected = [NSString stringWithContentsOfFile:output encoding:NSUTF8StringEncoding error:NULL];
+        NSArray<NSString *> *settings = [expected componentsSeparatedByString:@"\n"];
+        assert(([settings containsObject:[NSString stringWithFormat:@"Dir \"%@\";", data]]));
+        assert([settings containsObject:@"Dir::Bin::methods \"var/jb/usr/libexec/apt/methods\";"]);
+        assert(([settings containsObject:[NSString stringWithFormat:@"Dir::Bin::dpkg \"%@/var/jb/usr/bin/dpkg\";", data]]));
+        assert([settings containsObject:@"Dir::dpkg \"var/jb/usr/share/dpkg\";"] && [settings containsObject:@"Dir::dpkg::tupletable \"tupletable\";"] &&
+               [settings containsObject:@"Dir::dpkg::cputable \"cputable\";"]);
+        assert([settings containsObject:@"DPkg::Chroot-Directory \"/\";"] && [settings containsObject:@"DPkg::Path \"\";"]);
+        assert(([settings containsObject:[NSString stringWithFormat:@"DPkg::Run-Directory \"%@\";", data]]));
+        NSString *options = [NSString stringWithFormat:@"DPkg::Options { \"--root=%@\"; \"--force-not-root\"; \"--log=%@/var/jb/var/log/dpkg.log\"; };", data, data];
+        assert([settings containsObject:options] && [settings containsObject:@"APT::Architectures { \"iphoneos-arm64\"; };"]);
+        assert(([settings containsObject:[NSString stringWithFormat:@"Binary::gpgv { Dir \"/\"; RootDir \"%@\"; };", data]]));
+        assert([expected componentsSeparatedByString:@"RootDir"].count == 2 && ![expected containsString:@"Acquire::https::CAInfo"]);
         NSString *backup = [build stringByAppendingPathComponent:@"old-config"];
         assert(!link(output.fileSystemRepresentation, backup.fileSystemRepresentation) && !chmod(backup.fileSystemRepresentation, 0400));
         NSString *ca = [data stringByAppendingPathComponent:@"var/jb/etc/ssl/certs/cacert.pem"];
@@ -970,6 +984,37 @@ static void testAdditionalJobs(LSBReceivedMessage *message, NSString *root, NSSt
     assert([job[@"StandardOutPath"] isEqualToString:@"/private/var/mobile/Library/Logs/backboardd.log"]);
     dispose(message);
     testBackboardPreferences(message, root, dataPath, configPath);
+    NSString *control = @"com.kdt.LiveSimBooter.launchctl-control.plist";
+    NSString *controlPath = [stockDirectory stringByAppendingPathComponent:control];
+    assert(([@{@"Label": control.stringByDeletingPathExtension, @"ProgramArguments": @[@"/usr/libexec/launchctl-control"]}
+        writeToFile:controlPath atomically:YES]));
+    assert(!LSBPrepareLaunchdCLIPlan(message, root.fileSystemRepresentation, NULL));
+    NSString *cliDirectory = [dataPath stringByAppendingPathComponent:@"Library/LiveSimBooter-CLIDaemons"];
+    assert([readPlist(configPath)[@"Bootstrap"][@"Paths"] isEqual:@[cliDirectory]]);
+    NSSet *cliJobs = [NSSet setWithArray:[NSFileManager.defaultManager contentsOfDirectoryAtPath:cliDirectory error:NULL]];
+    assert(([cliJobs isEqual:[NSSet setWithArray:@[control, @"com.kdt.LiveSimBooter.terminal-fish.plist"]]]));
+    for (NSString *name in cliJobs) assertPlistBoolean(readPlist([cliDirectory stringByAppendingPathComponent:name])[@"RunAtLoad"], YES);
+    assert(!environmentValue(&message->plan, "SIMULATOR_FRAMEBUFFER_FRAMEWORK"));
+    dispose(message);
+    NSArray *onDemand = @[@"com.apple.notifyd", @"com.apple.cfprefsd.xpc.daemon", @"com.apple.containermanagerd",
+                          @"com.apple.containermanagerd.system", @"com.apple.lsd"];
+    for (NSString *service in onDemand) {
+        if ([service isEqual:@"com.apple.cfprefsd.xpc.daemon"]) continue; // The real-shape fixture already exists.
+        NSDictionary *plist = @{@"Label": service, @"ProgramArguments": @[@"/usr/libexec/test-daemon"], @"MachServices": @{service: @YES}};
+        assert([plist writeToFile:[stockDirectory stringByAppendingPathComponent:[service stringByAppendingString:@".plist"]] atomically:YES]);
+    }
+    assert(!LSBPrepareLaunchdCLIPlan(message, root.fileSystemRepresentation, NULL));
+    cliDirectory = [readPlist(configPath)[@"Bootstrap"][@"Paths"] firstObject];
+    assert([cliDirectory.lastPathComponent isEqual:@"LiveSimBooter-CLIRegistrationDaemons"]);
+    assert([NSFileManager.defaultManager contentsOfDirectoryAtPath:cliDirectory error:NULL].count == onDemand.count + cliJobs.count);
+    for (NSString *service in onDemand) {
+        NSDictionary *plist = readPlist([cliDirectory stringByAppendingPathComponent:[service stringByAppendingString:@".plist"]]);
+        assertPlistBoolean(plist[@"RunAtLoad"], NO);
+        assert([plist[@"MachServices"] count]);
+    }
+    assert(!environmentValue(&message->plan, "SIMULATOR_FRAMEBUFFER_FRAMEWORK"));
+    assert(!strcmp(environmentValue(&message->plan, "LSB_SIMULATE_CODE_SIGNING"), "1"));
+    dispose(message);
     assert(!LSBPrepareLaunchdLifecyclePlan(message, root.fileSystemRepresentation, NULL));
     assert(!environmentValue(&message->plan, "SIMULATOR_FRAMEBUFFER_FRAMEWORK"));
     assert(!environmentValue(&message->plan, "LSB_SIMULATE_SYSTEM_POWER"));

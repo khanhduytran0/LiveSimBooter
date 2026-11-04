@@ -1,5 +1,6 @@
 #include "ForkBashResume.h"
 #include "ForkBashImports.h"
+#include "ForkProcursusBashGOT.h"
 #include "ForkTrialWire.h"
 #include <fcntl.h>
 #include <setjmp.h>
@@ -15,10 +16,35 @@ static bool forkCommitted;
 // well as the fork return and execve stub so a different Bash invocation cannot commit this trial.
 enum { BashShellExecReturn = 0x18540, BashExecReturn = 0x19570, BashTopLevel = 0xa72e0, BashLastStatus = 0xa6d7c, BashExitShell = 0x6cb0 };
 
+// Procursus 5.2.21 _make_child, call to _shell_execve and its _ie_execve bind, from llvm-objdump and dyld_info.
+enum { ProcursusGetpidCall = 0x23a94, ProcursusExecSlot = 0xa0378, ProcursusExecReturn = 0x14d18, ProcursusShellExecReturn = 0x16774,
+       ProcursusTopLevel = 0xa7574, ProcursusLastStatus = 0xa6b44, ProcursusExitShell = 0x66fcc };
+_Static_assert(sizeof(sigjmp_buf) == 0xa7638 - ProcursusTopLevel, "Procursus Bash top_level ends at top_level_mask");
+
 _Static_assert(sizeof(sigjmp_buf) == 0xa73a4 - BashTopLevel, "Bash top_level ends at top_level_mask");
 
 static bool stackContains(uintptr_t bottom, size_t size, uintptr_t address, size_t bytes) {
     return address >= bottom && address - bottom <= size && bytes <= size - (address - bottom);
+}
+
+static unsigned procursusBashForkCaller(uintptr_t header, const LSBForkContext *caller, uintptr_t bottom, size_t size) {
+    // Only the first fork call in _make_child and the reviewed noninteractive external-command and group branches.
+    static const struct { uint32_t offset, word; } instructions[] = {
+        {ProcursusBashForkReturn, 0xaa0003f3}, {0x2396c, 0x340008b3}, {ProcursusGetpidCall, 0x94018174},
+        {ProcursusBashLateChildReturn - 4, 0x94003458}, {ProcursusBashLateChildReturn, 0x34000380},
+        {ProcursusBashSubshellReturn - 4, 0x940052ff}, {ProcursusBashSubshellReturn, 0xaa0003f8},
+        {ProcursusShellExecReturn - 4, 0x97fff95c}, {ProcursusExecReturn - 4, 0x9401bd10},
+        {ProcursusExitShell, 0xa9be4ff4}, {0x439bc, 0x94010369}
+    };
+    uintptr_t lr;
+    if (!caller || caller->pc != header + ProcursusBashForkReturn || (caller->sp & 15) || !stackContains(bottom, size, caller->sp, 0xb0) ||
+        caller->fp != caller->sp + 0xa0 || !forkTrialRead(caller->fp + sizeof(lr), &lr, sizeof(lr))) return 0;
+    if (lr != header + ProcursusBashSubshellReturn && lr != header + ProcursusBashLateChildReturn) return 0;
+    for (size_t i = 0; i < sizeof(instructions) / sizeof(instructions[0]); ++i) {
+        uint32_t word;
+        if (!forkTrialRead(header + instructions[i].offset, &word, sizeof(word)) || word != instructions[i].word) return 0;
+    }
+    return (unsigned)(lr - header);
 }
 
 static unsigned bashForkCaller(uintptr_t header, const LSBForkContext *caller, uintptr_t bottom, size_t size) {
@@ -47,10 +73,10 @@ static unsigned bashForkCaller(uintptr_t header, const LSBForkContext *caller, u
 
 static const char *bashBranchName(unsigned site) {
     switch (site) {
-        case BashSubshellReturn: return "subshell";
+        case ProcursusBashSubshellReturn: case BashSubshellReturn: return "subshell";
         case BashSubstitutionReturn: return "substitution";
         case BashEarlyChildReturn: return "early";
-        case BashLateChildReturn: return "late";
+        case ProcursusBashLateChildReturn: case BashLateChildReturn: return "late";
         default: return "unknown";
     }
 }
@@ -142,12 +168,24 @@ static int commitFork(int fd) {
 }
 
 int LSBTrialResumeBash(uintptr_t header, const LSBForkContext *caller, uintptr_t stackStart, size_t stackSize, int controlFD, bool dfOnly, bool allowEarly) {
-    unsigned site = bashForkCaller(header, caller, stackStart, stackSize);
+    bool procursus = forkTrialProcursusBashImage(header);
+    if (procursus && (!allowEarly || dfOnly)) return ENOTSUP;
+    unsigned site = procursus ? procursusBashForkCaller(header, caller, stackStart, stackSize) : bashForkCaller(header, caller, stackStart, stackSize);
     if (!site || ((!allowEarly || dfOnly) && site != BashLateChildReturn) ||
         stackContains(stackStart, stackSize, (uintptr_t)&header, sizeof(header))) return ENOTSUP;
     // Rebinding occurs after all imports have been translated to child-local addresses. Only edit the copied Bash's slots.
-    if (!replaceImport(header + BashGetpidSlot, (uintptr_t)&getpid, (uintptr_t)&LSBTrialBashGetpid) ||
-        !replaceImport(header + BashExecSlot, (uintptr_t)&execve, (uintptr_t)&LSBTrialBashExecve)) return EPROTO;
+    vm_prot_t previous = 0;
+    if (procursus) {
+        int error = beginProcursusBashGOT(header, &previous);
+        if (error) return error;
+    }
+    bool replaced = replaceImport(header + (procursus ? ProcursusBashGetpidSlot : BashGetpidSlot), (uintptr_t)&getpid, (uintptr_t)&LSBTrialBashGetpid) &&
+                    replaceImport(header + (procursus ? ProcursusExecSlot : BashExecSlot), (uintptr_t)&execve, (uintptr_t)&LSBTrialBashExecve);
+    if (procursus) {
+        int error = endProcursusBashGOT(header, previous);
+        if (error) return error;
+    }
+    if (!replaced) return EPROTO;
 
     // Bash may redirect stderr after getpid. Keep instrumentation out of the command's output; closed stderr disables it.
     const int traceFD = forkTrialTraceEnabled() ? fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, LSB_MAX_FDS + 1) : -1;
@@ -155,11 +193,14 @@ int LSBTrialResumeBash(uintptr_t header, const LSBForkContext *caller, uintptr_t
     // exit_builtin jumps to Bash's top_level. A grouped shell inherits that jump buffer from before fork,
     // including register state encoded by the parent's libc. Mirror run_one_command (+0x7158) for EXITPROG and ERREXIT.
     // Bash exit_shell runs the usual shutdown with last_command_exit_value. command_substitute sets up its own landing.
-    if (site == BashSubshellReturn) {
-        switch (sigsetjmp(*(sigjmp_buf *)(header + BashTopLevel), 1)) {
+    if (site == BashSubshellReturn || site == ProcursusBashSubshellReturn) {
+        switch (sigsetjmp(*(sigjmp_buf *)(header + (procursus ? ProcursusTopLevel : BashTopLevel)), 1)) {
             case 0: break;
             case 3: case 4:
-                if (forkCommitted) ((void (*)(int))(header + BashExitShell))(*(const int *)(header + BashLastStatus));
+                if (forkCommitted) {
+                    int status = *(const int *)(header + (procursus ? ProcursusLastStatus : BashLastStatus));
+                    ((void (*)(int))(header + (procursus ? ProcursusExitShell : BashExitShell)))(status);
+                }
                 _exit(126);
             default: _exit(126);
         }
@@ -167,7 +208,7 @@ int LSBTrialResumeBash(uintptr_t header, const LSBForkContext *caller, uintptr_t
     if (LSBCaptureForkContext(&LSBTrialObserverContext)) LSBResumeForkContext(caller);
 
     int error = EPROTO;
-    if (calls->getpidSP != caller->sp || calls->getpidLR != header + BashGetpidCall + 4) goto failed;
+    if (calls->getpidSP != caller->sp || calls->getpidLR != header + (procursus ? ProcursusGetpidCall : BashGetpidCall) + 4) goto failed;
     if (!calls->execLR) {
         if (!dfOnly && (error = commitFork(controlFD))) goto failed;
         if (traceFD >= 0)
@@ -176,10 +217,10 @@ int LSBTrialResumeBash(uintptr_t header, const LSBForkContext *caller, uintptr_t
         LSBResumeForkContext(&LSBTrialGetpidContext);
     }
     uintptr_t lr;
-    if (calls->execLR != header + BashExecReturn || (calls->execSP & 15) ||
+    if (calls->execLR != header + (procursus ? ProcursusExecReturn : BashExecReturn) || (calls->execSP & 15) ||
         !stackContains(stackStart, stackSize, calls->execSP, sizeof(lr)) || calls->execFP < calls->execSP ||
         !stackContains(stackStart, stackSize, calls->execFP, 2 * sizeof(lr)) || !forkTrialRead(calls->execFP + sizeof(lr), &lr, sizeof(lr)) ||
-        lr != header + BashShellExecReturn) goto failed;
+        lr != header + (procursus ? ProcursusShellExecReturn : BashShellExecReturn)) goto failed;
     error = copyBashCommand(dfOnly);
     if (error) goto failed;
     if (traceFD >= 0)

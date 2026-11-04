@@ -78,13 +78,27 @@ static void addProcursusAptDefault(NSString *dataPath, int runDirectory, NSMutab
     // APT 2.9.4 scans double-quoted tokens before interpreting escapes and expands literal tabs before parsing.
     if (strpbrk(dataPath.fileSystemRepresentation, "\"\\\t\r\n")) return;
     NSString *name = @"LiveSimBooter-apt.conf";
-    // RootDir rebases Procursus's absolute /var/jb directories. A nonempty architecture list skips its fork of dpkg.
-    NSString *config = [NSString stringWithFormat:@"RootDir \"%@\";\nAPT::Architectures { \"iphoneos-arm64\"; };\n", dataPath];
-    // The HTTPS method passes CAInfo directly to GnuTLS without applying RootDir.
+    // RootDir would also prefix DPkg::Chroot-Directory. Dir resolves APT's relative locations without asking the kernel to chroot.
+    // Procursus packages contain var/jb/... in their archives. dpkg --root places both the payload and its compiled admin directory under data.
+    // Keep the terminal's PATH for dpkg helpers. Only the existing gpgv method needs RootDir to resolve absolute Signed-By keyrings.
+    NSString *config = [NSString stringWithFormat:
+        @"Dir \"%1$@\";\n"
+         "Dir::Bin::methods \"var/jb/usr/libexec/apt/methods\";\n"
+         "Dir::Bin::dpkg \"%1$@/var/jb/usr/bin/dpkg\";\n"
+         "Dir::dpkg \"var/jb/usr/share/dpkg\";\n"
+         "Dir::dpkg::tupletable \"tupletable\";\nDir::dpkg::triplettable \"triplettable\";\nDir::dpkg::cputable \"cputable\";\n"
+         "DPkg::Chroot-Directory \"/\";\nDPkg::Run-Directory \"%1$@\";\nDPkg::Path \"\";\n"
+         "DPkg::Options { \"--root=%1$@\"; \"--force-not-root\"; \"--log=%1$@/var/jb/var/log/dpkg.log\"; };\n"
+         "APT::Architectures { \"iphoneos-arm64\"; };\n"
+         "Binary::gpgv { Dir \"/\"; RootDir \"%1$@\"; };\n", dataPath];
+    // The HTTPS method passes CAInfo directly to GnuTLS.
     NSString *caPath = [dataPath stringByAppendingPathComponent:@"var/jb/etc/ssl/certs/cacert.pem"];
     if (isCanonicalRegularFile(caPath)) config = [config stringByAppendingFormat:@"Acquire::https::CAInfo \"%@\";\n", caPath];
-    if (!writeConfiguration(runDirectory, name.fileSystemRepresentation, [config dataUsingEncoding:NSUTF8StringEncoding]))
+    if (!writeConfiguration(runDirectory, name.fileSystemRepresentation, [config dataUsingEncoding:NSUTF8StringEncoding])) {
         childDefaults[@"APT_CONFIG"] = [[dataPath stringByAppendingPathComponent:@"var/run"] stringByAppendingPathComponent:name];
+        // Direct dpkg and dpkg-query invocations also need the guest package database.
+        childDefaults[@"DPKG_ROOT"] = dataPath;
+    }
 }
 
 static int checkJobDirectory(int directory, NSSet<NSString *> *jobNames) {
@@ -223,11 +237,13 @@ static int addLaunchAngelPolicy(NSDictionary *stock, NSMutableDictionary *job) {
     return 0;
 }
 
-static int addServiceJobs(NSString *root, const char *const labels[], NSMutableDictionary<NSString *, NSData *> *jobs,
+static int addServiceJobs(NSString *root, const char *const labels[], BOOL onDemand, NSMutableDictionary<NSString *, NSData *> *jobs,
                          NSMutableArray<NSString *> *logs) {
     if (!labels) return EINVAL;
     NSMutableSet<NSString *> *seen = [NSMutableSet setWithArray:
         @[@"com.apple.backboardd", @"com.apple.cfprefsd.xpc.daemon", @"com.kdt.LiveSimBooter.terminal-fish", @LSB_DISPLAY_SETTINGS_LABEL]];
+    // Graphical sessions already emit the preferences job. The CLI group imports it once, on demand.
+    if (onDemand) [seen removeObject:@"com.apple.cfprefsd.xpc.daemon"];
     for (unsigned index = 0; labels[index]; ++index) {
         if (index == MaximumSelectedServices) return E2BIG;
         const char *labelBytes = labels[index];
@@ -275,6 +291,7 @@ static int addServiceJobs(NSString *root, const char *const labels[], NSMutableD
         if (!program && (!arguments || !validGuestProgram(arguments[0]))) return EINVAL;
         NSDictionary *services = stock[@"MachServices"];
         if (services && ![services isKindOfClass:NSDictionary.class]) return EINVAL;
+        if (onDemand && (launchAngel || !services.count)) return EINVAL;
         for (id name in services) {
             id value = services[name];
             if (![name isKindOfClass:NSString.class] || ![name length] ||
@@ -285,7 +302,7 @@ static int addServiceJobs(NSString *root, const char *const labels[], NSMutableD
         NSString *logName = [label stringByAppendingString:@".log"];
         NSString *log = [@"/private/var/mobile/Library/Logs" stringByAppendingPathComponent:logName];
         NSMutableDictionary *job = [@{@"Label": label, @"WorkingDirectory": @"/private/var/mobile/",
-            @"StandardOutPath": log, @"StandardErrorPath": log, @"RunAtLoad": launchAngel ? @NO : @YES, @"KeepAlive": @NO,
+            @"StandardOutPath": log, @"StandardErrorPath": log, @"RunAtLoad": (launchAngel || onDemand) ? @NO : @YES, @"KeepAlive": @NO,
             @"EnableTransactions": @NO} mutableCopy];
         if (launchAngel) {
             int error = addLaunchAngelPolicy(stock, job);
@@ -365,7 +382,7 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
                              const char *const serviceLabels[]) {
     if (!message || !runtimeRoot || runtimeRoot[0] != '/') return EINVAL;
     @autoreleasepool {
-        BOOL services = [probe isEqualToString:@"services"], includeJob = probe != nil;
+        BOOL services = [probe isEqualToString:@"services"], cli = [probe isEqualToString:@"cli"], includeJob = probe != nil;
         BOOL backboard = services || [probe isEqualToString:@"backboardd"], lifecycle = [probe isEqualToString:@"lifecycle"];
         char canonical[PATH_MAX];
         if (!realpath(runtimeRoot, canonical)) return errno;
@@ -375,11 +392,19 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
         NSString *root = [NSFileManager.defaultManager stringWithFileSystemRepresentation:canonical length:strlen(canonical)];
         NSString *build = root.stringByDeletingLastPathComponent;
         NSString *dataPath = [build stringByAppendingPathComponent:@LSB_DATA_DIRECTORY];
+        BOOL cliLaunchServices = NO;
+        if (cli) {
+            // A minimal runtime can still boot the shell without the LaunchServices stack.
+            NSString *lsd = [root stringByAppendingPathComponent:@"System/Library/LaunchDaemons/com.apple.lsd.plist"];
+            if (!lstat(lsd.fileSystemRepresentation, &status)) cliLaunchServices = YES;
+            else if (errno != ENOENT) return errno;
+        }
         NSString *configPath = [dataPath stringByAppendingPathComponent:@"var/run/LiveSimBooter-launchd-bootstrap.plist"];
         NSString *memoryWarningPath = [[dataPath stringByAppendingPathComponent:@"var/run"] stringByAppendingPathComponent:memoryWarningName];
         NSString *logPath = [dataPath stringByAppendingPathComponent:@"Library/Logs/LiveSimBooter-launchd.log"];
         int selectionError = 0;
         NSString *directoryName = services ? serviceDirectoryName(serviceLabels, &selectionError) : backboard ? @"LiveSimBooter-BackboardDaemons" :
+            cliLaunchServices ? @"LiveSimBooter-CLIRegistrationDaemons" : cli ? @"LiveSimBooter-CLIDaemons" :
             lifecycle ? @"LiveSimBooter-LifecycleDaemons" : @"LiveSimBooter-LaunchDaemons";
         if (!directoryName) return selectionError ? selectionError : EINVAL;
         NSString *jobDirectory = [[dataPath stringByAppendingPathComponent:@"Library"] stringByAppendingPathComponent:directoryName];
@@ -418,7 +443,7 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
             @"HOME": dataPath, @"CFFIXED_USER_HOME": dataPath, @"TMPDIR": [dataPath stringByAppendingString:@"/tmp/"],
             @"PATH": [NSString stringWithFormat:@"%@/usr/local/bin:%@/usr/bin:%@/bin:%@/usr/sbin:%@/sbin", root, root, root, root, root]
         } mutableCopy];
-        if (services) {
+        if (services || cliLaunchServices) {
             runtimeEnvironment[@"LSB_SIMULATE_NOTIFICATION_SHM"] = @"1";
             runtimeEnvironment[@"LSB_SIMULATE_CODE_SIGNING"] = @"1";
             runtimeEnvironment[@"LSB_ENABLE_PEER_PROCESS_INSPECTION"] = @"1";
@@ -487,7 +512,7 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
         };
         NSMutableDictionary<NSString *, NSData *> *jobPlists = [NSMutableDictionary dictionary];
         NSMutableArray<NSString *> *serviceLogs = [NSMutableArray array];
-        if (includeJob) {
+        if (includeJob && !cli) {
             // The trailing slash selects launchd's mobile-directory prefix rule before proxy calls chdir on the translated path.
             NSString *guestLog = [@"/private/var/mobile/Library/Logs" stringByAppendingPathComponent:logName];
             NSString *program = backboard ? @"/usr/libexec/backboardd" : lifecycle ? @"/usr/local/bin/lifecycle-probe" : @"/bin/df";
@@ -533,16 +558,6 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
                     format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
                 if (!preferencesPlist) return EINVAL;
                 jobPlists[preferencesName] = preferencesPlist;
-                // Launchd owns the job and its stable logical PID across xpcproxy -> helper -> Fish SETEXEC transitions.
-                // The broker attaches the terminal only to this exact helper after authenticating the launchd lineage.
-                NSDictionary *terminalJob = @{
-                    @"Label": @"com.kdt.LiveSimBooter.terminal-fish", @"ProgramArguments": @[@"/usr/libexec/terminal-fish"],
-                    @"WorkingDirectory": @"/private/var/mobile/", @"RunAtLoad": @YES, @"KeepAlive": @NO, @"EnableTransactions": @NO
-                };
-                NSData *terminalPlist = [NSPropertyListSerialization dataWithPropertyList:terminalJob
-                    format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
-                if (!terminalPlist) return EINVAL;
-                jobPlists[@"com.kdt.LiveSimBooter.terminal-fish.plist"] = terminalPlist;
                 // A fixed launchd-owned helper applies only the two allowlisted display settings using guest frameworks.
                 NSDictionary *settingsJob = @{
                     @"Label": @LSB_DISPLAY_SETTINGS_LABEL, @"ProgramArguments": @[@LSB_DISPLAY_SETTINGS_PROGRAM, @"--serve"],
@@ -557,8 +572,25 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
                 [serviceLogs addObject:@"display-settings.log"];
             }
         }
-        if (services) {
-            int serviceError = addServiceJobs(root, serviceLabels, jobPlists, serviceLogs);
+        if (backboard || cli) {
+            // Launchd owns the job and its stable logical PID across xpcproxy -> helper -> Fish SETEXEC transitions.
+            // The broker attaches the terminal only to this exact helper after authenticating the launchd lineage.
+            NSDictionary *terminalJob = @{
+                @"Label": @"com.kdt.LiveSimBooter.terminal-fish", @"ProgramArguments": @[@"/usr/libexec/terminal-fish"],
+                @"WorkingDirectory": @"/private/var/mobile/", @"RunAtLoad": @YES, @"KeepAlive": @NO, @"EnableTransactions": @NO
+            };
+            NSData *terminalPlist = [NSPropertyListSerialization dataWithPropertyList:terminalJob
+                format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
+            if (!terminalPlist) return EINVAL;
+            jobPlists[@"com.kdt.LiveSimBooter.terminal-fish.plist"] = terminalPlist;
+        }
+        if (services || cli) {
+            int serviceError = addServiceJobs(root, serviceLabels, NO, jobPlists, serviceLogs);
+            if (!serviceError && cliLaunchServices) {
+                const char *const registration[] = {"com.apple.notifyd", "com.apple.cfprefsd.xpc.daemon", "com.apple.containermanagerd",
+                                                     "com.apple.containermanagerd.system", "com.apple.lsd", NULL};
+                serviceError = addServiceJobs(root, registration, YES, jobPlists, serviceLogs);
+            }
             if (serviceError) return serviceError;
         }
         LSBSpawnPlan *plan = calloc(1, sizeof(*plan));
@@ -610,7 +642,7 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
             if (fds[1] < 0) error = errno;
         }
         if (!error && (fds[2] = fcntl(fds[1], F_DUPFD_CLOEXEC, 3)) < 0) error = errno;
-        if (!error && includeJob) {
+        if (!error && includeJob && !cli) {
             int jobLog = openRegularLog(directories[6], logName.UTF8String);
             if (jobLog < 0) error = errno;
             else close(jobLog);
@@ -654,6 +686,11 @@ static int prepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRo
 
 int LSBPrepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRoot, const char *const inheritedEnv[]) {
     return prepareLaunchdPlan(message, runtimeRoot, inheritedEnv, nil, NULL);
+}
+
+int LSBPrepareLaunchdCLIPlan(LSBReceivedMessage *message, const char *runtimeRoot, const char *const inheritedEnv[]) {
+    const char *const labels[] = {"com.kdt.LiveSimBooter.launchctl-control", NULL};
+    return prepareLaunchdPlan(message, runtimeRoot, inheritedEnv, @"cli", labels);
 }
 
 int LSBPrepareLaunchdDFPlan(LSBReceivedMessage *message, const char *runtimeRoot, const char *const inheritedEnv[]) {

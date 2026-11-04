@@ -234,6 +234,21 @@ static void testTerminalStopDisposition(void) {
     assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 37);
 }
 
+static void testReusedWakeDescriptor(void) {
+    reset();
+    int replacement[2];
+    assert(!pipe(replacement));
+    assert(LSBGuestChildWakeFD() == wakeFDs[0]);
+    assert(dup2(replacement[0], wakeFDs[0]) == wakeFDs[0]);
+    errno = ERANGE;
+    assert(LSBGuestChildWakeFD() == -1 && errno == ERANGE);
+    assert(write(replacement[1], "x", 1) == 1);
+    char byte;
+    assert(read(wakeFDs[0], &byte, 1) == 1 && byte == 'x');
+    close(replacement[0]);
+    close(replacement[1]);
+}
+
 int main(void) {
     alarm(15);
     assert(!unsetenv("LSB_WAIT4_STATUS_ONLY"));
@@ -245,6 +260,7 @@ int main(void) {
     testSignalHandlerReapAndDiscard();
     testInterruptedWait();
     testTerminalStopDisposition();
+    testReusedWakeDescriptor();
     close(wakeFDs[0]); close(wakeFDs[1]);
     puts("ChildWait: waitpid/wait4, groups, status, strict/opt-in rusage, blocking/lost wakes, signal reaping, discard and EINTR passed");
     return 0;

@@ -10,6 +10,7 @@ static unsigned held, cloned;
 static mach_port_t refuseTask;
 static uint64_t regionStart, regionSize;
 static int cloneResult;
+static bool multiLeaf;
 
 kern_return_t task_suspend2(task_read_t task, task_suspension_token_t *token) {
     assert(task == Parent || task == Child);
@@ -28,18 +29,27 @@ kern_return_t task_resume2(task_suspension_token_t token) {
 
 kern_return_t mach_vm_region_recurse(vm_map_read_t task, mach_vm_address_t *address, mach_vm_size_t *size, natural_t *depth,
                                       vm_region_recurse_info_t raw, mach_msg_type_number_t *words) {
-    assert(held == 2 && task == Parent && *address == Start && *depth == UINT32_MAX && *words == VM_REGION_SUBMAP_INFO_COUNT_64);
+    bool second = multiLeaf && *address == Start + PageSize;
+    assert(held == 2 && task == Parent && (*address == Start || second) && *depth == UINT32_MAX && *words == VM_REGION_SUBMAP_INFO_COUNT_64);
     *address = regionStart;
     *size = regionSize;
     vm_region_submap_info_data_64_t *info = (vm_region_submap_info_data_64_t *)raw;
     info->inheritance = VM_INHERIT_COPY;
     info->protection = VM_PROT_READ;
     info->max_protection = VM_PROT_READ | VM_PROT_WRITE;
+    if (second) {
+        *address = Start + PageSize;
+        *size = PageSize;
+        info->protection = VM_PROT_NONE;
+        info->inheritance = VM_INHERIT_NONE;
+    }
     return KERN_SUCCESS;
 }
 
 int LSBCloneForkRanges(vm_map_t parent, vm_map_t child, const LSBForkMapRange *source, size_t count, const LSBForkMapRange *occupied, size_t occupiedCount) {
-    assert(held == 2 && parent == Parent && child == Child && count == 1 && !occupied && !occupiedCount);
+    assert(held == 2 && parent == Parent && child == Child && count == (multiLeaf ? 2u : 1u) && !occupied && !occupiedCount);
+    if (multiLeaf) assert(source[1].start == Start + PageSize && source[1].size == PageSize &&
+                          source[1].currentProtection == VM_PROT_NONE && source[1].inheritance == VM_INHERIT_NONE);
     assert(source->start == Start && source->size == PageSize && source->currentProtection == VM_PROT_READ);
     assert(source->maxProtection == (VM_PROT_READ | VM_PROT_WRITE) && source->inheritance == VM_INHERIT_COPY && !source->immutableImage);
     cloned++;
@@ -63,6 +73,12 @@ int main(void) {
     assert(LSBCopyOfferedForkRanges(Parent, Child, &range, 1) == ENOTSUP && !held && cloned == 2);
     regionStart = Start + PageSize;
     assert(LSBCopyOfferedForkRanges(Parent, Child, &range, 1) == EFAULT && !held && cloned == 2);
+    regionStart = Start;
+    regionSize = PageSize;
+    range.size = 2 * PageSize;
+    multiLeaf = true;
+    cloneResult = 0;
+    assert(!LSBCopyOfferedForkRanges(Parent, Child, &range, 1) && !held && cloned == 3);
     puts("fork snapshot broker checks passed");
     return 0;
 }

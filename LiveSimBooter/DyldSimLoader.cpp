@@ -35,6 +35,7 @@
 #include "DyldSimLoader.h"
 #include "../LiveProcess/StackReservation.h"
 #include "../ProcessSupport/GuestImagePlacement.h"
+#include "../ProcessSupport/ForkPolicy.h"
 #include "HostPreparation.h"
 #include "SharedCacheHandoff.h"
 #include "SimSyscallHelpers.h"
@@ -559,7 +560,9 @@ bool debuggerMetadataOutsideCache(const task_dyld_info_data_t &info, size_t page
 constexpr size_t startupStorageCapacity = 512 * 1024;
 struct StartupStorage { uintptr_t words[startupStorageCapacity / sizeof(uintptr_t)]; };
 struct StartupVectors { const char *const *argv, *const *envp, *const *apple; };
-static StartupStorage startupStorage;
+// A fork can inherit the pages containing argv and environ. Keep native loader globals off those pages.
+alignas(16384) static StartupStorage startupStorage;
+static_assert(sizeof(StartupStorage) % 16384 == 0);
 
 int copyStartupVectors(StartupStorage &storage, size_t capacity, const mach_header *executable, const std::vector<std::string> &arguments,
                        const std::vector<std::string> &environment, const std::vector<std::string> &apple, StartupVectors &vectors) {
@@ -601,9 +604,30 @@ int copyStartupVectors(StartupStorage &storage, size_t capacity, const mach_head
     return 0;
 }
 
+// In the fork trial the parent needs its startup pointers at the same addresses in a fresh extension.
+// The observer already guards this whole guest image slot before the snapshot. Never replace an occupied page.
+struct ForkStartupMapping {
+    vm_address_t address = 0;
+    ~ForkStartupMapping() { if (address) vm_deallocate(mach_task_self(), address, sizeof(StartupStorage)); }
+    int reserve(const mach_header *main, uint64_t cacheBase, const char *root, const char *path, const char *const environment[]) {
+        const char *mode = nullptr;
+        for (auto entry = environment; entry && *entry; ++entry)
+            if (!strncmp(*entry, LSB_FORK_MODE_ENV "=", sizeof(LSB_FORK_MODE_ENV))) { mode = *entry + sizeof(LSB_FORK_MODE_ENV); break; }
+        if (!configuredNativeSupport || !LSBUseForkDonorLayout(root, path, mode)) return 0;
+        if (cacheBase < LSB_SLIDABLE_CACHE_PREFERRED_BASE) return ERANGE;
+        uint64_t window = cacheBase - LSB_SLIDABLE_CACHE_PREFERRED_BASE;
+        if (reinterpret_cast<uintptr_t>(main) != window + LSB_GUEST_MAIN_IMAGE_OFFSET) return ENOTSUP;
+        vm_address_t target = window + LSB_FORK_BOOTSTRAP_IMAGE_OFFSET - sizeof(StartupStorage);
+        kern_return_t kr = vm_allocate(mach_task_self(), &target, sizeof(StartupStorage), VM_FLAGS_FIXED);
+        if (kr != KERN_SUCCESS) return kr == KERN_NO_SPACE ? EADDRINUSE : ENOMEM;
+        address = target;
+        return 0;
+    }
+};
+
 int prepareStartupVectors(const mach_header *executable, const char *executablePath, const char *rootPath, int argc,
                           const char *const argv[], const char *const envp[], const char *const apple[],
-                          uintptr_t stackTop, size_t stackSize, StartupVectors &vectors) {
+                          uintptr_t stackTop, size_t stackSize, StartupVectors &vectors, StartupStorage &storage = startupStorage) {
     // These temporary transformations are destroyed on return, before either cache mapping or thread/cache detachment.
     std::vector<std::string> arguments, environment, appleStrings;
     size_t remaining = startupStorageCapacity - 5 * sizeof(uintptr_t);
@@ -653,7 +677,7 @@ int prepareStartupVectors(const mach_header *executable, const char *executableP
     snprintf(ptrMungeEntry, sizeof(ptrMungeEntry), "ptr_munge=0x%llx", static_cast<unsigned long long>(ptrMungeToken));
     error = append(appleStrings, ptrMungeEntry);
     if (error) return error;
-    return copyStartupVectors(startupStorage, sizeof(startupStorage.words), executable, arguments, environment, appleStrings, vectors);
+    return copyStartupVectors(storage, sizeof(storage.words), executable, arguments, environment, appleStrings, vectors);
 }
 
 bool selectSlice(const FileMapping &file, Layout &layout, std::string &error) {
@@ -1028,7 +1052,12 @@ int LSBEnterDyldSim(const LSBMappedImage *image, const mach_header *executable, 
 
     // dyld_sim reconstructs KernelArgs at argv - 2 words; all three vectors and their strings must survive cache mapping.
     StartupVectors startup = {};
-    int startupError = prepareStartupVectors(executable, executablePath, rootPath, argc, argv, envp, apple, stackTop, stackSize, startup);
+    ForkStartupMapping forkStorage;
+    int startupError = forkStorage.reserve(executable, configuredCacheBase, rootPath, executablePath, envp);
+    if (!startupError) {
+        StartupStorage &storage = forkStorage.address ? *reinterpret_cast<StartupStorage *>(forkStorage.address) : startupStorage;
+        startupError = prepareStartupVectors(executable, executablePath, rootPath, argc, argv, envp, apple, stackTop, stackSize, startup, storage);
+    }
     if (startupError) {
         fprintf(stderr, "Cannot prepare simulator startup data: %s\n", strerror(startupError));
         errno = startupError;

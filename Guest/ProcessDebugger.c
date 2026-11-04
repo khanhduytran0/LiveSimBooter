@@ -36,6 +36,11 @@ static bool isGuestDruid(const char *root, const char *executable) {
 #ifndef LSB_PROCESS_DEBUGGER_TESTING
 __attribute__((constructor)) static void initializeProcessDebugger(void) {
     int saved = errno;
+#ifdef LSB_FORK_SNAPSHOT_TRIAL
+    // A disposable native-support observer can keep its bootstrap thread alone for atfork. It has no peer-debugger endpoint in this phase.
+    const char *defer = getenv("LSB_FORK_DEFER_DEBUGGER"), *nativeSupport = getenv("LSB_NATIVE_SUPPORT");
+    if (defer && !strcmp(defer, "1") && nativeSupport && !strcmp(nativeSupport, "1")) { errno = saved; return; }
+#endif
     char root[PATH_MAX], executable[PATH_MAX], physical[PATH_MAX];
     const char *configuredRoot = getenv("DYLD_ROOT_PATH");
     uint32_t size = sizeof(executable);

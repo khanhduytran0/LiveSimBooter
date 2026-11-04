@@ -19,6 +19,7 @@
 #include "ChildStatus.h"
 #include "SpawnTransport.h"
 #include "ForkSnapshotBroker.h"
+#include "../ProcessSupport/ForkRendezvous.h"
 #include "SlidableCache.h"
 #include "PrivateXPC.h"
 #include "LaunchdHandshake.h"
@@ -63,6 +64,7 @@ enum { JobQueued, JobStarting, JobDispatched, JobRunning };
 @property uint64_t parentIdentifier;
 @property (nonatomic, copy) NSData *forkOffer;
 @property uint64_t forkOfferParent;
+@property dispatch_source_t forkSocket;
 @property LSBChildTicket parentTicket;
 @property BOOL parentStatusPublished, parentStatusPending, retiredForExec;
 @property LSBChildStatus *childStatus;
@@ -165,6 +167,7 @@ static LSBTerminalSession *hostTerminal;
 static BOOL initialTerminalPending;
 static BOOL initialNativeConfigdPending;
 static BOOL enableIndigo;
+static BOOL cliSession;
 static BOOL enableSpringBoardMetal;
 static NSArray<NSData *> *rebootArguments, *rebootEnvironment;
 static BOOL sessionDraining, rebootDrainFailed;
@@ -237,7 +240,7 @@ BOOL LSBHostCanControlSimulator(void) {
     if (sessionDraining || rebootDrainFailed || deviceChangeCompletion || sessionControlRequested || sessionControlCompletion ||
         launchLaneFailed || sessionStartFailed) return NO;
     for (LSBJob *job in jobs)
-        if (job.simulatorLaunchd && !job.parentIdentifier && job.phase == JobRunning && !job.rebootRequested) return enableIndigo;
+        if (job.simulatorLaunchd && !job.parentIdentifier && job.phase == JobRunning && !job.rebootRequested) return enableIndigo || cliSession;
     return NO;
 }
 BOOL LSBHostCanApplyDeviceType(void) { return LSBHostSimulatorIsOff() || LSBHostCanControlSimulator(); }
@@ -572,8 +575,15 @@ static void stopGuestTaskCapture(LSBJob *job) {
     job.taskCapture = (LSBTaskPortCaptureOffer){0};
 }
 
+static void clearForkOffer(LSBJob *child) {
+    if (child.forkSocket) dispatch_source_cancel(child.forkSocket);
+    child.forkSocket = nil;
+    child.forkOffer = nil;
+    child.forkOfferParent = 0;
+}
+
 static void releaseGuestProcessIdentity(LSBJob *job) {
-    job.forkOffer = nil;
+    clearForkOffer(job);
     LSBPeerProcessIdentity snapshot = job.peerIdentity;
     job.peerIdentity = (LSBPeerProcessIdentity){0};
     job.peerIdentityError = ESRCH;
@@ -972,8 +982,7 @@ static void finishJob(LSBJob *job, int error) {
     for (LSBJob *child in [jobs copy]) {
         // Exec can reparent the child before retiring the native instance that made its offer.
         if (child.forkOfferParent == job.identifier) {
-            child.forkOffer = nil;
-            child.forkOfferParent = 0;
+            clearForkOffer(child);
         }
         if (child.parentIdentifier != job.identifier) continue;
         if (child.phase != JobRunning) {
@@ -1174,7 +1183,7 @@ static int prepareLaunchdTerminal(LSBReceivedMessage *message, LSBJob *sender, B
     *terminal = nil;
     if (!isTerminalHelper(message)) return 0;
     audit_token_t audit = sender.audit;
-    if (!enableIndigo || !sender || sender.phase != JobRunning || sender.finishing || sender.retiredForExec ||
+    if ((!enableIndigo && !cliSession) || !sender || sender.phase != JobRunning || sender.finishing || sender.retiredForExec ||
         sender.executionRole != LSB_EXECUTION_SIMULATOR || memcmp(&audit, &message->audit, sizeof(audit))) return EACCES;
     LSBJob *owner = replacing ? findJob(sender.parentIdentifier) : sender;
     LSBPeerProcessIdentity identity = sender.peerIdentity;
@@ -1937,13 +1946,65 @@ static BOOL capturedTaskCurrent(LSBJob *job, const audit_token_t *expected) {
         !memcmp(&actual, expected, sizeof(actual));
 }
 
+static int acceptForkOffer(LSBJob *parent, LSBJob *child) {
+    if (!parent || !child || child.parentIdentifier != parent.identifier || child == parent) return EACCES;
+    if (!child.forkOffer || child.forkOfferParent != parent.identifier) return ENOENT;
+    NSData *ranges = child.forkOffer;
+    clearForkOffer(child);
+    if (parent.replacementIdentifier || child.replacementIdentifier) return EBUSY;
+    audit_token_t parentAudit = parent.audit, childAudit = child.audit;
+    if (!capturedTaskCurrent(parent, &parentAudit) || !capturedTaskCurrent(child, &childAudit)) return ESRCH;
+    return LSBCopyOfferedForkRanges(parent.taskPort, child.taskPort, ranges.bytes, ranges.length / sizeof(LSBForkWireRange));
+}
+
+// Connect is the child's one-shot ACCEPT. Native credentials authenticate both ends; the child can stay single-threaded through libc's fork handlers.
+static int listenForForkAccept(LSBJob *parent, LSBJob *child) {
+    struct sockaddr_un address;
+    audit_token_t expected = child.audit;
+    int error = LSBForkSocketAddress(runtimeRoot.fileSystemRepresentation, &expected, &address);
+    if (error) return error;
+    int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listener < 0) return errno;
+    if (fcntl(listener, F_SETFD, FD_CLOEXEC) || fcntl(listener, F_SETFL, O_NONBLOCK) ||
+        bind(listener, (struct sockaddr *)&address, address.sun_len)) { error = errno; close(listener); return error; }
+    struct stat bound;
+    if (lstat(address.sun_path, &bound) || listen(listener, 1)) {
+        error = errno;
+        unlink(address.sun_path);
+        close(listener);
+        return error;
+    }
+    dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, listener, 0, dispatch_get_main_queue());
+    if (!source) { unlink(address.sun_path); close(listener); return ENOMEM; }
+    __weak LSBJob *weakParent = parent, *weakChild = child;
+    dispatch_source_set_event_handler(source, ^{
+        int peer = accept(listener, NULL, NULL);
+        if (peer < 0) return;
+        int noSignal = 1;
+        if (!setsockopt(peer, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal)) && !LSBForkCheckSocketPeer(peer, &expected)) {
+            int32_t result = acceptForkOffer(weakParent, weakChild);
+            (void)send(peer, &result, sizeof(result), MSG_DONTWAIT);
+        }
+        close(peer);
+    });
+    dispatch_source_set_cancel_handler(source, ^{
+        // Another future offer could own this pathname; unlink only our own bound socket.
+        struct stat current;
+        if (!lstat(address.sun_path, &current) && current.st_dev == bound.st_dev && current.st_ino == bound.st_ino) unlink(address.sun_path);
+        close(listener);
+    });
+    child.forkSocket = source;
+    dispatch_resume(source);
+    return 0;
+}
+
 static int handleForkRequest(LSBJob *sender, const LSBReceivedMessage *message) {
     if (!message->replyConnection || message->replyConnection != (__bridge void *)sender.brokerConnection ||
         !capturedTaskCurrent(sender, &message->audit)) return EACCES;
     LSBJob *peer = nil;
     for (LSBJob *job in jobs) if (authenticatedSimulatorJob(job, &message->targetAudit)) { peer = job; break; }
     if (!peer || !capturedTaskCurrent(peer, &message->targetAudit)) return ESRCH;
-    BOOL offering = message->kind == LSB_REQUEST_FORK_OFFER;
+    BOOL offering = message->kind != LSB_REQUEST_FORK_ACCEPT;
     LSBJob *parent = offering ? sender : peer;
     LSBJob *child = offering ? peer : sender;
     if (child == parent || child.parentIdentifier != parent.identifier) return EACCES;
@@ -1954,14 +2015,11 @@ static int handleForkRequest(LSBJob *sender, const LSBReceivedMessage *message) 
         child.forkOffer = [NSData dataWithBytes:message->forkRanges length:message->forkRangeCount * sizeof(*message->forkRanges)];
         if (!child.forkOffer) return ENOMEM;
         child.forkOfferParent = parent.identifier;
-        return 0;
+        int error = message->kind == LSB_REQUEST_FORK_OFFER_SOCKET ? listenForForkAccept(parent, child) : 0;
+        if (error) clearForkOffer(child);
+        return error;
     }
-    if (!child.forkOffer || child.forkOfferParent != parent.identifier) return ENOENT;
-    // Accept consumes the offer even when preflight or a later mapping fails. A replacement process must agree to a new offer.
-    NSData *ranges = child.forkOffer;
-    child.forkOffer = nil;
-    child.forkOfferParent = 0;
-    return LSBCopyOfferedForkRanges(parent.taskPort, child.taskPort, ranges.bytes, ranges.length / sizeof(LSBForkWireRange));
+    return acceptForkOffer(parent, child);
 }
 
 static BOOL traceCooperativeDebugger(void) {
@@ -2037,6 +2095,7 @@ static void handleMessage(LSBReceivedMessage *message) {
     for (LSBJob *job in jobs) if (job.pid == pid && job.pidVersion == generation) { sender = job; break; }
     if (sessionDraining) { replyError(message, ECANCELED); return; }
     switch (message->kind) {
+        case LSB_REQUEST_FORK_OFFER_SOCKET:
         case LSB_REQUEST_FORK_OFFER:
         case LSB_REQUEST_FORK_ACCEPT:
             replyError(message, handleForkRequest(sender, message));
@@ -2539,6 +2598,11 @@ static int initialPlan(LSBReceivedMessage *message, int argc, const char *argv[]
     BOOL nativeProbe = executionRole == LSB_EXECUTION_NATIVE_METAL_PROBE;
     if (argc > 1 && !strcmp(argv[1], "--launchd"))
         return argc == 2 ? LSBPrepareLaunchdPlan(message, runtimeRoot.fileSystemRepresentation, envp) : EINVAL;
+    if (argc > 1 && !strcmp(argv[1], "--launchd-cli")) {
+        if (argc != 2) return EINVAL;
+        cliSession = YES;
+        return LSBPrepareLaunchdCLIPlan(message, runtimeRoot.fileSystemRepresentation, envp);
+    }
     if (argc > 1 && !strcmp(argv[1], "--launchd-df"))
         return argc == 2 ? LSBPrepareLaunchdDFPlan(message, runtimeRoot.fileSystemRepresentation, envp) : EINVAL;
     if (argc > 1 && !strcmp(argv[1], "--launchd-backboardd")) {
@@ -2839,7 +2903,7 @@ static void completeUserspaceReboot(uint64_t generation) {
         retiredIdentitiesFull = NO;
         sessionDraining = NO;
         simulatorPoweredOff = YES;
-        enableIndigo = enableSpringBoardMetal = NO;
+        cliSession = enableIndigo = enableSpringBoardMetal = NO;
         [NSNotificationCenter.defaultCenter postNotificationName:LSBHostFramebufferDidChangeNotification object:nil];
         [NSNotificationCenter.defaultCenter postNotificationName:LSBHostTerminalDidChangeNotification object:nil];
         [NSNotificationCenter.defaultCenter postNotificationName:LSBHostIndigoDidChangeNotification object:nil];
@@ -2870,7 +2934,7 @@ static void completeUserspaceReboot(uint64_t generation) {
     LSBReceivedMessage *initial = calloc(1, sizeof(*initial));
     int error = initial ? 0 : ENOMEM;
     uint32_t role = LSB_EXECUTION_SIMULATOR;
-    enableIndigo = enableSpringBoardMetal = NO;
+    cliSession = enableIndigo = enableSpringBoardMetal = NO;
     if (!error) error = prepareInitialPlan(initial, (int)rebootArguments.count, arguments, environment, &role);
     if (error) {
         if (initial) disposeMessage(initial);

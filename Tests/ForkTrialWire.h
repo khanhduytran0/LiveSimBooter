@@ -2,6 +2,9 @@
 #pragma once
 #include "../Guest/ForkHook.h"
 #include "ForkBashTerminal.h"
+#include "ForkAllocatorState.h"
+#include "ForkPthreadState.h"
+#include "ForkRuntimeImages.h"
 #include "../ProcessSupport/SpawnTransport.h"
 #include <errno.h>
 #include <stdbool.h>
@@ -9,7 +12,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-enum { TrialWireVersion = 9, TrialMaxDepth = 4, TrialSlicedStack = 1, TrialStackHeadroom = 256 * 1024 };
+enum { TrialWireVersion = 20, TrialMaxDepth = 4, TrialSlicedStack = 1, TrialRestoreAllocator = 4, TrialResumeGuest = 8, TrialVfork = 16,
+       TrialStackHeadroom = 256 * 1024, TrialWitnessSize = 128 };
 typedef enum { TrialSnapshot, TrialDF, TrialExec, TrialShell } TrialMode;
 
 static inline uint64_t trialStackSliceStart(uint64_t bottom, uint64_t sp, uint64_t page) {
@@ -23,6 +27,8 @@ typedef struct {
     uint32_t version;
 } TrialReady;
 
+typedef struct { int32_t error; uint32_t phase; uint64_t address; uint32_t pthreadPrefix, reserved; } TrialPreflight;
+_Static_assert(sizeof(TrialPreflight) == 24, "fork preflight receipt");
 typedef struct {
     uint64_t parentGetpid, variablesAddress, expectedFirstWord;
 } TrialBashState;
@@ -37,6 +43,12 @@ typedef struct {
     uint64_t closeOnExec[LSB_MAX_FDS / 64]; // Only pipe/bitmap FDs explicitly inherited while bootstrapping the early child.
     TrialTerminalAlias terminal;
     TrialBashState bash;
+    ForkAllocatorState allocator;
+    uint64_t allocatorMask, witness;
+    ForkPthreadState pthreads;
+    TrialSupportImages support;
+    uint64_t argv, envp, guard;
+    uint32_t argc, reserved;
     LSBForkContext caller;
     LSBForkWireRange ranges[LSB_MAX_FORK_RANGES]; // Same sorted ranges as the broker offer. Bit i marks VM_INHERIT_NONE.
 } TrialOffer;
@@ -44,7 +56,37 @@ typedef struct {
 // A nested fork can offer its parent's reduced stack as a full VM leaf. Always guard the shell stack at every generation.
 static inline bool trialNeedsStackGuard(const TrialOffer *offer) { return offer->resume == TrialShell || (offer->flags & TrialSlicedStack); }
 
-_Static_assert(LSB_MAX_FORK_RANGES <= 64 && sizeof(TrialReady) == 40 && LSB_MAX_FDS % 64 == 0 && sizeof(TrialOffer) == 288 + LSB_MAX_FDS / 8 + 16 * LSB_MAX_FORK_RANGES, "fork trial handshake size");
+_Static_assert(LSB_MAX_FORK_RANGES <= 64 && sizeof(TrialReady) == 40 && LSB_MAX_FDS % 64 == 0 &&
+               sizeof(TrialOffer) == 416 + sizeof(ForkPthreadState) + sizeof(TrialSupportImages) + LSB_MAX_FDS / 8 + 16 * LSB_MAX_FORK_RANGES, "fork trial handshake size");
+
+static inline int trialAllocatorCovers(void *context, uint64_t address, uint64_t bytes) {
+    const TrialOffer *offer = context;
+    if (!bytes || address > UINT64_MAX - bytes) return EINVAL;
+    uint64_t limit = address + bytes;
+    for (unsigned i = 0; i < offer->rangeCount && address < limit; ++i) {
+        LSBForkWireRange r = offer->ranges[i];
+        if (r.start > address) break;
+        if (offer->allocatorMask & (UINT64_C(1) << i)) {
+            if (r.start + r.size > address) address = r.start + r.size;
+        }
+    }
+    return address >= limit ? 0 : EAGAIN;
+}
+
+static inline int trialSnapshotCovers(void *context, uint64_t address, uint64_t bytes) {
+    const TrialOffer *offer = context;
+    if (!address || !bytes || address > UINT64_MAX - bytes) return EINVAL;
+    uint64_t limit = address + bytes;
+    for (unsigned i = 0; i < offer->rangeCount && address < limit; ++i) {
+        LSBForkWireRange r = offer->ranges[i];
+        if (r.start > address) break;
+        if (!(offer->skipMask & (UINT64_C(1) << i)) && r.start + r.size > address) address = r.start + r.size;
+    }
+    return address >= limit ? 0 : EAGAIN;
+}
+
+__attribute__((visibility("default"))) int LSBTrialReceiveForkFDs(int socket);
+__attribute__((visibility("default"))) int LSBTrialResumeTerminalWitness(void);
 
 // Trial shim entry used by the observer once its authenticated snapshot and import bindings are installed.
 __attribute__((visibility("default"))) int LSBTrialAdoptBash(uintptr_t image, unsigned depth);

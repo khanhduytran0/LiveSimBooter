@@ -185,6 +185,46 @@ static void testAt(const char *root, const char *path) {
     assert(!chmod(path, 0755));
 }
 
+static int configFragment(const struct dirent *entry) { return entry->d_name[0] == '0'; }
+
+static void testDpkgConfig(const char *jb, const char *outside) {
+    char etc[PATH_MAX], config[PATH_MAX], parts[PATH_MAX], path[PATH_MAX];
+    snprintf(etc, sizeof(etc), "%s/etc", jb);
+    snprintf(config, sizeof(config), "%s/dpkg", etc);
+    snprintf(parts, sizeof(parts), "%s/dpkg.cfg.d", config);
+    assert(!mkdir(etc, 0700) && !mkdir(config, 0700) && !mkdir(parts, 0700));
+    const char *fragments[] = {"02-test", "01-test", ".ignored"};
+    for (unsigned i = 0; i < 3; ++i) {
+        snprintf(path, sizeof(path), "%s/%s", parts, fragments[i]);
+        FILE *f = fopen(path, "w");
+        assert(f && fputs(fragments[i], f) >= 0 && !fclose(f));
+    }
+    struct dirent **entries = NULL;
+    reset();
+    assert(LSBDpkgConfigScandir("/var/jb/etc/dpkg/dpkg.cfg.d", &entries, configFragment, alphasort) == 2);
+    assert(!strcmp(entries[0]->d_name, fragments[1]) && !strcmp(entries[1]->d_name, fragments[0]));
+    free(entries[0]); free(entries[1]); free(entries);
+    assert(!getenvCalls && realpathCalls == 1);
+
+    const char *fragment = "/private/var/jb/etc/dpkg/dpkg.cfg.d/01-test";
+    FILE *f = LSBDpkgConfigFopen(fragment, "r");
+    char contents[20];
+    assert(f && fgets(contents, sizeof(contents), f) && !strcmp(contents, fragments[1]) && !fclose(f));
+    assert(!LSBDpkgConfigFopen("/var/jb/etc/dpkg/dpkg.cfg", "r") && errno == ENOENT);
+    snprintf(path, sizeof(path), "%s/escape", parts);
+    assert(!symlink(outside, path));
+    assert(!LSBDpkgConfigFopen("/var/jb/etc/dpkg/dpkg.cfg.d/escape", "r") && errno == EACCES);
+    snprintf(path, sizeof(path), "%s/outside.cfg.d", config);
+    assert(!symlink(outside, path));
+    assert(LSBDpkgConfigScandir("/var/jb/etc/dpkg/outside.cfg.d", &entries, NULL, NULL) == -1 && errno == EACCES);
+
+    reset();
+    assert(LSBDpkgConfigScandir("unrelated-missing-dir", &entries, NULL, NULL) == -1 && errno == ENOENT);
+    assert(!LSBDpkgConfigFopen("unrelated-missing-file", "r") && errno == ENOENT);
+    assert(!LSBDpkgConfigFopen("/var/jb/etc/dpkg-other/no-such-file", "r"));
+    assert(!realpathCalls && !getenvCalls);
+}
+
 static void testBootstrap(const char *base, const char *data, const struct mach_header_64 *header) {
     char var[PATH_MAX], jb[PATH_MAX], bin[PATH_MAX], image[PATH_MAX], link[PATH_MAX], systemImage[PATH_MAX], expected[PATH_MAX];
     snprintf(var, sizeof(var), "%s/var", data);
@@ -228,6 +268,7 @@ static void testBootstrap(const char *base, const char *data, const struct mach_
     reset(); assert(LSBAccess("/var/jb/bin/tool", X_OK) == -1 && errno == EACCES && !accessCalls);
     assert(!getenvCalls && !realpathCalls && !statCalls);
     atomic_store_explicit(&directoriesReady, true, memory_order_release);
+    testDpkgConfig(jb, systemImage);
     assert(!unlink(systemImage));
 }
 

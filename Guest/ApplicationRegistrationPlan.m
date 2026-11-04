@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <fts.h>
 #include <limits.h>
 #include <mach-o/loader.h>
 #include <sys/stat.h>
@@ -96,13 +97,10 @@ NSArray<NSString *> *LSBReadApplicationRegistrationManifest(NSString *root, NSSt
     return [applications copy];
 }
 
-NSURL *LSBPrepareApplicationRegistration(NSString *root, NSString *guestPath, NSString **identifier, NSString **skipReason, NSError **error) {
+static NSURL *prepareBundle(NSString *physical, NSString **identifier, NSString **skipReason, NSError **error) {
     if (identifier) *identifier = nil;
     if (skipReason) *skipReason = nil;
     if (error) *error = nil;
-    if (!validAppPath(guestPath)) return fail(error, EINVAL, @"app must be in an allowed top-level stock directory");
-    NSString *physical = containedPath(root, guestPath, error);
-    if (!physical) return nil;
     struct stat metadata;
     if (stat(physical.fileSystemRepresentation, &metadata) || !S_ISDIR(metadata.st_mode)) return fail(error, ENOTDIR, @"app is not a directory");
     NSString *infoPath = [physical stringByAppendingPathComponent:@"Info.plist"];
@@ -141,6 +139,15 @@ NSURL *LSBPrepareApplicationRegistration(NSString *root, NSString *guestPath, NS
     return [NSURL fileURLWithPath:physical isDirectory:YES];
 }
 
+NSURL *LSBPrepareApplicationRegistration(NSString *root, NSString *guestPath, NSString **identifier, NSString **skipReason, NSError **error) {
+    if (identifier) *identifier = nil;
+    if (skipReason) *skipReason = nil;
+    if (error) *error = nil;
+    if (!validAppPath(guestPath)) return fail(error, EINVAL, @"app must be in an allowed top-level stock directory");
+    NSString *physical = containedPath(root, guestPath, error);
+    return physical ? prepareBundle(physical, identifier, skipReason, error) : nil;
+}
+
 BOOL LSBVerifyApplicationRegistration(NSURL *expectedURL, NSString *expectedIdentifier, NSURL *registeredURL,
                                     NSString *registeredIdentifier, BOOL installed, NSError **error) {
     if (error) *error = nil;
@@ -156,5 +163,145 @@ BOOL LSBVerifyApplicationRegistration(NSURL *expectedURL, NSString *expectedIden
         fail(error, EXDEV, @"LaunchServices record points to another bundle");
         return NO;
     }
+    return YES;
+}
+
+static BOOL reject(NSError **error, int code, NSString *detail) {
+    fail(error, code, detail);
+    return NO;
+}
+
+static NSString *dpkgApplicationsPath(NSString *runtime, NSString *data, NSString *root, NSError **error) {
+    if (!validGuestPath(runtime) || ![runtime.lastPathComponent isEqual:@"RuntimeRoot"] || !validGuestPath(data) || !validGuestPath(root) ||
+        ![[runtime.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"data"] isEqual:data] ||
+        (![root isEqual:data] && ![root hasPrefix:[data stringByAppendingString:@"/"]]))
+        return fail(error, EACCES, @"expected a dpkg root inside the selected simulator data directory");
+    if (![canonicalPath(runtime, error) isEqual:runtime]) return fail(error, EACCES, @"RuntimeRoot must be canonical");
+    NSString *bootstrap = [root stringByAppendingString:@"/var/jb"];
+    if (![canonicalPath(bootstrap, error) isEqual:bootstrap]) return fail(error, EACCES, @"dpkg bootstrap must exist without symlinks");
+    struct stat s;
+    if (stat(runtime.fileSystemRepresentation, &s) || !S_ISDIR(s.st_mode) ||
+        stat(bootstrap.fileSystemRepresentation, &s) || !S_ISDIR(s.st_mode)) return fail(error, ENOTDIR, @"invalid runtime or dpkg bootstrap");
+    return [bootstrap stringByAppendingPathComponent:@"Applications"];
+}
+
+// LaunchServices can inspect nested bundle metadata and plug-ins. Permit internal framework links, but never hand it
+// a bundle with a dangling link or a link into another application, transaction root or native directory.
+static BOOL checkBundleLinks(NSString *path, NSError **error) {
+    char *paths[] = {(char *)path.fileSystemRepresentation, NULL};
+    FTS *walk = fts_open(paths, FTS_PHYSICAL | FTS_NOCHDIR, NULL);
+    if (!walk) return reject(error, errno, @"cannot inspect package bundle");
+    int code = 0;
+    const size_t length = strlen(paths[0]);
+    FTSENT *entry;
+    while ((entry = fts_read(walk))) {
+        if (entry->fts_info == FTS_ERR || entry->fts_info == FTS_DNR || entry->fts_info == FTS_NS) { code = entry->fts_errno ?: EIO; break; }
+        if (entry->fts_info != FTS_SL && entry->fts_info != FTS_SLNONE) continue;
+        char resolved[PATH_MAX];
+        if (!realpath(entry->fts_accpath, resolved)) { code = errno; break; }
+        if (strncmp(resolved, paths[0], length) || resolved[length] != '/') { code = EACCES; break; }
+    }
+    if (!entry) code = errno;
+    fts_close(walk);
+    return !code || reject(error, code, [NSString stringWithFormat:@"cannot confine all bundle entries to %@", path]);
+}
+
+static NSDictionary<NSString *, NSURL *> *dpkgInventory(NSString *directory, NSError **error) {
+    struct stat s;
+    if (lstat(directory.fileSystemRepresentation, &s)) {
+        if (errno == ENOENT) return @{};
+        return fail(error, errno, @"cannot inspect package Applications directory");
+    }
+    if (!S_ISDIR(s.st_mode)) return fail(error, EINVAL, @"package Applications must be a directory, not a symlink");
+    NSArray<NSString *> *names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:directory error:error];
+    if (!names) return nil;
+    NSMutableDictionary *apps = [NSMutableDictionary dictionary];
+    for (NSString *name in names) {
+        if (![name hasSuffix:@".app"]) continue;
+        NSString *path = [directory stringByAppendingPathComponent:name], *identifier = nil, *skip = nil;
+        if (!validGuestPath(path) || name.length <= 4 || ![canonicalPath(path, error) isEqual:path])
+            return fail(error, EACCES, @"package app is not a canonical bundle");
+        if (!checkBundleLinks(path, error)) return nil;
+        NSURL *url = prepareBundle(path, &identifier, &skip, error);
+        if (!url) return skip ? fail(error, ENOEXEC, [NSString stringWithFormat:@"%@: %@", name, skip]) : nil;
+        if ([identifier.lowercaseString hasPrefix:@"com.apple."]) return fail(error, EACCES, @"reserved Apple app identifier");
+        if (apps[identifier]) return fail(error, EEXIST, @"duplicate package app identifier");
+        if (apps.count >= MaximumApplications) return fail(error, E2BIG, @"too many package apps");
+        apps[identifier] = url;
+    }
+    return apps;
+}
+
+// LaunchServices may use the /var spelling of a physical /private/var file URL. Never resolve an untrusted or already-removed URL through a symlink.
+static NSString *recordPath(NSURL *url) {
+    if (!url.isFileURL || (url.host.length && ![url.host isEqual:@"localhost"])) return nil;
+    NSString *path = url.path;
+    if (!validGuestPath(path)) return nil;
+    if ([path hasPrefix:@"/var/"] || [path hasPrefix:@"/tmp/"]) return [@"/private" stringByAppendingString:path];
+    return path;
+}
+
+BOOL LSBRefreshDpkgApplications(NSString *runtime, NSString *data, NSString *dpkgRoot, LSBReadGuestApplications readRecords,
+                                LSBChangeGuestApplication change, NSError **error) {
+    if (error) *error = nil;
+    NSString *directory = dpkgApplicationsPath(runtime, data, dpkgRoot, error);
+    if (!directory) return NO;
+    NSDictionary<NSString *, NSURL *> *installed = dpkgInventory(directory, error);
+    if (!installed) return NO;
+    NSDictionary<NSString *, NSURL *> *records = readRecords(error);
+    if (!records) return NO;
+    NSMutableDictionary<NSString *, NSString *> *idsByPath = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSURL *> *stale = [NSMutableDictionary dictionary];
+    for (NSString *identifier in records) {
+        NSURL *record = records[identifier];
+        NSString *path = recordPath(record);
+        if (installed[identifier] && ![path isEqual:installed[identifier].path]) return reject(error, EEXIST, @"app identifier already belongs to another URL");
+        if (![path.stringByDeletingLastPathComponent isEqual:directory] || ![path.lastPathComponent hasSuffix:@".app"]) continue;
+        if (idsByPath[path] || [identifier.lowercaseString hasPrefix:@"com.apple."]) return reject(error, EACCES, @"ambiguous or protected app record");
+        idsByPath[path] = identifier;
+        if (!installed[identifier]) {
+            struct stat s;
+            if (!lstat(path.fileSystemRepresentation, &s) || errno != ENOENT) return reject(error, EEXIST, @"registered bundle is not confirmed absent");
+            stale[identifier] = record;
+        }
+    }
+
+    NSUInteger added = 0, removed = 0;
+    // All bundles and conflicts were checked before changing LaunchServices. Registration must succeed before removing any stale entry.
+    for (NSString *identifier in installed) {
+        NSURL *url = installed[identifier];
+        if (records[identifier]) continue;
+        if (![canonicalPath(url.path, error) isEqual:url.path]) return reject(error, EAGAIN, @"package bundle moved before registration");
+        if (!change(identifier, url, NO, error)) return NO;
+        ++added;
+    }
+    // Verify all additions together. A failed registration must not cause removal of another app.
+    if (added) {
+        records = readRecords(error);
+        if (!records) return NO;
+        for (NSString *identifier in installed) {
+            if (![recordPath(records[identifier]) isEqual:installed[identifier].path])
+                return reject(error, EIO, [NSString stringWithFormat:@"guest registry did not confirm %@", identifier]);
+        }
+    }
+    for (NSString *identifier in stale) {
+        NSString *path = recordPath(stale[identifier]);
+        if (!records[identifier]) continue;
+        if (![recordPath(records[identifier]) isEqual:path] || ![dpkgApplicationsPath(runtime, data, dpkgRoot, error) isEqual:directory])
+            return reject(error, EAGAIN, @"registration or installation root changed before removal");
+        struct stat s;
+        if (lstat(directory.fileSystemRepresentation, &s) ? errno != ENOENT : !S_ISDIR(s.st_mode))
+            return reject(error, EAGAIN, @"package Applications directory changed before removal");
+        if (!lstat(path.fileSystemRepresentation, &s) || errno != ENOENT) return reject(error, EAGAIN, @"bundle is no longer confirmed absent");
+        if (!change(identifier, [NSURL fileURLWithPath:path isDirectory:YES], YES, error)) return NO;
+        ++removed;
+    }
+    if (removed) {
+        records = readRecords(error);
+        if (!records) return NO;
+        for (NSString *identifier in stale) if (records[identifier]) return reject(error, EIO, @"guest registry did not confirm removal");
+    }
+    printf("[app-registration] dpkg packages=%lu added=%lu removed=%lu\n", (unsigned long)installed.count,
+           (unsigned long)added, (unsigned long)removed);
     return YES;
 }

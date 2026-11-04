@@ -302,6 +302,8 @@ TextToSpeech override described below also resolved the reproduced text-selectio
 
 These commands do not deploy or sign guest executables. `dyld_sim` retains `MH_DYLINKER`; executables retain `MH_EXECUTE`.
 Install diagnostic executables under `RuntimeRoot/usr/local/bin`, including `spawn-probe`, `lifecycle-probe`, and `exec-probe` when used.
+The fork observer at `RuntimeRoot/usr/local/bin/lsb-fork-snapshot-child` must come from the same build as
+`libLiveSimSpawn.dylib`. Install both when updating the shim. The build defaults to including the observer.
 Keep production helpers in `usr/libexec` and runtime programs such as `df` and Fish at their existing paths. The generated simulator
 and terminal environments prepend the physical `RuntimeRoot/usr/local/bin` to `PATH`.
 
@@ -407,6 +409,7 @@ python3 Tools/setup-ios26-runtime.py --runtime-root "$LSB_RUNTIME_SOURCE" \
   --add-binary "/usr/lib/libLiveSimInstall.dylib=$LSB_WORK/guest/libLiveSimInstall.dylib" \
   --add-binary "/usr/lib/libLiveSimScene.dylib=$LSB_WORK/guest/libLiveSimScene.dylib" \
   --add-binary "/usr/local/bin/spawn-probe=$LSB_WORK/guest/spawn-probe" \
+  --add-binary "/usr/local/bin/lsb-fork-snapshot-child=$LSB_WORK/guest/lsb-fork-snapshot-child" \
   --add-binary "/usr/libexec/terminal-fish=$LSB_WORK/guest/terminal-fish" \
   --add-binary "/usr/libexec/display-settings=$LSB_WORK/guest/display-settings" \
   --add-binary "/usr/libexec/launchctl-control=$LSB_WORK/guest/launchctl-control" \
@@ -619,8 +622,9 @@ page swipes and opening Contacts. The home screen is not proof that every staged
 The host may remain open after the guest exits; inspect its broker exit record. A normal icon launch, or a command with no
 arguments after the bundle identifier, now waits for **Start** on the IOSurface tab. Tap it to boot graphical launchd. The tabs
 remain available before startup and persist afterward. For an unattended development test, pass `--launchd-services` with no
-labels to start the same default selection automatically. Other explicit guest arguments, such as `/bin/df` or `--terminal`,
-also retain automatic startup. The default selection comes from
+labels to start the same default selection automatically. Use `--launchd-cli` for command-line tests that need launchd.
+It starts Fish and the [launchctl worker](guest-control.md) and skips the graphical daemons. Other explicit guest arguments,
+such as `/bin/df` or `--terminal`, also retain automatic startup. The default selection comes from
 `Host/Broker.m`: it includes SpringBoard, assistantd, configd_sim, trustd, systemstatusd, kbd, pkd, chronod, navd, geod,
 and the on-demand PosterBoard LaunchAngel. See [widget startup and Maps retry CPU](widgets.md).
 The generator adds backboardd, cfprefsd, the launchd-owned Fish helper, and the display-settings worker. Explicit `--launchd-services LABEL...` **replaces**

@@ -1,8 +1,7 @@
 // Private allocator for the opt-in, noninteractive Bash fork trial. Only the pinned executable's imports are rebound.
 // A live object and its allocation metadata have the same addresses on both sides of the CoW snapshot.
 #pragma once
-#include "ForkBashState.h"
-#include <errno.h>
+#include "ForkProcursusBashGOT.h"
 #include <signal.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -200,21 +199,31 @@ static inline int bashEarlyAsprintf(char **result, const char *format, ...) {
 }
 
 static inline int bashEarlyBindAllocations(uintptr_t header) {
-    // llvm-objdump --macho --indirect-symbols on this UUID. xmalloc+0x18 and xrealloc+0x20 call these imports.
-    static const uint32_t slots[] = {0x9c0d8, 0x9c200, 0x9c230, 0x9c308, 0x9c3f0, 0x9c4e0, 0x9c5e0};
+    // llvm-objdump --macho --indirect-symbols on each pinned UUID. Procursus Bash implements strdup locally.
+    static const uint32_t stockSlots[] = {0x9c0d8, 0x9c200, 0x9c230, 0x9c308, 0x9c3f0, 0x9c4e0, 0x9c5e0};
+    static const uint32_t procursusSlots[] = {0xa00c0, 0xa01e8, 0xa0220, 0xa03e8, 0xa04f8, 0, 0xa0af0};
     const uintptr_t targets[] = {(uintptr_t)&bashEarlyAsprintf, (uintptr_t)&bashEarlyFree, (uintptr_t)&bashEarlyGetcwd, (uintptr_t)&bashEarlyMalloc,
                                  (uintptr_t)&bashEarlyRealloc, (uintptr_t)&bashEarlyStrdup, (uintptr_t)&bashEarlyWcsdup};
-    _Static_assert(sizeof(slots) / sizeof(*slots) == sizeof(targets) / sizeof(*targets), "Bash allocator slots");
+    _Static_assert(sizeof(stockSlots) == sizeof(procursusSlots) && sizeof(stockSlots) / sizeof(*stockSlots) == sizeof(targets) / sizeof(*targets),
+                   "Bash allocator slots");
+    bool procursus = forkTrialProcursusBashImage(header);
+    const uint32_t *slots = procursus ? procursusSlots : stockSlots;
+    vm_prot_t previous = 0;
     vm_region_submap_info_data_64_t info = {};
-    if (!forkTrialBashImage(header) || forkTrialLeaf(header + slots[0], slots[6] - slots[0] + sizeof(uintptr_t), &info) != KERN_SUCCESS ||
-        info.inheritance != VM_INHERIT_COPY || info.protection != (VM_PROT_READ | VM_PROT_WRITE)) return ENOEXEC;
-    // Before main in the parent or before resumption in a single-threaded observer. All slots share this already-writable leaf.
-    for (size_t i = 0; i < sizeof(slots) / sizeof(*slots); ++i) *(uintptr_t *)(header + slots[i]) = targets[i];
+    if (procursus) {
+        int error = beginProcursusBashGOT(header, &previous);
+        if (error) return error;
+    } else if (!forkTrialBashImage(header) || forkTrialLeaf(header + slots[0], slots[6] - slots[0] + sizeof(uintptr_t), &info) != KERN_SUCCESS ||
+               info.inheritance != VM_INHERIT_COPY || info.protection != (VM_PROT_READ | VM_PROT_WRITE)) return ENOEXEC;
+    // Before Bash main or observer resumption. A failed protection restore must not resume with partially initialized allocator state.
+    for (size_t i = 0; i < sizeof(targets) / sizeof(*targets); ++i)
+        if (slots[i]) *(uintptr_t *)(header + slots[i]) = targets[i];
+    if (procursus && endProcursusBashGOT(header, previous)) _exit(125);
     return 0;
 }
 
 static inline int bashEarlyInstallHeap(uintptr_t header) {
-    if (bashEarlyHeap || !forkTrialBashImage(header) || header > UINTPTR_MAX - BashEarlyHeapOffset - BashEarlyHeapBytes) return ENOTSUP;
+    if (bashEarlyHeap || header > UINTPTR_MAX - BashEarlyHeapOffset - BashEarlyHeapBytes) return ENOTSUP;
     mach_vm_address_t address = header + BashEarlyHeapOffset;
     if (mach_vm_allocate(mach_task_self(), &address, BashEarlyHeapBytes, VM_FLAGS_FIXED) != KERN_SUCCESS) return EADDRINUSE;
     bashEarlyHeap = (void *)(uintptr_t)address;
@@ -229,7 +238,7 @@ static inline int bashEarlyInstallHeap(uintptr_t header) {
 
 static inline int bashEarlyAdoptHeap(uintptr_t header, uintptr_t base) {
     vm_region_submap_info_data_64_t info = {};
-    if (!forkTrialBashImage(header) || header > UINTPTR_MAX - BashEarlyHeapBytes - BashEarlyHeapOffset || base != header + BashEarlyHeapOffset ||
+    if (header > UINTPTR_MAX - BashEarlyHeapBytes - BashEarlyHeapOffset || base != header + BashEarlyHeapOffset ||
         forkTrialLeaf(base, BashEarlyHeapBytes, &info) != KERN_SUCCESS || info.protection != (VM_PROT_READ | VM_PROT_WRITE) ||
         info.inheritance != VM_INHERIT_COPY || !bashHeapValid((void *)base)) return ENOTSUP;
     int error = bashEarlyBindAllocations(header);

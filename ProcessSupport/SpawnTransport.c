@@ -594,7 +594,7 @@ int LSBTransportKill(pid_t targetPID, int signalNumber) {
 }
 
 // Consumes a request with a four-field reply. Only the terminal access check can return a PID.
-static int callStatusRequest(xpc_object_t request, pid_t *resultPID) {
+static int callStatusRequestFromPeer(xpc_object_t request, pid_t *resultPID, audit_token_t *peer) {
     xpc_object_t reply = NULL;
     int error = callBroker(request, &reply);
     xpc_release(request);
@@ -605,10 +605,18 @@ static int callStatusRequest(xpc_object_t request, pid_t *resultPID) {
         error = decodeReplyHeader(reply, &remoteError, &pid, &requestID);
         if (!error && (requestID || xpc_dictionary_get_count(reply) != 4 || (pid && (!resultPID || remoteError)))) error = EPROTO;
         if (!error && resultPID) *resultPID = pid;
+        if (!error && !remoteError && peer) {
+            xpc_dictionary_get_audit_token(reply, peer);
+            if (!peer->val[5] || !peer->val[7]) error = EACCES;
+        }
         if (!error) error = remoteError;
     }
     if (reply) xpc_release(reply);
     return error;
+}
+
+static int callStatusRequest(xpc_object_t request, pid_t *resultPID) {
+    return callStatusRequestFromPeer(request, resultPID, NULL);
 }
 
 int LSBTransportCheckTerminalIO(LSBTerminalAccess access, bool *signalCaller) {
@@ -669,23 +677,28 @@ static bool validForkRanges(const LSBForkWireRange *ranges, size_t count) {
     return true;
 }
 
-static int forkRequest(uint32_t kind, const audit_token_t *peer, const LSBForkWireRange *ranges, size_t count) {
+static int forkRequest(uint32_t kind, const audit_token_t *peer, const LSBForkWireRange *ranges, size_t count, audit_token_t *broker) {
     if (!peer || !peer->val[5] || peer->val[5] > INT_MAX || !peer->val[7]) return EINVAL;
-    if (kind == LSB_REQUEST_FORK_OFFER && !validForkRanges(ranges, count)) return EINVAL;
+    if (kind != LSB_REQUEST_FORK_ACCEPT && !validForkRanges(ranges, count)) return EINVAL;
     xpc_object_t request = NULL;
     int error = createRequest(kind, 0, 0, &request);
     if (error) return error;
     xpc_dictionary_set_data(request, "target-audit", peer, sizeof(*peer));
     if (ranges) xpc_dictionary_set_data(request, "fork-ranges", ranges, count * sizeof(*ranges));
-    return callStatusRequest(request, NULL);
+    return callStatusRequestFromPeer(request, NULL, broker);
 }
 
 int LSBTransportOfferFork(const audit_token_t *child, const LSBForkWireRange *ranges, size_t count) {
-    return forkRequest(LSB_REQUEST_FORK_OFFER, child, ranges, count);
+    return forkRequest(LSB_REQUEST_FORK_OFFER, child, ranges, count, NULL);
+}
+
+int LSBTransportOfferForkSocket(const audit_token_t *child, const LSBForkWireRange *ranges, size_t count, audit_token_t *broker) {
+    if (!broker) return EINVAL;
+    return forkRequest(LSB_REQUEST_FORK_OFFER_SOCKET, child, ranges, count, broker);
 }
 
 int LSBTransportAcceptFork(const audit_token_t *parent) {
-    return forkRequest(LSB_REQUEST_FORK_ACCEPT, parent, NULL, 0);
+    return forkRequest(LSB_REQUEST_FORK_ACCEPT, parent, NULL, 0, NULL);
 }
 
 int LSBTransportListProcesses(LSBProcessList **list, size_t *size) {
@@ -1283,7 +1296,7 @@ static int decodeRequest(LSBReceivedMessage *message) {
     uint64_t version = 0, kind = 0;
     int64_t childError = 0;
     if (!error && (!unsignedValue(request, "version", &version) || version != LSB_TRANSPORT_VERSION ||
-        !unsignedValue(request, "kind", &kind) || kind < LSB_REQUEST_SPAWN || kind > LSB_REQUEST_CHECK_TERMINAL_IO ||
+        !unsignedValue(request, "kind", &kind) || kind < LSB_REQUEST_SPAWN || kind > LSB_REQUEST_FORK_OFFER_SOCKET ||
         !unsignedValue(request, "request-id", &message->requestID) || !signedValue(request, "error", &childError) ||
         childError < 0 || childError > INT_MAX)) error = EPROTO;
     if (!error) {
@@ -1352,7 +1365,8 @@ static int decodeRequest(LSBReceivedMessage *message) {
             if (xpc_dictionary_get_count(request) != 5 || !signedValue(request, "process-group", &group) || group <= 0 || group > INT_MAX) error = EPROTO;
             else message->processGroup = (pid_t)group;
         } else if (!error && xpc_dictionary_get_value(request, "process-group")) error = EPROTO;
-        bool forkRequest = kind == LSB_REQUEST_FORK_OFFER || kind == LSB_REQUEST_FORK_ACCEPT;
+        bool forkOffer = kind == LSB_REQUEST_FORK_OFFER || kind == LSB_REQUEST_FORK_OFFER_SOCKET;
+        bool forkRequest = forkOffer || kind == LSB_REQUEST_FORK_ACCEPT;
         if (!error && (forkRequest || kind == LSB_REQUEST_RESOLVE_AUDIT_PID || kind == LSB_REQUEST_COPY_ENTITLEMENTS)) {
             xpc_object_t target = xpc_dictionary_get_value(request, "target-audit");
             if (!target || xpc_get_type(target) != XPC_TYPE_DATA || xpc_data_get_length(target) != sizeof(message->targetAudit) ||
@@ -1362,10 +1376,10 @@ static int decodeRequest(LSBReceivedMessage *message) {
                 if (!message->targetAudit.val[5] || message->targetAudit.val[5] > INT_MAX || (forkRequest && !message->targetAudit.val[7])) error = EPROTO;
             }
         } else if (!error && xpc_dictionary_get_value(request, "target-audit")) error = EPROTO;
-        if (!error && forkRequest && (!message->replyConnection || xpc_dictionary_get_count(request) != (kind == LSB_REQUEST_FORK_OFFER ? 6u : 5u)))
+        if (!error && forkRequest && (!message->replyConnection || xpc_dictionary_get_count(request) != (forkOffer ? 6u : 5u)))
             error = EPROTO;
         xpc_object_t ranges = xpc_dictionary_get_value(request, "fork-ranges");
-        if (!error && kind == LSB_REQUEST_FORK_OFFER) {
+        if (!error && forkOffer) {
             size_t length = ranges && xpc_get_type(ranges) == XPC_TYPE_DATA ? xpc_data_get_length(ranges) : 0;
             if (!length || length > sizeof(message->forkRanges) || length % sizeof(*message->forkRanges)) error = EPROTO;
             else {

@@ -21,7 +21,7 @@ static int addBashCloseBitmap(TrialPlan *plan, TrialOffer *offer, uintptr_t addr
     if (fds.size < 0 || fds.size > LSB_MAX_FDS) return ENOTSUP;
     if (!fds.size) return 0;
     uint8_t flags[LSB_MAX_FDS];
-    if ((error = addBashBytes(plan, fds.bitmap, (size_t)fds.size, page))) return error;
+    if ((error = addForkBytes(plan, fds.bitmap, (size_t)fds.size, page))) return error;
     if (!forkTrialRead(fds.bitmap, flags, (size_t)fds.size)) return EFAULT;
     for (int fd = 0; fd < fds.size; ++fd) if (flags[fd] && (error = preserveBashPipeFD(offer, fd))) return error;
     return 0;
@@ -46,7 +46,7 @@ static int addBashSimpleCommand(TrialPlan *plan, uintptr_t image, uintptr_t simp
         BashWordDescription desc;
         if ((error = addBashObject(plan, word, &list, sizeof(list), page)) ||
             (error = addBashObject(plan, list.description, &desc, sizeof(desc), page)) ||
-            (error = addBashString(plan, desc.string, &budget, page))) return error;
+            (error = addForkString(plan, desc.string, &budget, page))) return error;
         if (unsupportedBashSubstitution((const char *)desc.string)) return ENOTSUP;
         word = list.next;
     }

@@ -98,6 +98,11 @@ uint64_t uleb(View data, size_t &cursor) {
 void appendUleb(std::vector<uint8_t> &bytes, uint64_t value) {
     do { uint8_t byte = value & 127; value >>= 7; bytes.push_back(byte | (value ? 128 : 0)); } while (value);
 }
+size_t ulebSize(uint64_t value) {
+    size_t size = 1;
+    while (value >= 128) { value >>= 7; ++size; }
+    return size;
+}
 struct Edge { std::string name; size_t child; };
 struct Node { std::vector<uint8_t> terminal; std::vector<Edge> edges; size_t offset = 0; };
 struct Export { uint64_t originalOffset, target; };
@@ -131,24 +136,30 @@ struct Trie {
         }
         return index;
     }
-    std::vector<uint8_t> encodeNode(const Node &node) const {
-        std::vector<uint8_t> bytes; appendUleb(bytes, node.terminal.size());
+    size_t encodedSize(const Node &node) const {
+        size_t size = ulebSize(node.terminal.size()) + node.terminal.size() + 1;
+        for (const auto &edge : node.edges) size += edge.name.size() + 1 + ulebSize(nodes[edge.child].offset);
+        return size;
+    }
+    void appendNode(std::vector<uint8_t> &bytes, const Node &node) const {
+        appendUleb(bytes, node.terminal.size());
         bytes.insert(bytes.end(), node.terminal.begin(), node.terminal.end()); bytes.push_back(uint8_t(node.edges.size()));
         for (const auto &edge : node.edges) {
             bytes.insert(bytes.end(), edge.name.begin(), edge.name.end()); bytes.push_back(0); appendUleb(bytes, nodes[edge.child].offset);
         }
-        return bytes;
     }
     std::vector<uint8_t> encode(size_t capacity) {
         for (unsigned iteration = 0; iteration < 32; ++iteration) {
             bool changed = false; size_t cursor = 0;
             for (auto &node : nodes) {
-                changed |= node.offset != cursor; node.offset = cursor; cursor += encodeNode(node).size();
+                changed |= node.offset != cursor; node.offset = cursor;
+                size_t size = encodedSize(node);
+                require(size <= capacity - cursor, "Native export trie exceeds its reserved LINKEDIT capacity");
+                cursor += size;
             }
-            require(cursor <= capacity, "Native export trie exceeds its reserved LINKEDIT capacity");
             if (!changed) {
                 std::vector<uint8_t> result; result.reserve(capacity);
-                for (const auto &node : nodes) { auto bytes = encodeNode(node); result.insert(result.end(), bytes.begin(), bytes.end()); }
+                for (const auto &node : nodes) appendNode(result, node);
                 result.resize(capacity, 0); return result;
             }
         }
@@ -329,10 +340,14 @@ extern "C" int LSBApplyNativeSupportInterposing(const mach_header *image, const 
                 if (section.size % 16 || section.addr < segment->vmaddr || !contains(segment->vmsize, section.addr - segment->vmaddr, section.size))
                     return EINVAL;
                 const auto *tuples = reinterpret_cast<const uintptr_t *>(section.addr + slide);
+                Pointer *pointers = state.pointers.data();
+                size_t pointerCount = state.pointers.size();
                 for (size_t ti = 0; ti < section.size / 16; ++ti) {
                     uintptr_t replacement = tuples[ti * 2], replacee = tuples[ti * 2 + 1];
                     if (!replacement || !replacee || replacement == replacee) continue;
-                    for (auto &pointer : state.pointers) {
+                    // This scan runs once per tuple over all cache references, including in unoptimized device builds.
+                    for (size_t i = 0; i < pointerCount; ++i) {
+                        Pointer &pointer = pointers[i];
                         if (pointer.target != replacee) continue;
                         if (replacement > UINTPTR_MAX - pointer.addend) return EINVAL;
                         if (!writable) {

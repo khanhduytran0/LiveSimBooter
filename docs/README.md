@@ -23,8 +23,8 @@ The user verified **Home Screen → Edit → Edit Wallpaper** and color/gradient
 renders now; the lock-screen long-press picker and Customize editor work with the scoped scene-presentation helper on iPhone 15 and iPhone 17.
 Direct PosterBoard activation still has a malformed layout, and the older Home Screen editor's clipped Done button remains deferred;
 see [current wallpaper status](springboard-services.md#current-wallpaper-status).
-The guest supports direct Mach-O image replacement. General fork and complete job control remain unsupported, and the observed
-Spotlight last-character crash is deferred.
+The guest supports direct Mach-O image replacement and a [fork path for Procursus packages](procursus.md#experimental-allocator-and-libc-checkpoint).
+Fork and job control still have limits. The observed Spotlight last-character crash is deferred.
 Historical sections below describe earlier cache layouts and failures; use the setup guide for current preparation commands.
 
 - [Architecture](architecture.md): current process boundaries, launch roles, runtime compatibility, and pinned implementation references.

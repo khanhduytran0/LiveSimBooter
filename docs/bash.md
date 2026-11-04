@@ -1,11 +1,63 @@
 # Bash baseline and remaining process support
 
+## Procursus Bash 5.2.21
+
+With the [matched fork trial shim and observer](#running-the-stock-bash-snapshot-trial) installed, type `bash` in the Fish tab.
+Fish finds the [Procursus bootstrap's](procursus.md) `usr/bin/bash`. The trial recognizes its arm64 executable by UUID
+(`0579980b-285b-3e49-a3b1-ff5ea2099c97`) and enables the fork handler automatically on the simulator PTY.
+For a noninteractive launchd job, set `LSB_FORK_SNAPSHOT_PROBE=early` and invoke that executable explicitly.
+
+On iPhone 15 (host 23B50, guest 23A343, cache UUID `9a2fb463-a774-53ed-a661-ff3f3fcac717` at `0x480000000`),
+plain `bash` entered an interactive shell. Its parent collected 0 from `df -P .`, 1 from `df` on a missing path, and 37 from
+`(exit 37)`. Exiting Bash returned to the original Fish process. Noninteractive runs observed the same statuses for both the
+Procursus executable and the pinned Bash 3.2.57 below.
+
+On iPhone 17 (host 24A435, guest 23A343, the same cache at `0x7180000000`), the launchd-owned Fish also started
+Procursus Bash without setting a probe variable. Bash returned the same three statuses and exited back to the original Fish.
+Both Bash versions returned 0, 1 and 37 in separate noninteractive runs.
+
+A fresh copy from the 1900 archive also passed. Its original SHA-256 was
+`1f2c34b9231756f65b118f4b023bf95193e2c336b3290c3b3d0c57937baa495f`. With Lazy sign enabled, registration replaced
+only the code signature. All 770,304 bytes preceding `LC_CODE_SIGNATURE`'s payload matched the archive after execution.
+
+An external command usually starts two native LiveProcesses. The first returns from Bash's simulated `fork()` on
+the copied stack. When it calls `execve()`, the broker launches the command in a replacement and preserves the
+logical PID. An address collision can require another fork observer before the command starts.
+
+Before optimizing native library binding on iPhone 17, five runs of `df -P .` with output redirected in an
+already-running shell and no terminal took a median of 232 ms in Bash and 104 ms in Fish. RunningBoard recorded two extension launch requests for each Bash run.
+The median interval between requests was 124 ms, followed by 105 ms until Bash collected the status.
+Fish uses one `posix_spawn()`. A Bash loop of 1,000 `:` builtins took 1.38 ms.
+An earlier interactive `df` trace on the same phone recorded three rejected observers, then one
+successful fork and exec. The interval from the first rejection to command exit was 446 ms.
+
+With size optimization limited to the binding code in Debug, the loader calculates export offsets without
+constructing temporary buffers and writes the final trie once. With these changes and the early stack check below,
+the same five-run test took 171 ms in Bash and 76 ms in Fish. In an independent warm test on the same phone and cache, binding preparation fell from 27.95 to
+7.06 ms of thread CPU per launch, and interposition replay from 4.94 to 0.76 ms.
+
+In a ten-command run on the iPhone 17 package fork path, all five rejected observers had a collision in the
+parent's 8 MiB main-stack range. The first occupied page was 7.98 MiB below the saved stack pointer in four
+cases, and 5.62 MiB below it in the fifth. The receipt records the start of each overlap. The general fork path
+preserves the full inheritable mapping so the child can use saved pointers and grow its stack.
+For this path, the donor now sends its required stack bounds to each prospective child. Before starting guest dyld,
+the native observer can reject a range below its VM floor or overlapping its live main stack. An acknowledged rejection
+uses one of the existing four attempts and leaves no guest PID to reap. A candidate that passes still undergoes
+the full mapping checks. On iPhone 17, a diagnostic exercised both early rejection reasons. Each returned
+`EADDRINUSE`, a subsequent `waitpid(-1, …, WNOHANG)` reported `ECHILD`, and the caller received no `SIGCHLD`.
+An APT terminal run then rejected two candidates early and used the third. The shorter guarded stack used by
+the pinned Bash continuation is described below.
+
+The 5.2 handler recognizes standalone foreground external commands and a literal `(exit N)` group with no active shell functions.
+Pipelines, background jobs, command substitution, redirection and custom traps are outside this profile. The broader Bash 3.2
+job-control tests below apply to that executable only.
+
 ## Interactive Bash on the fake PTY
 
 Build and install the [matched trial shim and observer](#running-the-stock-bash-snapshot-trial). Start the simulator and run this command in the Fish tab.
 
 ```fish
-LSB_FORK_SNAPSHOT_PROBE=early bash --noprofile --norc -i
+LSB_FORK_SNAPSHOT_PROBE=early "$DYLD_ROOT_PATH/usr/local/bin/bash" --noprofile --norc -i
 ```
 
 The launchd-owned Fish starts Bash on its existing terminal. Bash enables monitor mode, moves its controlling terminal to a
@@ -469,12 +521,14 @@ policy. It does not inspect the source and select the appropriate copy behavior.
 running on a separate child bootstrap stack and abort on collisions with native mappings. Publish the new guest PID only
 after the child is ready, and unwind its partial maps and job on failure.
 
-There is a specific obstacle to returning on the cloned stack with the current native-support cache. In both native
+Returning on the cloned stack also requires child-owned pthread state. In both native
 23B50 and 24A435, pthread's prepare hook saves the calling pthread pointer in a **native** alloc-once entry. The child
 hook reads that entry before reinitializing pthread. The fresh extension has its own native table, and the bridge gives
 guest callers a separate one. Copying guest heap and stack pages therefore misses state required by the very first
 child hooks. Even a guest whose application has one thread has a shim-owned Mach worker. Fork needs a consistent snapshot
-while those workers are quiescent and fresh child-owned broker, ledger and exception state before resuming them.
+while those workers are quiescent and fresh child-owned broker and ledger state before resuming the application.
+The [iPhone 15 allocator and libc checkpoint](procursus.md#experimental-allocator-and-libc-checkpoint) ran both an
+independent fork/exec fixture and stock APT using a single-threaded observer with its own native pthread.
 Preserve FD numbers and shared open-file descriptions, including `FD_CLOEXEC` descriptors until exec. Guest launchd's
 bootstrap/registered ports need explicit handling as well. An ordinary Darwin fork already gives its child a new Mach
 namespace with selected ports inherited. Replaying an entire parent's Mach name table is neither the kernel contract nor
@@ -490,8 +544,8 @@ describe these kernel-owned steps.
 
 Transport v10 lets a parent offer an explicit list of ranges to one direct child. The child accepts once. The native
 broker authenticates both guest connections and full audit tokens, suspends both tasks while taking the snapshot,
-and reads each range's inheritance and protections from the kernel. Each offered range must fit within one source VM leaf.
-An offer supports up to 64 ranges and 64 MiB total. Neither guest needs a task port for the other.
+and reads each range's inheritance and protections from the kernel. The current broker walks each source VM leaf
+within a range separately. An offer supports up to 64 ranges and 128 MiB total. Neither guest needs a task port for the other.
 
 Private pages are copied on write, shared pages stay shared, and a source range with `VM_INHERIT_NONE` leaves the
 destination alone. The broker rejects required collisions before starting any remaps. A child must exit if installation

@@ -40,9 +40,24 @@ struct InterposerImage {
     }
     const mach_header *mh() const { return reinterpret_cast<const mach_header *>(&header); }
 };
+
+void testGrowingChildOffset() {
+    // A one-byte child offset would put the child at 128. Encoding that offset takes two bytes and moves the child to 129.
+    std::vector<uint8_t> original = {0, 1};
+    original.insert(original.end(), 124, 'a');
+    original.insert(original.end(), {0, 0x81, 0x01, 0, 0});
+    Trie trie{View{original.data(), original.size()}, "test", RTLD_DEFAULT, nullptr, {}, {}, {}};
+    trie.parse(0, "", 0);
+    assert(trie.encode(original.size()) == original);
+    auto padded = trie.encode(original.size() + 19);
+    assert(std::equal(original.begin(), original.end(), padded.begin()));
+    assert(std::all_of(padded.begin() + original.size(), padded.end(), [](uint8_t byte) { return byte == 0; }));
+    try { trie.encode(original.size() - 1); assert(false); } catch (const std::runtime_error &) {}
+}
 }
 
 int main() {
+    testGrowingChildOffset();
     // Existing compressed edges survive rebuilding. A missing native symbol becomes an absent terminal, not an absolute zero success.
     std::vector<uint8_t> input = {0, 1, '_', 't', 'e', 's', 't', 0, 9, 3, 0, 0x80, 1, 0};
     Trie trie{View{input.data(), input.size()}, "test", RTLD_DEFAULT, overrideTest, {}, {}, {}};
@@ -59,6 +74,9 @@ int main() {
     assert(rejected);
     {
         Fixture fixture;
+        const uint64_t tag = UINT64_C(0x8000000000000000);
+        uint64_t *alias = fixture.cell() + 1;
+        state.pointers.push_back(Pointer{reinterpret_cast<uintptr_t>(alias), 0, tag | 0x123c, 0x1234, 8, tag});
         assert(LSBApplyNativeSupportBindings(&operations) == 0);
         assert(*fixture.cell() == 0x1234 && fixture.memory[0] == 0x2a);
         assert(LSBApplyNativeSupportBindings(&operations) == EINVAL);
@@ -66,6 +84,7 @@ int main() {
         assert(LSBApplyNativeSupportInterposing(first.mh(), &operations) == 0 && *fixture.cell() == 0x5678);
         assert(LSBApplyNativeSupportInterposing(second.mh(), &operations) == 0 && *fixture.cell() == 0x5678);
         assert(LSBApplyNativeSupportInterposing(chained.mh(), &operations) == 0 && *fixture.cell() == 0xaaaa);
+        assert(*alias == (tag | 0xaab2));
         first.section.size = 15;
         assert(LSBApplyNativeSupportInterposing(first.mh(), &operations) == EINVAL);
     }

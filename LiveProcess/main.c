@@ -7,6 +7,10 @@
 #include "LazySignatureClient.h"
 #include "ExecutablePath.h"
 #include "../ProcessSupport/ForkImageGuard.h"
+#include "../ProcessSupport/ForkLayout.h"
+#include "../ProcessSupport/ForkPolicy.h"
+#include "../ProcessSupport/ForkDescriptorSlots.h"
+#include "../ProcessSupport/ForkStackHint.h"
 #include "ProcessDisplayName.h"
 #include "NativeRuntimePolicy.h"
 #include "InsertedLibraries.h"
@@ -203,7 +207,19 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     size_t rootLength = strlen(launch.runtimeRoot);
     bool forkBootstrap = !error && launch.nativeSupport && !strncmp(executablePath, launch.runtimeRoot, rootLength) &&
                          !strcmp(executablePath + rootLength, LSB_FORK_BOOTSTRAP_EXECUTABLE);
-    if (forkBootstrap) {
+    if (!error && launch.nativeSupport && !forkBootstrap &&
+        LSBUseForkDonorLayout(launch.runtimeRoot, executablePath, LSBRuntimeEnvironmentValue(policyEnvironment, LSB_FORK_MODE_ENV)))
+        LSBPreferForkDonorLayout();
+    int forkAnchor = -1;
+    char anchorEntry[64];
+    if (forkBootstrap && launch.plan.argc == 3 && !strcmp(launch.plan.strings + launch.plan.argv[2], LSB_FORK_RECEIVE_ARG)) {
+        struct stat identity;
+        const char *hint = LSBRuntimeEnvironmentValue(policyEnvironment, LSB_FORK_STACK_HINT_ENV);
+        error = LSBForkNotifyStackCollision(&launch.plan, hint) ? EADDRINUSE : LSBForkReserveDescriptorSlots(&forkAnchor, &identity);
+        if (!error) snprintf(anchorEntry, sizeof(anchorEntry), LSB_FORK_ANCHOR_ENV "=%d/%x/%llx", forkAnchor, (unsigned)identity.st_dev,
+                             (unsigned long long)identity.st_ino);
+    }
+    if (!error && forkBootstrap) {
         error = LSBReserveForkImageGuard(launch.simulatorCacheBase);
         if (error) snprintf(detail, sizeof(detail), "Cannot reserve the inherited guest executable's slot");
     }
@@ -239,7 +255,7 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
     snprintf(wakeEnvironment, sizeof(wakeEnvironment), LSB_CHILD_WAKE_FD_ENV "=%d", launch.wakeFD);
     snprintf(guestPIDEnvironment, sizeof(guestPIDEnvironment), "LSB_GUEST_PID=%d", launch.guestPID);
     snprintf(parentPIDEnvironment, sizeof(parentPIDEnvironment), "LSB_GUEST_PPID=%d", launch.parentPID);
-    const char *arguments[LSB_MAX_VECTOR + 1], *environment[LSB_MAX_VECTOR + 18];
+    const char *arguments[LSB_MAX_VECTOR + 1], *environment[LSB_MAX_VECTOR + 19];
     LSBApplicationEnvironment applicationEnvironment = {0};
     unsigned count = 0;
     int stopBeforeHandoff = 0;
@@ -256,7 +272,8 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
                 stopBeforeHandoff = !strcmp(entry + debugPrefixLength, "1");
                 continue;
             }
-            if (strncmp(entry, "DYLD_INSERT_LIBRARIES=", 22) && strncmp(entry, "LSB_BROKER_PORT=", 16) &&
+            if (strncmp(entry, LSB_FORK_ANCHOR_ENV "=", sizeof(LSB_FORK_ANCHOR_ENV)) && strncmp(entry, LSB_FORK_STACK_HINT_ENV "=", sizeof(LSB_FORK_STACK_HINT_ENV)) &&
+                strncmp(entry, "DYLD_INSERT_LIBRARIES=", 22) && strncmp(entry, "LSB_BROKER_PORT=", 16) &&
                 strncmp(entry, "RB_USE_BINARY_ARCHIVE=", sizeof("RB_USE_BINARY_ARCHIVE=") - 1) &&
                 strncmp(entry, "LSB_SIMULATE_FRAMEWORK_BUNDLES=", sizeof("LSB_SIMULATE_FRAMEWORK_BUNDLES=") - 1) &&
                 strncmp(entry, "LSB_REGISTER_METAL_COMPILER=", sizeof("LSB_REGISTER_METAL_COMPILER=") - 1) &&
@@ -280,6 +297,7 @@ int NSExtensionMain(int argc, const char *argv[], const char *envp[], const char
         environment[count++] = capabilitiesEnvironment;
         environment[count++] = insertLibrary;
         environment[count++] = brokerEnvironment;
+        if (forkAnchor >= 0) environment[count++] = anchorEntry;
         environment[count++] = statusEnvironment;
         environment[count++] = wakeEnvironment;
         environment[count++] = workqueueStartEnvironment;

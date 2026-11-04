@@ -27,10 +27,10 @@ enum LSBRequestKind {
     LSB_REQUEST_REGISTER_DEBUGGER_PORT = 12, LSB_REQUEST_COPY_DEBUGGER_INFO = 13, LSB_REQUEST_COPY_PROCESS_TASK = 14,
     LSB_REQUEST_OPEN_AUDIO_OUTPUT = 15, LSB_REQUEST_CLOSE_AUDIO_OUTPUT = 16, LSB_REQUEST_FORK_OFFER = 17, LSB_REQUEST_FORK_ACCEPT = 18,
     LSB_REQUEST_SET_PROCESS_GROUP = 19, LSB_REQUEST_DRAIN_TERMINAL = 20, LSB_REQUEST_SET_FOREGROUND_GROUP = 21,
-    LSB_REQUEST_CHECK_TERMINAL_IO = 22
+    LSB_REQUEST_CHECK_TERMINAL_IO = 22, LSB_REQUEST_FORK_OFFER_SOCKET = 23
 };
 typedef enum { LSB_TERMINAL_READ = 1, LSB_TERMINAL_WRITE, LSB_TERMINAL_CONTROL } LSBTerminalAccess;
-enum { LSB_MAX_FORK_RANGES = 64, LSB_MAX_FORK_BYTES = 64 * 1024 * 1024 };
+enum { LSB_MAX_FORK_RANGES = 64, LSB_MAX_FORK_BYTES = 128 * 1024 * 1024 };
 typedef struct { uint64_t start, size; } LSBForkWireRange;
 #ifdef __cplusplus
 static_assert(sizeof(LSBForkWireRange) == 16, "fork range wire layout");
@@ -125,6 +125,7 @@ int LSBTransportDrainTerminal(void);
 // Carries no payload or rights. Returns an errno value; success means broker acceptance, not completion of the replacement boot.
 int LSBTransportRebootUserspace(void);
 // Cooperative fork mapping. Each peer names the other's full native audit identity. Offers carry only address intervals.
+__attribute__((visibility("default"))) int LSBTransportOfferForkSocket(const audit_token_t *child, const LSBForkWireRange *ranges, size_t count, audit_token_t *broker);
 __attribute__((visibility("default"))) int LSBTransportOfferFork(const audit_token_t *child, const LSBForkWireRange *ranges, size_t count);
 __attribute__((visibility("default"))) int LSBTransportAcceptFork(const audit_token_t *parent);
 // One fixed-format PCM ring per authenticated guest. Success owns a mapping; close first, then munmap using returned size.

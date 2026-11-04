@@ -1,5 +1,6 @@
 #include "../LiveProcess/ExecutablePath.h"
 #include "../ProcessSupport/GuestExecutablePath.h"
+#include "../ProcessSupport/ForkPolicy.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -112,6 +113,15 @@ static void testDataExecutables(const char *base, const char *root) {
 }
 
 int main(void) {
+    const char *runtime = "/private/var/group/LSB/iOS/23A343/RuntimeRoot";
+    const char *package = "/var/group/LSB/iOS/23A343/data/var/jb/usr/bin/example";
+    assert(LSBUseForkDonorLayout(runtime, package, NULL));
+    assert(!LSBUseForkDonorLayout(runtime, package, "0"));
+    assert(!LSBUseForkDonorLayout(runtime, package, "early"));
+    assert(!LSBUseForkDonorLayout(runtime, "/var/jb/usr/bin/example", NULL));
+    assert(!LSBUseForkDonorLayout(runtime, "/private/var/group/LSB/iOS/23A343/data/var/jb-other/example", NULL));
+    assert(!LSBUseForkDonorLayout(runtime, "/private/var/group/LSB/iOS/23A343/RuntimeRoot/bin/example", NULL));
+    assert(LSBUseForkDonorLayout(runtime, "/private/var/group/LSB/iOS/23A343/RuntimeRoot/bin/example", "resume"));
     char temporary[] = "/tmp/LiveSimBooter-executable-path.XXXXXX", base[PATH_MAX];
     assert(mkdtemp(temporary) && realpath(temporary, base));
     char root[PATH_MAX], bin[PATH_MAX], executable[PATH_MAX], alias[PATH_MAX], aliasedExecutable[PATH_MAX];

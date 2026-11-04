@@ -5,21 +5,32 @@ test_directory=$(mktemp -d /tmp/LiveSimBooter-tests.XXXXXX)
 trap 'rm -rf "$test_directory"' EXIT HUP INT TERM
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 Tests/ForkHook.c -o "$test_directory/ForkHook"
 "$test_directory/ForkHook"
+sh Tests/GenericForkBuild.sh macosx "$test_directory/generic-fork"
+"$test_directory/generic-fork/fork-fixture"
+"$test_directory/generic-fork/fork-fixture" --vfork
+"$test_directory/generic-fork/fork-resolver" "$(id -un)"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ForkMapPlan.c ProcessSupport/ForkMapPlan.c -o "$test_directory/ForkMapPlan"
 "$test_directory/ForkMapPlan"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ForkSnapshotBroker.c Host/ForkSnapshotBroker.c -o "$test_directory/ForkSnapshotBroker"
 "$test_directory/ForkSnapshotBroker"
-for test_name in ForkBashCommand ForkBashRedirect ForkBashTraps ForkBashEarlyHeap ForkBashPipeline ForkBashSubshell ForkBashSubstitution; do
-    xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -Wl,-dead_strip "Tests/${test_name}Tests.c" -o "$test_directory/$test_name"
+for test_name in ForkBashCommand ForkBashRedirect ForkBashTraps ForkBashEarlyHeap ForkBashPipeline ForkBashSubshell ForkBashSubstitution ForkProcursusBashCommand; do
+    xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -Wl,-dead_strip "Tests/${test_name}Tests.c" Guest/RuntimeDirectories.c -o "$test_directory/$test_name"
     "$test_directory/$test_name"
 done
-for test_name in HostStartupPolicy UserspaceReboot NativeRuntimePolicy NativeCacheLayout SlidableCache GuestImagePlacement ForkImageGuard ForkStackPreflight \
-                 InsertedLibraries; do
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 Tests/ForkAllocatorTests.c -o "$test_directory/ForkAllocator"
+"$test_directory/ForkAllocator"
+for test_name in HostStartupPolicy UserspaceReboot NativeRuntimePolicy NativeCacheLayout SlidableCache GuestImagePlacement ForkImageGuard \
+                 ForkLayout ForkStackHint ForkRendezvous ForkLibcCheckpoint ForkPthreadRegistry ForkPthreadCache ForkDescriptor InsertedLibraries; do
     xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 "Tests/${test_name}Tests.c" -o "$test_directory/$test_name"
     "$test_directory/$test_name"
 done
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_GUEST_RUNTIME -DLSB_CHILD_WAIT_TESTING \
+    Tests/ForkSignalStateTests.c Guest/ChildWait.c ProcessSupport/ChildStatus.c -o "$test_directory/ForkSignalState"
+"$test_directory/ForkSignalState"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 Tests/ForkStackPreflightTests.c Guest/ForkContext_arm64.S -o "$test_directory/ForkStackPreflight"
+"$test_directory/ForkStackPreflight"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/AudioOutputRingTests.c ProcessSupport/AudioOutput.c -o "$test_directory/AudioOutputRing"
 "$test_directory/AudioOutputRing"
@@ -219,6 +230,9 @@ xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/ExecutableAccessTests.c -o "$test_directory/ExecutableAccess"
 "$test_directory/ExecutableAccess"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
+    Tests/ProcursusLaunchctlTests.c ProcessSupport/SpawnPlan.c -o "$test_directory/ProcursusLaunchctl"
+"$test_directory/ProcursusLaunchctl"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 \
     Tests/MetalCompilerRegistrationTests.c -framework CoreFoundation -o "$test_directory/MetalCompilerRegistration"
 "$test_directory/MetalCompilerRegistration"

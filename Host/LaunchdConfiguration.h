@@ -14,6 +14,8 @@ void LSBLaunchdConfigurationSetNativeSupport(bool enabled);
 // Creates only owned data paths beside RuntimeRoot within its build directory, regenerating its bootstrap plist and appending to its regular log file.
 // The caller supplies signal masks after success and owns the returned FDs. No terminal is attached.
 int LSBPrepareLaunchdPlan(LSBReceivedMessage *message, const char *runtimeRoot, const char *const inheritedEnv[]);
+// Launchd-owned Fish and the guest launchctl worker for command-line sessions.
+int LSBPrepareLaunchdCLIPlan(LSBReceivedMessage *message, const char *runtimeRoot, const char *const inheritedEnv[]);
 
 // Opt-in launchd probe: the bootstrap loads one generated RunAtLoad df job from an otherwise empty owned directory.
 // The executable path is absolute inside RuntimeRoot; this does not provide a chroot or load any runtime LaunchDaemons.

@@ -12,6 +12,7 @@
 #include "../Shared/Fork/ForkBashState.h"
 #include "../Shared/Fork/ForkBashEarlyHeap.h"
 #include "ChildWait.h"
+#include "SpawnShim.h"
 #include "../Shared/Fork/ForkContext.h"
 #include "ProcessIdentity.h"
 #include "RuntimeDirectories.h"
@@ -34,7 +35,6 @@
 #include <uuid/uuid.h>
 
 extern uintptr_t __stack_chk_guard;
-extern int LSBPosixSpawn(pid_t *, const char *, const posix_spawn_file_actions_t *, const posix_spawnattr_t *, char *const [], char *const []);
 
 static const char option[] = LSB_FORK_MODE_ENV;
 static const char helper[] = LSB_FORK_BOOTSTRAP_EXECUTABLE;

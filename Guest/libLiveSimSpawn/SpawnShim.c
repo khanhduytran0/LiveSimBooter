@@ -1,4 +1,5 @@
 #include "SpawnDiagnostics.h"
+#include "SpawnShim.h"
 #include "../../ProcessSupport/SpawnTransport.h"
 #include "../../ProcessSupport/OpenFDs.h"
 #include "ChildWait.h"
@@ -393,20 +394,22 @@ int LSBPosixSpawnP(pid_t *pid, const char *file, const posix_spawn_file_actions_
     return result;
 }
 
+int LSBResolveExecutableForSpawn(const char *path, char executable[PATH_MAX]) {
+    const LSBGuestRuntimeDirectories *directories;
+    int error = LSBGetRuntimeDirectories(&directories);
+    if (!error) error = LSBResolveGuestExecutable(directories->runtime, path, executable);
+    if (!error && LSBFAccessAt(AT_FDCWD, executable, X_OK, AT_EACCESS)) error = errno;
+    return error;
+}
+
 static int LSBExecve(const char *path, char *const argv[], char *const envp[]) {
     if (!path) { errno = EFAULT; return -1; }
     if (!path[0]) { errno = ENOENT; return -1; }
     // The guest launch ABI needs argv[0]. Darwin accepts a null envp as an empty environment.
     if (!argv || !argv[0]) { SPAWN_TRACE("[spawn-trace] execve missing argv0 path=%.1024s\n", path); errno = EINVAL; return -1; }
     char executable[PATH_MAX];
-    const LSBGuestRuntimeDirectories *directories;
-    int error = LSBGetRuntimeDirectories(&directories);
-    if (!error) error = LSBResolveGuestExecutable(directories->runtime, path, executable);
-    if (error) SPAWN_TRACE("[spawn-trace] execve resolve error=%d path=%.1024s\n", error, path);
-    if (!error && LSBFAccessAt(AT_FDCWD, executable, X_OK, AT_EACCESS)) {
-        error = errno;
-        SPAWN_TRACE("[spawn-trace] execve access error=%d path=%.1024s\n", error, executable);
-    }
+    int error = LSBResolveExecutableForSpawn(path, executable);
+    if (error) SPAWN_TRACE("[spawn-trace] execve preflight error=%d path=%.1024s\n", error, path);
     char *const emptyEnvironment[] = {NULL};
     if (!error) error = spawnOne(NULL, executable, NULL, NULL, argv, envp ? envp : emptyEnvironment, true);
     // A successful replacement never returns. The original process is still usable after a rejected request.

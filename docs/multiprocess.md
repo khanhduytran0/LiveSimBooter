@@ -379,6 +379,21 @@ The broker assigns logical parent and child PIDs to the extension processes it l
 also have logical sessions and process groups. The opt-in Bash fork trial supports the pinned shell and fork sites.
 [Bash instructions and limits](bash.md)
 
+## Shell commands
+
+Guest apps that import `system` or `system$NOCANCEL` from libSystem can run shell commands through the spawn broker. Both
+entry points normally abort in 23A343. The shim looks for an executable `/bin/sh` in RuntimeRoot first. The stock runtime
+omits it, so install the [Procursus bootstrap](procursus.md) to provide the guest fallback `/var/jb/bin/sh`.
+`system(NULL)` checks availability without starting a process. Commands inherit the caller's environment, working directory
+and open descriptors, and return the shell's wait status. An unavailable interpreter gives exit status 127. A child-creation
+or wait failure returns `-1` with errno. Procursus programs importing `ie_system` still use their own implementation.
+[Procursus libiosexec source](https://github.com/ProcursusTeam/libiosexec/blob/main/system.c)
+
+On iPhone 17 (host 24A435, guest 23A343), Fish ran a libSystem-only iPhoneOS executable from a disposable guest app bundle
+without a debugger. Its shell printed the expected output, ran the runtime's `df`, reported exit 37 and command-not-found
+127, and returned SIGTERM as a signal. A simulator executable and the `system$NOCANCEL` and `ie_system` controls produced the same results.
+[Device probe source](../Tests/Guest/system-probe/SystemProbe.c)
+
 ## Executable access checks
 
 [ExecutableAccess.c](../Guest/libLiveSimSpawn/ExecutableAccess.c) interposes `access` and `faccessat` for the guest's executable preflight.

@@ -15,7 +15,7 @@ xcrun --sdk iphonesimulator clang -arch arm64 -target arm64-apple-ios14.0-simula
     -dynamiclib -fblocks -fvisibility=hidden -DLSB_GUEST_RUNTIME $trace_flags $fork_trial \
     -install_name /usr/lib/libLiveSimSpawn.dylib -Wl,-not_for_dyld_shared_cache -Wl,-U,_BSSelfTaskHasEntitlement \
     "$spawn/BrokerConnection.c" "$spawn/SpawnShim.c" "$spawn/SpawnAttributes.c" "$spawn/CreationMask.c" "$spawn/ExecutableAccess.c" \
-    "$spawn/RuntimeDirectories.c" "$spawn/ChildWait.c" "$spawn/ChildKill.c" "$spawn/TerminalStopWitness.c" \
+    "$spawn/RuntimeDirectories.c" "$spawn/ChildWait.c" "$spawn/ChildKill.c" "$spawn/System.c" "$spawn/TerminalStopWitness.c" \
     "$spawn/ProcessIdentity.c" "$spawn/ProcessEvents.c" "$spawn/ProcessSession.c" "$spawn/FakePTY.c" "$spawn/FileLockCompatibility.c" \
     "$spawn/ForkHook.c" "$spawn/ForkHook_arm64.S" Guest/Shared/Fork/ForkContext_arm64.S \
     "$spawn/ThreadBootstrap.c" "$spawn/MetalCompilerRegistration.c" \

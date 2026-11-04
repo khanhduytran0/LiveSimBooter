@@ -528,3 +528,6 @@ xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
 xcrun --sdk macosx clang -fobjc-arc -fblocks -Wall -Wextra -Werror -arch arm64 \
     Tests/RunningBoardMonitorTests.m -framework Foundation -o "$test_directory/RunningBoardMonitor"
 "$test_directory/RunningBoardMonitor"
+xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror -arch arm64 -DLSB_SYSTEM_TESTING \
+    Tests/GuestSystemTests.c Guest/libLiveSimSpawn/System.c -o "$test_directory/GuestSystem"
+"$test_directory/GuestSystem"
